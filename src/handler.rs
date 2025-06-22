@@ -1,4 +1,4 @@
-use crate::downloader::{Downloader, DownloadError};
+use crate::downloader::Downloader;
 use crate::telegram_api::TelegramApi;
 use teloxide::types::{ChatId, MessageId};
 
@@ -30,11 +30,10 @@ pub async fn message_handler(
     }
 }
 
-// In Rust, it is idiomatic to co-locate unit tests with the code they are testing.
 #[cfg(test)]
 mod tests {
     use super::*; // Import things from the parent module (handler)
-    use crate::downloader::MockDownloader; // We can use crate:: since we're in the same crate
+    use crate::downloader::{MockDownloader, DownloadError}; 
     use crate::telegram_api::MockTelegramApi;
     use mockall::predicate::*;
 
@@ -66,7 +65,7 @@ mod tests {
         mock_downloader.expect_download_media()
             .with(eq(test_url))
             .times(1)
-            .returning(|_| Err(DownloadError::CommandFailed));
+            .returning(|_| Err(DownloadError::CommandFailed("couldn't download media".to_string())));
 
         mock_telegram_api.expect_send_error_message()
             .withf(|chat_id, msg| *chat_id == ChatId(123) && msg.contains("not find media"))

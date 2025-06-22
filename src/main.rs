@@ -57,7 +57,7 @@ async fn main() {
         .build()
         .dispatch_with_listener(
             listener,
-            logging::LoggingErrorHandler::with_custom_text("An error has occurred in the dispatcher"),
+            LoggingErrorHandler::with_custom_text("An error has occurred in the dispatcher"),
         )
         .await;
 }

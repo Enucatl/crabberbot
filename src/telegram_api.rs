@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use mockall::automock;
 use teloxide::{prelude::*, types::{ChatId, InputFile, MessageId}};
-se teloxide::sugar::request::RequestReplyExt;
+use teloxide::sugar::request::RequestReplyExt;
 
 #[automock]
 #[async_trait]
