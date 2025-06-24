@@ -1,13 +1,16 @@
+use std::sync::Arc;
+
+use teloxide::types::{ChatId, MessageId};
+
 use crate::downloader::Downloader;
 use crate::telegram_api::TelegramApi;
-use teloxide::types::{ChatId, MessageId};
 
 pub async fn message_handler(
     text: &str,
     chat_id: ChatId,
     message_id: MessageId,
-    downloader: &dyn Downloader,
-    telegram_api: &dyn TelegramApi,
+    downloader: &(dyn Downloader + Send + Sync),
+    telegram_api: &(dyn TelegramApi + Send + Sync),
 ) {
     if !text.starts_with("http") {
         return;

@@ -1,17 +1,20 @@
+use std::sync::Arc;
+
 use teloxide::prelude::*;
+use teloxide::dispatching::{HandlerExt, MessageFilterExt};
 
 // Use our library crate
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
 use crabberbot::handler::message_handler;
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 
-use std::sync::Arc;
+type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 async fn handle_message(
     bot: Bot,
-    message: Message,
     downloader: Arc<dyn Downloader + Send + Sync>,
     api: Arc<dyn TelegramApi + Send + Sync>,
+    message: Message,
 ) -> ResponseResult<()> {
     if let Some(text) = message.text() {
         // Acknowledge the request for better UX
@@ -41,14 +44,15 @@ async fn main() {
     let addr = ([0, 0, 0, 0], 8080).into();
     let url = std::env::var("WEBHOOK_URL").expect("WEBHOOK_URL env var not set").parse().unwrap();
     
-    let listener = teloxide::dispatching::webhooks::axum(bot.clone(), teloxide::dispatching::UpdateHandler::new(dptree::entry()))
-        .await;
+    let listener = teloxide::update_listeners::webhooks::axum(
+        bot.clone(),
+        teloxide::update_listeners::webhooks::Options::new(addr, url))
+        .await
+        .expect("Failed to set webhook");
 
-    log::info!("Setting webhook to: {}", url);
-    bot.set_webhook(url).await.expect("Failed to set webhook");
 
     let handler = Update::filter_message()
-        .branch(dptree::endpoint(handle_message));
+        .branch(Message::filter_text().endpoint(handle_message));
 
     // The dispatcher will inject the dependencies into our handler
     Dispatcher::builder(bot, handler)
