@@ -1,7 +1,7 @@
 pub mod downloader;
-pub mod telegram_api;
 pub mod handler;
+pub mod telegram_api;
 
-pub use downloader::{Downloader, DownloadError};
+pub use downloader::{DownloadError, Downloader};
 pub use handler::message_handler;
 pub use telegram_api::TelegramApi;

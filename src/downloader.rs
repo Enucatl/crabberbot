@@ -21,12 +21,11 @@ struct YtDlpOutput {
     #[serde(default)]
     description: String,
 
-    #[serde(rename="_filename")]
-    filepath: String
-    // This field appears when you use --print-json, it lists what would be downloaded.
-    // For our case, we will simply download and then find the files.
-    // A more robust approach not shown here might be to parse the JSON first, then download.
-    // For speed, we download and get metadata at the same time.
+    #[serde(rename = "_filename")]
+    filepath: String, // This field appears when you use --print-json, it lists what would be downloaded.
+                      // For our case, we will simply download and then find the files.
+                      // A more robust approach not shown here might be to parse the JSON first, then download.
+                      // For speed, we download and get metadata at the same time.
 }
 
 #[automock]
@@ -48,15 +47,15 @@ impl Downloader for YtDlpDownloader {
 
         // Command to get metadata and download at the same time
         let output = tokio::process::Command::new("yt-dlp")
-        .arg("--print-json") // Print metadata for each video to stdout
-        .arg("--no-warnings")
-        .arg("--ignore-config")
-        .arg("-o")
-        .arg(&filename_template)
-        .arg(url)
-        .output()
-        .await
-        .map_err(|e| DownloadError::CommandFailed(e.to_string()))?;
+            .arg("--print-json") // Print metadata for each video to stdout
+            .arg("--no-warnings")
+            .arg("--ignore-config")
+            .arg("-o")
+            .arg(&filename_template)
+            .arg(url)
+            .output()
+            .await
+            .map_err(|e| DownloadError::CommandFailed(e.to_string()))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

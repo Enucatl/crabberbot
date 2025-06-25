@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
+use teloxide::dispatching::MessageFilterExt;
 use teloxide::prelude::*;
-use teloxide::dispatching::{HandlerExt, MessageFilterExt};
 
 // Use our library crate
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
 use crabberbot::handler::message_handler;
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
-
-type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 async fn handle_message(
     bot: Bot,
@@ -18,10 +16,18 @@ async fn handle_message(
 ) -> ResponseResult<()> {
     if let Some(text) = message.text() {
         // Acknowledge the request for better UX
-        bot.send_chat_action(message.chat.id, teloxide::types::ChatAction::Typing).await?;
+        bot.send_chat_action(message.chat.id, teloxide::types::ChatAction::Typing)
+            .await?;
 
         // Call our unit-tested handler
-        message_handler(text, message.chat.id, message.id, downloader.as_ref(), api.as_ref()).await;
+        message_handler(
+            text,
+            message.chat.id,
+            message.id,
+            downloader.as_ref(),
+            api.as_ref(),
+        )
+        .await;
 
         // After sending, the real downloader leaves files in /tmp.
         // A robust solution would also clean these up. For now, the OS will.
@@ -42,17 +48,19 @@ async fn main() {
 
     // For Google Cloud Run, we use webhooks
     let addr = ([0, 0, 0, 0], 8080).into();
-    let url = std::env::var("WEBHOOK_URL").expect("WEBHOOK_URL env var not set").parse().unwrap();
-    
+    let url = std::env::var("WEBHOOK_URL")
+        .expect("WEBHOOK_URL env var not set")
+        .parse()
+        .unwrap();
+
     let listener = teloxide::update_listeners::webhooks::axum(
         bot.clone(),
-        teloxide::update_listeners::webhooks::Options::new(addr, url))
-        .await
-        .expect("Failed to set webhook");
+        teloxide::update_listeners::webhooks::Options::new(addr, url),
+    )
+    .await
+    .expect("Failed to set webhook");
 
-
-    let handler = Update::filter_message()
-        .branch(Message::filter_text().endpoint(handle_message));
+    let handler = Update::filter_message().branch(Message::filter_text().endpoint(handle_message));
 
     // The dispatcher will inject the dependencies into our handler
     Dispatcher::builder(bot, handler)
