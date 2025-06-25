@@ -41,7 +41,7 @@ pub struct YtDlpDownloader;
 impl Downloader for YtDlpDownloader {
     async fn download_media(&self, url: &str) -> Result<(String, Vec<String>), DownloadError> {
         let uuid = uuid::Uuid::new_v4().to_string();
-        let filename_template = format!("{}.%(ext)s", uuid);
+        let filename_template = format!("{}.%(id)s.%(ext)s", uuid);
 
         log::info!("Downloading {}", url);
 

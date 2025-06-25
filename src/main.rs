@@ -38,7 +38,9 @@ async fn handle_message(
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
-    log::info!("Starting CrabberBot...");
+
+    let version = env!("CARGO_PACKAGE_VERSION");
+    log::info!("Starting CrabberBot version {}", version);
 
     let bot = Bot::from_env();
 

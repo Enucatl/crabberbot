@@ -1,0 +1,35 @@
+# Define common build arguments using a YAML anchor
+x-common-build-args: &common_build_args
+  YT_DLP_REPO_URL: "https://github.com/Enucatl/yt-dlp.git"
+  YT_DLP_COMMIT_HASH: "threads"
+  CARGO_PACKAGE_VERSION: "${CARGO_PACKAGE_VERSION:-unknown}"
+
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args: *common_build_args
+    container_name: crabberbot
+    # Load environment variables from a .env file
+    env_file:
+      - .env
+    environment:
+      # Set log level. Can be overridden in .env file.
+      - RUST_LOG=info,crabberbot=debug
+    ports:
+      # Map the container's port 8080 to the host's port 8080
+      # This allows services like ngrok to forward traffic to the bot
+      - "8080:8080"
+    restart: unless-stopped  
+
+  # This service will ONLY be activated when the 'test' profile is enabled.
+  test-runner:
+    profiles: ["test"] # Assign this service to the 'test' profile
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: tester # Needs the builder stage with cargo
+      args: *common_build_args
+    command: cargo test -- --nocapture
