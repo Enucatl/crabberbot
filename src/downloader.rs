@@ -90,8 +90,8 @@ impl Downloader for YtDlpDownloader {
                         let source_link = url;
                         let via_link = "https://t.me/crabberbot?start=c"; // As requested
                         let header = format!(
-                            "<a href=\"{}\">Source</a> ✤ <a href=\"{}\">Via</a>",
-                            source_link, via_link
+                            "<a href=\"{}\">Crabber</a> 🦀 <a href=\"{}\">From</a>",
+                            via_link, source_link
                         );
 
                         let mut quote_parts = Vec::new();

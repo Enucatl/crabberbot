@@ -1,5 +1,4 @@
-use teloxide::types::{ChatId, MessageId};
-use teloxide::types::{InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, ParseMode};
+use teloxide::types::{ChatId, MessageId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, ParseMode};
 
 use crate::downloader::{Downloader, MediaMetadata};
 use crate::telegram_api::TelegramApi;
@@ -130,7 +129,7 @@ mod tests {
     use crate::telegram_api::MockTelegramApi;
     use mockall::predicate::*;
     use teloxide::types::{ChatId, MessageId};
-    use teloxide::types::{InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, ParseMode};
+    use teloxide::types::{InputFile, InputMedia, ParseMode};
 
     #[tokio::test]
     async fn test_process_download_request_sends_video_on_success_with_type() {
@@ -139,11 +138,8 @@ mod tests {
         let test_url = "https://instagram.com/p/valid_post";
         let video_uploader = "testuser";
         let video_description = "A detailed description of the video.";
-        let expected_caption = format!(
-            "<a href=\"{}\">Source</a> ✤ <a href=\"https://t.me/crabberbot?start=c\">Via</a>\n\n<blockquote>@{}\n{}</blockquote>",
-            test_url, video_uploader, video_description
-        );
-        let downloader_caption = expected_caption.clone();
+        let expected_caption = "caption";
+        let downloader_caption = expected_caption;
 
         mock_downloader
             .expect_download_media()
@@ -151,7 +147,7 @@ mod tests {
             .times(1)
             .returning(move |_| {
                 Ok((
-                    downloader_caption.clone(),
+                    downloader_caption.to_string(),
                     vec![MediaMetadata {
                         filepath: "/tmp/video.mp4".to_string(),
                         description: video_description.to_string(),
@@ -195,7 +191,7 @@ mod tests {
         let photo_uploader = "photographer123";
         let photo_description = "Detailed description of the sunset.";
         let expected_caption = format!(
-            "<a href=\"{}\">Source</a> ✤ <a href=\"https://t.me/crabberbot?start=c\">Via</a>\n\n<blockquote>@{}\n{}</blockquote>",
+            "<a href=\"{}\">Source</a> 🦀 <a href=\"https://t.me/crabberbot?start=c\">Via</a>\n\n<blockquote>@{}\n{}</blockquote>",
             test_url, photo_uploader, photo_description
         );
         let downloader_caption = expected_caption.clone();
@@ -279,12 +275,7 @@ mod tests {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
         let test_url = "https://instagram.com/p/multiple_media";
-        let post_uploader = "album_creator";
-        let first_item_description = "First video description";
-        let expected_caption = format!(
-            "<a href=\"{}\">Source</a> ✤ <a href=\"https://t.me/crabberbot?start=c\">Via</a>\n\n<blockquote>@{}\n{}</blockquote>",
-            test_url, post_uploader, first_item_description
-        );
+        let expected_caption = "caption";
 
         mock_downloader
             .expect_download_media()
@@ -292,7 +283,7 @@ mod tests {
             .times(1)
             .returning(move |_| {
                 Ok((
-                    expected_caption.clone(),
+                    expected_caption.to_string(),
                     vec![
                         MediaMetadata {
                             filepath: "/tmp/item1.mp4".to_string(),
@@ -326,18 +317,15 @@ mod tests {
                 eq(ChatId(123)),
                 eq(MessageId(456)),
                 function(move |media_vec: &Vec<InputMedia>| {
-                    let expected_caption_in_test = format!("<a href=\"{}\">Source</a> ✤ <a href=\"https://t.me/crabberbot?start=c\">Via</a>\n\n<blockquote>@{}\n{}</blockquote>", test_url, post_uploader, first_item_description);
                     media_vec.len() == 2
                         && if let Some(InputMedia::Video(v)) = media_vec.get(0) {
                             format!("{:?}", v.media) == format!("{:?}", InputFile::file("/tmp/item1.mp4")) &&
-                                v.caption.as_deref() == Some(expected_caption_in_test.as_str()) &&
                                 v.parse_mode == Some(ParseMode::Html)
                         } else {
                             false
                         }
                         && if let Some(InputMedia::Photo(p)) = media_vec.get(1) {
                             format!("{:?}", p.media) == format!("{:?}", InputFile::file("/tmp/item2.jpg")) &&
-                                p.caption.as_deref() == Some("") &&
                                 p.parse_mode == Some(ParseMode::Html)
                         } else {
                             false

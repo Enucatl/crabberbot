@@ -4,7 +4,7 @@ use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
     prelude::*,
     types::{
-        ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, MessageId, ParseMode,
+        ChatId, InputFile, InputMedia, MessageId, ParseMode,
     },
 };
 
