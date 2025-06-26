@@ -3,9 +3,7 @@ use mockall::automock;
 use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
     prelude::*,
-    types::{
-        ChatId, InputFile, InputMedia, MessageId, ParseMode,
-    },
+    types::{ChatId, InputFile, InputMedia, MessageId, ParseMode},
 };
 
 #[automock]
@@ -92,7 +90,11 @@ impl TelegramApi for TeloxideApi {
         message_id: MessageId,
         message: &str,
     ) -> Result<(), teloxide::RequestError> {
-        self.bot.send_message(chat_id, message).parse_mode(ParseMode::MarkdownV2).reply_to(message_id).await?;
+        self.bot
+            .send_message(chat_id, message)
+            .parse_mode(ParseMode::Html)
+            .reply_to(message_id)
+            .await?;
         Ok(())
     }
 

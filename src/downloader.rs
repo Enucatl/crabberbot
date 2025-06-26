@@ -90,14 +90,14 @@ impl Downloader for YtDlpDownloader {
                         let source_link = url;
                         let via_link = "https://t.me/crabberbot?start=c"; // As requested
                         let header = format!(
-                            "<a href=\"{}\">Crabber</a> 🦀 <a href=\"{}\">From</a>",
+                            "<a href=\"{}\">CrabberBot</a> 🦀 <a href=\"{}\">Source</a>",
                             via_link, source_link
                         );
 
                         let mut quote_parts = Vec::new();
                         if let Some(uploader) = &metadata.uploader {
                             if !uploader.is_empty() {
-                                quote_parts.push(format!("@{}", uploader));
+                                quote_parts.push(format!("<i>{}</i>", uploader));
                             }
                         }
 

@@ -1,4 +1,6 @@
-use teloxide::types::{ChatId, MessageId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, ParseMode};
+use teloxide::types::{
+    ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, MessageId, ParseMode,
+};
 
 use crate::downloader::{Downloader, MediaMetadata};
 use crate::telegram_api::TelegramApi;
@@ -14,7 +16,11 @@ pub async fn process_download_request(
         Ok((caption, media_items)) => {
             if media_items.is_empty() {
                 let _ = telegram_api
-                    .send_text_message(chat_id, message_id, "Sorry, no media files were found for this link.")
+                    .send_text_message(
+                        chat_id,
+                        message_id,
+                        "Sorry, no media files were found for this link.",
+                    )
                     .await;
                 return;
             }
@@ -254,7 +260,11 @@ mod tests {
 
         mock_telegram_api
             .expect_send_text_message()
-            .withf(|chat_id, message_id, msg| *chat_id == ChatId(123) && *message_id == MessageId(456) && msg.contains("could not process"))
+            .withf(|chat_id, message_id, msg| {
+                *chat_id == ChatId(123)
+                    && *message_id == MessageId(456)
+                    && msg.contains("could not process")
+            })
             .times(1)
             .returning(|_, _, _| Ok(()));
 
@@ -321,14 +331,16 @@ mod tests {
                 function(move |media_vec: &Vec<InputMedia>| {
                     media_vec.len() == 2
                         && if let Some(InputMedia::Video(v)) = media_vec.get(0) {
-                            format!("{:?}", v.media) == format!("{:?}", InputFile::file("/tmp/item1.mp4")) &&
-                                v.parse_mode == Some(ParseMode::Html)
+                            format!("{:?}", v.media)
+                                == format!("{:?}", InputFile::file("/tmp/item1.mp4"))
+                                && v.parse_mode == Some(ParseMode::Html)
                         } else {
                             false
                         }
                         && if let Some(InputMedia::Photo(p)) = media_vec.get(1) {
-                            format!("{:?}", p.media) == format!("{:?}", InputFile::file("/tmp/item2.jpg")) &&
-                                p.parse_mode == Some(ParseMode::Html)
+                            format!("{:?}", p.media)
+                                == format!("{:?}", InputFile::file("/tmp/item2.jpg"))
+                                && p.parse_mode == Some(ParseMode::Html)
                         } else {
                             false
                         }
@@ -377,7 +389,11 @@ mod tests {
 
         mock_telegram_api
             .expect_send_text_message()
-            .withf(|chat_id, message_id, msg| *chat_id == ChatId(123) && *message_id == MessageId(456) && msg.contains("unsupported type"))
+            .withf(|chat_id, message_id, msg| {
+                *chat_id == ChatId(123)
+                    && *message_id == MessageId(456)
+                    && msg.contains("unsupported type")
+            })
             .times(1)
             .returning(|_, _, _| Ok(()));
 

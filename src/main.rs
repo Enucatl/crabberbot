@@ -21,14 +21,18 @@ async fn handle_command(
 
     // Define the comprehensive guide message
     let comprehensive_guide = format!(
-        "Hello there! I am CrabberBot, your friendly media downloader.\n\
-         I can download videos and photos from various platforms like Instagram, TikTok, YouTube Shorts, and many more!\n\n\
-         **How to use me**\n\
-         To download media, simply send me the `/download` command followed by the URL of the media you want to download.\n\
-         Example: `/download https://www.youtube.com/shorts/dQw4w9WgXcQ`\n\n\
-         I'll try my best to fetch the media and send it back to you. I also include the original caption (limited to 1024 characters).\n\n\
-         If you encounter any issues, please double-check the URL or try again later. Not all links may be supported, or there might be temporary issues.\n\n\
-         {0}",
+        "Hello there! I am CrabberBot, your friendly media downloader.
+
+I can download videos and photos from various platforms like Instagram, TikTok, YouTube Shorts, and many more!
+
+<b>How to use me</b>
+To download media, simply send me the <code>/download</code> command followed by the URL of the media you want to download.
+Example: <code>/download https://www.youtube.com/shorts/dQw4w9WgXcQ</code>
+
+
+I'll try my best to fetch the media and send it back to you. I also include the original caption (limited to 1024 characters).
+If you encounter any issues, please double-check the URL or try again later. Not all links may be supported, or there might be temporary issues.\n\n\
+{0}",
         Command::descriptions()
     );
 
@@ -73,7 +77,7 @@ enum Command {
     #[command(description = "display this help message.")]
     Help,
     #[command(
-        description = "download videos from a URL. Usage: /download <URL>",
+        description = "download videos from a URL. Usage: /download URL",
         parse_with = "split"
     )]
     Download(String),
