@@ -26,6 +26,8 @@ pub struct MediaMetadata {
     #[serde(rename = "_type", default)]
     pub media_type: Option<String>,
     #[serde(default)]
+    pub uploader: Option<String>,
+    #[serde(default)]
     pub resolution: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
@@ -74,7 +76,7 @@ impl Downloader for YtDlpDownloader {
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
         let mut downloaded_media_items = Vec::new();
-        let mut main_title = String::new();
+        let mut final_caption_untruncated = String::new();
 
         for line in stdout_str.lines() {
             if line.trim().is_empty() {
@@ -83,8 +85,36 @@ impl Downloader for YtDlpDownloader {
             match serde_json::from_str::<MediaMetadata>(line) {
                 Ok(metadata) => {
                     log::info!("Successfully downloaded and parsed: {}", metadata.filepath);
-                    if main_title.is_empty() {
-                        main_title = metadata.title.clone();
+                    if final_caption_untruncated.is_empty() {
+                        // This is the first item. Build the caption from its metadata.
+                        let source_link = url;
+                        let via_link = "https://t.me/crabberbot?start=c"; // As requested
+                        let header = format!(
+                            "<a href=\"{}\">Source</a> ✤ <a href=\"{}\">Via</a>",
+                            source_link, via_link
+                        );
+
+                        let mut quote_parts = Vec::new();
+                        if let Some(uploader) = &metadata.uploader {
+                            if !uploader.is_empty() {
+                                quote_parts.push(format!("@{}", uploader));
+                            }
+                        }
+
+                        let description = metadata.description.trim();
+                        if !description.is_empty() {
+                            quote_parts.push(description.to_string());
+                        }
+
+                        final_caption_untruncated = if !quote_parts.is_empty() {
+                            format!(
+                                "{}\n\n<blockquote>{}</blockquote>",
+                                header,
+                                quote_parts.join("\n")
+                            )
+                        } else {
+                            header
+                        };
                     }
                     downloaded_media_items.push(metadata);
                 }
@@ -100,7 +130,7 @@ impl Downloader for YtDlpDownloader {
             ));
         }
 
-        let final_caption: String = main_title.chars().take(1024).collect();
+        let final_caption: String = final_caption_untruncated.chars().take(1024).collect();
 
         Ok((final_caption, downloaded_media_items))
     }

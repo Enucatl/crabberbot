@@ -137,7 +137,13 @@ mod tests {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
         let test_url = "https://instagram.com/p/valid_post";
-        let video_title = "My Awesome Video";
+        let video_uploader = "testuser";
+        let video_description = "A detailed description of the video.";
+        let expected_caption = format!(
+            "<a href=\"{}\">Source</a> ✤ <a href=\"https://t.me/crabberbot?start=c\">Via</a>\n\n<blockquote>@{}\n{}</blockquote>",
+            test_url, video_uploader, video_description
+        );
+        let downloader_caption = expected_caption.clone();
 
         mock_downloader
             .expect_download_media()
@@ -145,13 +151,14 @@ mod tests {
             .times(1)
             .returning(move |_| {
                 Ok((
-                    video_title.to_string(),
+                    downloader_caption.clone(),
                     vec![MediaMetadata {
                         filepath: "/tmp/video.mp4".to_string(),
-                        description: "A detailed description of the video.".to_string(),
-                        title: video_title.to_string(),
+                        description: video_description.to_string(),
+                        title: "My Awesome Video".to_string(),
                         ext: "mp4".to_string(),
-                        media_type: Some("video".to_string()), // Explicitly set _type
+                        uploader: Some(video_uploader.to_string()),
+                        media_type: Some("video".to_string()),
                         resolution: None,
                         width: None,
                         height: None,
@@ -165,7 +172,7 @@ mod tests {
                 eq(ChatId(123)),
                 eq(MessageId(456)),
                 eq("/tmp/video.mp4"),
-                eq(video_title),
+                eq(expected_caption),
             )
             .times(1)
             .returning(|_, _, _, _| Ok(()));
@@ -185,7 +192,13 @@ mod tests {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
         let test_url = "https://instagram.com/p/valid_photo";
-        let photo_title = "Beautiful Sunset";
+        let photo_uploader = "photographer123";
+        let photo_description = "Detailed description of the sunset.";
+        let expected_caption = format!(
+            "<a href=\"{}\">Source</a> ✤ <a href=\"https://t.me/crabberbot?start=c\">Via</a>\n\n<blockquote>@{}\n{}</blockquote>",
+            test_url, photo_uploader, photo_description
+        );
+        let downloader_caption = expected_caption.clone();
 
         mock_downloader
             .expect_download_media()
@@ -193,13 +206,14 @@ mod tests {
             .times(1)
             .returning(move |_| {
                 Ok((
-                    photo_title.to_string(),
+                    downloader_caption.clone(),
                     vec![MediaMetadata {
                         filepath: "/tmp/photo.jpg".to_string(),
-                        description: "Detailed description of the sunset.".to_string(),
-                        title: photo_title.to_string(),
+                        description: photo_description.to_string(),
+                        title: "Beautiful Sunset".to_string(),
                         ext: "jpg".to_string(),
-                        media_type: Some("image".to_string()), // Explicitly set _type
+                        uploader: Some(photo_uploader.to_string()),
+                        media_type: Some("image".to_string()),
                         resolution: None,
                         width: None,
                         height: None,
@@ -213,7 +227,7 @@ mod tests {
                 eq(ChatId(123)),
                 eq(MessageId(456)),
                 eq("/tmp/photo.jpg"),
-                eq(photo_title),
+                eq(expected_caption),
             )
             .times(1)
             .returning(|_, _, _, _| Ok(()));
@@ -265,7 +279,12 @@ mod tests {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
         let test_url = "https://instagram.com/p/multiple_media";
-        let main_post_title = "My Album Title";
+        let post_uploader = "album_creator";
+        let first_item_description = "First video description";
+        let expected_caption = format!(
+            "<a href=\"{}\">Source</a> ✤ <a href=\"https://t.me/crabberbot?start=c\">Via</a>\n\n<blockquote>@{}\n{}</blockquote>",
+            test_url, post_uploader, first_item_description
+        );
 
         mock_downloader
             .expect_download_media()
@@ -273,12 +292,13 @@ mod tests {
             .times(1)
             .returning(move |_| {
                 Ok((
-                    main_post_title.to_string(),
+                    expected_caption.clone(),
                     vec![
                         MediaMetadata {
                             filepath: "/tmp/item1.mp4".to_string(),
                             description: "First video description".to_string(),
-                            title: main_post_title.to_string(),
+                            title: "My Album Title".to_string(),
+                            uploader: Some("album_creator".to_string()),
                             ext: "mp4".to_string(),
                             media_type: Some("video".to_string()),
                             resolution: None,
@@ -288,8 +308,9 @@ mod tests {
                         MediaMetadata {
                             filepath: "/tmp/item2.jpg".to_string(),
                             description: "Second image description".to_string(),
-                            title: main_post_title.to_string(),
+                            title: "My Album Title".to_string(),
                             ext: "jpg".to_string(),
+                            uploader: Some("album_creator".to_string()),
                             media_type: Some("image".to_string()),
                             resolution: None,
                             width: None,
@@ -305,18 +326,21 @@ mod tests {
                 eq(ChatId(123)),
                 eq(MessageId(456)),
                 function(move |media_vec: &Vec<InputMedia>| {
+                    let expected_caption_in_test = format!("<a href=\"{}\">Source</a> ✤ <a href=\"https://t.me/crabberbot?start=c\">Via</a>\n\n<blockquote>@{}\n{}</blockquote>", test_url, post_uploader, first_item_description);
                     media_vec.len() == 2
                         && if let Some(InputMedia::Video(v)) = media_vec.get(0) {
-                            v.caption.as_deref() == Some(main_post_title)
-                                && v.parse_mode == Some(ParseMode::Html)
+                            format!("{:?}", v.media) == format!("{:?}", InputFile::file("/tmp/item1.mp4")) &&
+                                v.caption.as_deref() == Some(expected_caption_in_test.as_str()) &&
+                                v.parse_mode == Some(ParseMode::Html)
                         } else {
-                            false // Not a file input
+                            false
                         }
                         && if let Some(InputMedia::Photo(p)) = media_vec.get(1) {
-                            p.caption.as_deref() == Some("")
-                                && p.parse_mode == Some(ParseMode::Html)
+                            format!("{:?}", p.media) == format!("{:?}", InputFile::file("/tmp/item2.jpg")) &&
+                                p.caption.as_deref() == Some("") &&
+                                p.parse_mode == Some(ParseMode::Html)
                         } else {
-                            false // Not a file input
+                            false
                         }
                 }),
             )
@@ -351,8 +375,9 @@ mod tests {
                         filepath: "/tmp/document.pdf".to_string(),
                         description: "A PDF document".to_string(),
                         title: title_of_unsupported.to_string(),
+                        uploader: None,
                         ext: "pdf".to_string(),
-                        media_type: Some("document".to_string()), // Explicitly set _type
+                        media_type: Some("document".to_string()),
                         resolution: None,
                         width: None,
                         height: None,

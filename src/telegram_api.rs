@@ -3,7 +3,9 @@ use mockall::automock;
 use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
     prelude::*,
-    types::{ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, MessageId},
+    types::{
+        ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, MessageId, ParseMode,
+    },
 };
 
 #[automock]
@@ -60,6 +62,7 @@ impl TelegramApi for TeloxideApi {
         self.bot
             .send_video(chat_id, InputFile::file(file_path))
             .caption(caption.to_string())
+            .parse_mode(ParseMode::Html)
             .reply_to(message_id)
             .await?;
         Ok(())
@@ -76,6 +79,7 @@ impl TelegramApi for TeloxideApi {
         self.bot
             .send_photo(chat_id, InputFile::file(file_path))
             .caption(caption.to_string())
+            .parse_mode(ParseMode::Html)
             .reply_to(message_id)
             .await?;
         Ok(())
@@ -90,7 +94,6 @@ impl TelegramApi for TeloxideApi {
         Ok(())
     }
 
-    // New implementation for sending media groups
     async fn send_media_group(
         &self,
         chat_id: ChatId,

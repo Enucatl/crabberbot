@@ -23,7 +23,7 @@ async fn handle_command(
     let comprehensive_guide = format!(
         "Hello there! I am CrabberBot, your friendly media downloader.\n\
          I can download videos and photos from various platforms like Instagram, TikTok, YouTube Shorts, and many more!\n\n\
-         *How to use me:*\n\
+         **How to use me**\n\
          To download media, simply send me the `/download` command followed by the URL of the media you want to download.\n\
          Example: `/download https://www.youtube.com/shorts/dQw4w9WgXcQ`\n\n\
          I'll try my best to fetch the media and send it back to you. I also include the original caption (limited to 1024 characters).\n\n\
