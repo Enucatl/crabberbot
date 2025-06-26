@@ -37,6 +37,6 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    environment:
-      - TUNNEL_TOKEN
+    env_file:
+      - .env
     command: tunnel run --token ${TUNNEL_TOKEN}
