@@ -30,6 +30,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: tester # Needs the builder stage with cargo
+      target: builder
       args: *common_build_args
     command: cargo test -- --nocapture

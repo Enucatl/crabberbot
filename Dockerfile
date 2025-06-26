@@ -35,7 +35,7 @@ WORKDIR /usr/src/crabberbot
 COPY Cargo.toml ./
 # Create a dummy project to build only dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
+RUN cargo build --release && cargo test --no-run
 # Clean up dummy files
 RUN rm -rf src target/release/deps/crabberbot*
 
@@ -43,25 +43,12 @@ RUN rm -rf src target/release/deps/crabberbot*
 COPY src ./src
 COPY build.rs ./build.rs
 
-ARG CARGO_PACKAGE_VERSION="unknown"
-
-# ---- Test Stage: Uses cached dependencies to run tests ----
-FROM builder as tester
-
-WORKDIR /usr/src/crabberbot
-
-# If you have an integration tests directory, copy it too
-# COPY tests ./tests
-
-RUN CARGO_PACKAGE_VERSION=${CARGO_PACKAGE_VERSION} cargo test -- --nocapture
-
-# ---- Main Build Continuation: Build the final application binary ----
-FROM builder as final_builder
-
-WORKDIR /usr/src/crabberbot
+ARG CARGO_PACKAGE_VERSION
+ENV CARGO_PACKAGE_VERSION=${CARGO_PACKAGE_VERSION}
 
 # Build the application
-RUN CARGO_PACKAGE_VERSION=${CARGO_PACKAGE_VERSION} cargo build --release
+RUN echo "building release ${CARGO_PACKAGE_VERSION}" && cargo build --release && cargo test --no-run
+
 
 # ---- Runtime Stage: Create the final, smaller image ----
 FROM debian:bullseye-slim as runtime
@@ -79,7 +66,7 @@ USER appuser
 WORKDIR /home/appuser
 
 # Copy the compiled Rust binary from the builder stage
-COPY --from=final_builder /usr/src/crabberbot/target/release/crabberbot .
+COPY --from=builder /usr/src/crabberbot/target/release/crabberbot .
 
 # Copy the yt-dlp binary that was built in the builder stage
 COPY --from=builder /usr/local/bin/yt-dlp /usr/local/bin/
