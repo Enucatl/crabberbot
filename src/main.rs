@@ -15,7 +15,6 @@ async fn handle_command(
     message: Message,
     command: Command,
 ) -> ResponseResult<()> {
-
     // Acknowledge the request for better UX
     bot.send_chat_action(message.chat.id, teloxide::types::ChatAction::Typing)
         .await?;

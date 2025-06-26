@@ -13,41 +13,50 @@ pub enum DownloadError {
     IoError(String),
 }
 
-// Our serde structs for yt-dlp's JSON output
-#[derive(Deserialize)]
-struct YtDlpOutput {
-    // We only need the description and the list of downloaded files.
-    // Use `serde(default)` for fields that might be missing (like description).
-    #[serde(default)]
-    description: String,
-
+// New struct to hold parsed metadata for each media item
+#[derive(Debug, Deserialize, PartialEq, Clone)]
+pub struct MediaMetadata {
     #[serde(rename = "_filename")]
-    filepath: String, // This field appears when you use --print-json, it lists what would be downloaded.
-                      // For our case, we will simply download and then find the files.
-                      // A more robust approach not shown here might be to parse the JSON first, then download.
-                      // For speed, we download and get metadata at the same time.
+    pub filepath: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub title: String,
+    pub ext: String,
+    #[serde(rename = "_type", default)]
+    pub media_type: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
 }
 
 #[automock]
 #[async_trait]
 pub trait Downloader {
-    async fn download_media(&self, url: &str) -> Result<(String, Vec<String>), DownloadError>;
+    async fn download_media(
+        &self,
+        url: &str,
+    ) -> Result<(String, Vec<MediaMetadata>), DownloadError>;
 }
 
-// The REAL implementation
 pub struct YtDlpDownloader;
 
 #[async_trait]
 impl Downloader for YtDlpDownloader {
-    async fn download_media(&self, url: &str) -> Result<(String, Vec<String>), DownloadError> {
+    async fn download_media(
+        &self,
+        url: &str,
+    ) -> Result<(String, Vec<MediaMetadata>), DownloadError> {
         let uuid = uuid::Uuid::new_v4().to_string();
         let filename_template = format!("{}.%(id)s.%(ext)s", uuid);
 
         log::info!("Downloading {}", url);
 
-        // Command to get metadata and download at the same time
         let output = tokio::process::Command::new("yt-dlp")
-            .arg("--print-json") // Print metadata for each video to stdout
+            .arg("--print-json")
             .arg("--no-warnings")
             .arg("--ignore-config")
             .arg("-o")
@@ -63,23 +72,21 @@ impl Downloader for YtDlpDownloader {
             return Err(DownloadError::CommandFailed(stderr.to_string()));
         }
 
-        // 3. Parse the output to get the generated file paths and caption.
         let stdout_str = String::from_utf8_lossy(&output.stdout);
-        let mut file_paths = Vec::new();
-        let mut last_caption = String::new();
+        let mut downloaded_media_items = Vec::new();
+        let mut main_title = String::new();
 
-        // A single post (like on Instagram) can contain multiple videos/images.
-        // yt-dlp will print one JSON object per line for each item.
         for line in stdout_str.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<YtDlpOutput>(line) {
+            match serde_json::from_str::<MediaMetadata>(line) {
                 Ok(metadata) => {
                     log::info!("Successfully downloaded and parsed: {}", metadata.filepath);
-                    file_paths.push(metadata.filepath);
-                    // We'll use the description from the last media item as the post's caption.
-                    last_caption = metadata.description;
+                    if main_title.is_empty() {
+                        main_title = metadata.title.clone();
+                    }
+                    downloaded_media_items.push(metadata);
                 }
                 Err(e) => {
                     log::warn!("Failed to parse a line of yt-dlp JSON output: {}", e);
@@ -87,15 +94,14 @@ impl Downloader for YtDlpDownloader {
             }
         }
 
-        if file_paths.is_empty() {
+        if downloaded_media_items.is_empty() {
             return Err(DownloadError::ParsingFailed(
-                "Could not extract any filenames from yt-dlp output.".to_string(),
+                "Could not extract any media metadata from yt-dlp output.".to_string(),
             ));
         }
 
-        // Telegram caption limit is 1024 chars
-        let final_caption = last_caption.chars().take(1024).collect();
+        let final_caption: String = main_title.chars().take(1024).collect();
 
-        Ok((final_caption, file_paths))
+        Ok((final_caption, downloaded_media_items))
     }
 }
