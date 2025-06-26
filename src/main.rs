@@ -27,8 +27,7 @@ I can download videos and photos from various platforms like Instagram, TikTok, 
 
 <b>How to use me</b>
 To download media, simply send me the <code>/download</code> command followed by the URL of the media you want to download.
-Example: <code>/download https://www.youtube.com/shorts/dQw4w9WgXcQ</code>
-
+Example: <code>/download https://www.youtube.com/shorts/tPEE9ZwTmy0</code>
 
 I'll try my best to fetch the media and send it back to you. I also include the original caption (limited to 1024 characters).
 If you encounter any issues, please double-check the URL or try again later. Not all links may be supported, or there might be temporary issues.\n\n\
