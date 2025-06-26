@@ -33,3 +33,10 @@ services:
       target: builder
       args: *common_build_args
     command: cargo test -- --nocapture
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    environment:
+      - TUNNEL_TOKEN
+    command: tunnel run --token ${TUNNEL_TOKEN}
