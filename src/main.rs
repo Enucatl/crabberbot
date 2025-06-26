@@ -35,12 +35,12 @@ async fn handle_command(
     match command {
         Command::Help => {
             // Send the comprehensive guide message for /help
-            api.send_text_message(message.chat.id, &comprehensive_guide)
+            api.send_text_message(message.chat.id, message.id, &comprehensive_guide)
                 .await?;
         }
         Command::Start => {
             // Send the comprehensive guide message for /start
-            api.send_text_message(message.chat.id, &comprehensive_guide)
+            api.send_text_message(message.chat.id, message.id, &comprehensive_guide)
                 .await?;
         }
         Command::Download(url) => {

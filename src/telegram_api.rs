@@ -28,6 +28,7 @@ pub trait TelegramApi: Send + Sync {
     async fn send_text_message(
         &self,
         chat_id: ChatId,
+        message_id: MessageId,
         message: &str,
     ) -> Result<(), teloxide::RequestError>;
     async fn send_media_group(
@@ -88,9 +89,10 @@ impl TelegramApi for TeloxideApi {
     async fn send_text_message(
         &self,
         chat_id: ChatId,
+        message_id: MessageId,
         message: &str,
     ) -> Result<(), teloxide::RequestError> {
-        self.bot.send_message(chat_id, message).await?;
+        self.bot.send_message(chat_id, message).parse_mode(ParseMode::MarkdownV2).reply_to(message_id).await?;
         Ok(())
     }
 

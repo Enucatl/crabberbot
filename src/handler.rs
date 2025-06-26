@@ -14,7 +14,7 @@ pub async fn process_download_request(
         Ok((caption, media_items)) => {
             if media_items.is_empty() {
                 let _ = telegram_api
-                    .send_text_message(chat_id, "Sorry, no media files were found for this link.")
+                    .send_text_message(chat_id, message_id, "Sorry, no media files were found for this link.")
                     .await;
                 return;
             }
@@ -60,6 +60,7 @@ pub async fn process_download_request(
                         );
                         let _ = telegram_api.send_text_message(
                             chat_id,
+                            message_id,
                             &format!("Sorry, the single media item downloaded had an unsupported type ({}).", item.ext),
                         ).await;
                     }
@@ -103,6 +104,7 @@ pub async fn process_download_request(
                     let _ = telegram_api
                         .send_text_message(
                             chat_id,
+                            message_id,
                             "Sorry, although multiple items were found, none were of a supported type for a media group.",
                         )
                         .await;
@@ -116,7 +118,7 @@ pub async fn process_download_request(
         Err(e) => {
             let error_message = format!("Sorry, I could not process the link: {}", e);
             let _ = telegram_api
-                .send_text_message(chat_id, &error_message)
+                .send_text_message(chat_id, message_id, &error_message)
                 .await;
         }
     }
@@ -252,9 +254,9 @@ mod tests {
 
         mock_telegram_api
             .expect_send_text_message()
-            .withf(|chat_id, msg| *chat_id == ChatId(123) && msg.contains("could not process"))
+            .withf(|chat_id, message_id, msg| *chat_id == ChatId(123) && *message_id == MessageId(456) && msg.contains("could not process"))
             .times(1)
-            .returning(|_, _| Ok(()));
+            .returning(|_, _, _| Ok(()));
 
         mock_telegram_api.expect_send_video().times(0);
         mock_telegram_api.expect_send_photo().times(0);
@@ -375,9 +377,9 @@ mod tests {
 
         mock_telegram_api
             .expect_send_text_message()
-            .withf(|chat_id, msg| *chat_id == ChatId(123) && msg.contains("unsupported type"))
+            .withf(|chat_id, message_id, msg| *chat_id == ChatId(123) && *message_id == MessageId(456) && msg.contains("unsupported type"))
             .times(1)
-            .returning(|_, _| Ok(()));
+            .returning(|_, _, _| Ok(()));
 
         mock_telegram_api.expect_send_video().times(0);
         mock_telegram_api.expect_send_photo().times(0);
