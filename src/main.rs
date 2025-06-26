@@ -1,38 +1,83 @@
 use std::sync::Arc;
 
-use teloxide::dispatching::MessageFilterExt;
 use teloxide::prelude::*;
+use teloxide::utils::command::BotCommands;
 
 // Use our library crate
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
-use crabberbot::handler::message_handler;
+use crabberbot::handler::process_download_request;
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 
-async fn handle_message(
+async fn handle_command(
     bot: Bot,
     downloader: Arc<dyn Downloader + Send + Sync>,
     api: Arc<dyn TelegramApi + Send + Sync>,
     message: Message,
+    command: Command,
 ) -> ResponseResult<()> {
-    if let Some(text) = message.text() {
-        // Acknowledge the request for better UX
-        bot.send_chat_action(message.chat.id, teloxide::types::ChatAction::Typing)
-            .await?;
 
-        // Call our unit-tested handler
-        message_handler(
-            text,
-            message.chat.id,
-            message.id,
-            downloader.as_ref(),
-            api.as_ref(),
-        )
-        .await;
+    // Acknowledge the request for better UX
+    bot.send_chat_action(message.chat.id, teloxide::types::ChatAction::Typing)
+        .await?;
 
-        // After sending, the real downloader leaves files in /tmp.
-        // A robust solution would also clean these up. For now, the OS will.
+    // Define the comprehensive guide message
+    let comprehensive_guide = format!(
+        "Hello there! I am CrabberBot, your friendly media downloader.\n\
+         I can download videos and photos from various platforms like Instagram, TikTok, YouTube Shorts, and many more!\n\n\
+         *How to use me:*\n\
+         To download media, simply send me the `/download` command followed by the URL of the media you want to download.\n\
+         Example: `/download https://www.youtube.com/shorts/dQw4w9WgXcQ`\n\n\
+         I'll try my best to fetch the media and send it back to you. I also include the original caption (limited to 1024 characters).\n\n\
+         If you encounter any issues, please double-check the URL or try again later. Not all links may be supported, or there might be temporary issues.\n\n\
+         {0}",
+        Command::descriptions()
+    );
+
+    match command {
+        Command::Help => {
+            // Send the comprehensive guide message for /help
+            api.send_text_message(message.chat.id, &comprehensive_guide)
+                .await?;
+        }
+        Command::Start => {
+            // Send the comprehensive guide message for /start
+            api.send_text_message(message.chat.id, &comprehensive_guide)
+                .await?;
+        }
+        Command::Download(url) => {
+            // Call our core logic with the extracted URL
+            process_download_request(
+                &url,
+                message.chat.id,
+                message.id,
+                downloader.as_ref(),
+                api.as_ref(),
+            )
+            .await;
+
+            // After sending, the real downloader leaves files in /tmp.
+            // A robust solution would also clean these up. For now, the OS will.
+        }
     }
+
     Ok(())
+}
+
+#[derive(BotCommands, Clone)]
+#[command(
+    rename_rule = "lowercase",
+    description = "These commands are supported:"
+)]
+enum Command {
+    #[command(description = "start interaction and display a guide.")]
+    Start,
+    #[command(description = "display this help message.")]
+    Help,
+    #[command(
+        description = "download videos from a URL. Usage: /download <URL>",
+        parse_with = "split"
+    )]
+    Download(String),
 }
 
 #[tokio::main]
@@ -62,7 +107,11 @@ async fn main() {
     .await
     .expect("Failed to set webhook");
 
-    let handler = Update::filter_message().branch(Message::filter_text().endpoint(handle_message));
+    let handler = Update::filter_message().branch(
+        dptree::entry()
+            .filter_command::<Command>()
+            .endpoint(handle_command),
+    );
 
     // The dispatcher will inject the dependencies into our handler
     Dispatcher::builder(bot, handler)

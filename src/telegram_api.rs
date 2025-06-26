@@ -24,7 +24,7 @@ pub trait TelegramApi: Send + Sync {
         file_path: &str,
         caption: &str,
     ) -> Result<(), teloxide::RequestError>;
-    async fn send_error_message(
+    async fn send_text_message(
         &self,
         chat_id: ChatId,
         message: &str,
@@ -77,7 +77,7 @@ impl TelegramApi for TeloxideApi {
         Ok(())
     }
 
-    async fn send_error_message(
+    async fn send_text_message(
         &self,
         chat_id: ChatId,
         message: &str,
