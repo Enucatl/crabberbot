@@ -19,7 +19,7 @@ jobs:
       packages: write  # Allows pushing to GitHub Container Registry (ghcr.io)
 
     env:
-      DOCKER_IMAGE_NAME: ghcr.io/${{ github.repository }}/${{ env.APP_NAME }}
+      DOCKER_IMAGE_NAME: ghcr.io/${{ github.repository }}/${{ APP_NAME }}
 
     steps:
       - name: Checkout code
@@ -45,11 +45,11 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: . # Build context (usually the root of your repo)
-          file: ${{ env.DOCKERFILE_PATH }} # Path to your Dockerfile
+          file: ${{ DOCKERFILE_PATH }} # Path to your Dockerfile
           push: true
           tags: |
-            ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
-            ${{ env.DOCKER_IMAGE_NAME }}:latest
+            ${{ DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
+            ${{ DOCKER_IMAGE_NAME }}:latest
           build-args: |
             CARGO_PACKAGE_VERSION=${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
 
@@ -57,7 +57,7 @@ jobs:
         # This step will only run if the PORTAINER_WEBHOOK_URL secret is provided
         if: secrets.PORTAINER_WEBHOOK_URL != '' 
         run: |
-          echo "Triggering Portainer stack update for ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}..."
+          echo "Triggering Portainer stack update for ${{ DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}..."
           curl -X POST "${{ secrets.PORTAINER_WEBHOOK_URL }}"
           echo "Portainer webhook triggered successfully."
         env:
