@@ -52,14 +52,3 @@ jobs:
             ${{ env.DOCKER_IMAGE_NAME }}:latest
           build-args: |
             CARGO_PACKAGE_VERSION=${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
-
-      - name: Trigger Portainer Stack Update Webhook
-        # This step will only run if the PORTAINER_WEBHOOK_URL secret is provided
-        if: env.PORTAINER_WEBHOOK_URL != '' 
-        run: |
-          echo "Triggering Portainer stack update for ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}..."
-          curl -X POST "${{ secrets.PORTAINER_WEBHOOK_URL }}"
-          echo "Portainer webhook triggered successfully."
-        env:
-          # Optional: Set CURL_VERBOSE to 'true' for debugging curl commands
-          CURL_VERBOSE: "true"
