@@ -38,6 +38,11 @@ async fn handle_command(
             api.send_text_message(message.chat.id, message.id, &comprehensive_guide)
                 .await?;
         }
+        Command::Version => {
+            let version = env!("CARGO_PACKAGE_VERSION");
+            let version_message = format!("CrabberBot version {0}", version);
+            api.send_text_message(message.chat.id, message.id, &version_message).await?;
+        }
     }
 
     Ok(())
