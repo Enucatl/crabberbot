@@ -111,6 +111,13 @@ async fn main() {
     .await
     .expect("Failed to set webhook");
 
+    bot.set_my_commands(Command::bot_commands()).await.expect("Failed to set bot commands.");
+    log::info!("Successfully set bot commands.");
+
+    let bot_description = "Your friendly media downloader from various platforms like Instagram, TikTok, YouTube, and more!";
+    bot.set_my_description().description(bot_description).await.expect("Failed to set bot description.");
+    log::info!("Successfully set bot description.");
+
     let handler = Update::filter_message().branch(
         dptree::entry()
             .filter_command::<Command>()
