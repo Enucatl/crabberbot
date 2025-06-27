@@ -39,4 +39,4 @@ services:
     restart: unless-stopped
     environment:
       - TUNNEL_TOKEN
-    command: tunnel run --token ${TUNNEL_TOKEN}
+    command: tunnel run
