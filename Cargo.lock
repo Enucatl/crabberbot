@@ -242,6 +242,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "dotenvy",
+ "indoc",
  "log",
  "mockall",
  "pretty_env_logger",
@@ -932,6 +933,12 @@ dependencies = [
  "hashbrown 0.15.4",
  "serde",
 ]
+
+[[package]]
+name = "indoc"
+version = "2.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4c7245a08504955605670dbf141fceab975f15ca21570696aebe9d2e71576bd"
 
 [[package]]
 name = "ipnet"

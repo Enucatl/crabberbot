@@ -13,7 +13,7 @@ pub enum DownloadError {
     IoError(String),
 }
 
-// New struct to hold parsed metadata for each media item
+// struct to hold parsed metadata for each media item
 #[derive(Debug, Deserialize, PartialEq, Clone)]
 pub struct MediaMetadata {
     #[serde(rename = "_filename")]

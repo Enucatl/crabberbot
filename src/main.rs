@@ -20,20 +20,22 @@ async fn handle_command(
         .await?;
 
     // Define the comprehensive guide message
-    let comprehensive_guide = format!(
-        "Hello there! I am CrabberBot, your friendly media downloader.
+    let comprehensive_guide = indoc::formatdoc! { "
+        Hello there! I am CrabberBot, your friendly media downloader.
 
-I can download videos and photos from various platforms like Instagram, TikTok, YouTube Shorts, and many more!
+        I can download videos and photos from various platforms like Instagram, TikTok, YouTube Shorts, and many more!
 
-<b>How to use me</b>
-To download media, simply send me the <code>/download</code> command followed by the URL of the media you want to download.
-Example: <code>/download https://www.youtube.com/shorts/tPEE9ZwTmy0</code>
+        <b>How to use me</b>
+        To download media, simply send me the <code>/download</code> command followed by the URL of the media you want to download.
+        Example: <code>/download https://www.youtube.com/shorts/tPEE9ZwTmy0</code>
 
-I'll try my best to fetch the media and send it back to you. I also include the original caption (limited to 1024 characters).
-If you encounter any issues, please double-check the URL or try again later. Not all links may be supported, or there might be temporary issues.\n\n\
-{0}",
+        I'll try my best to fetch the media and send it back to you. I also include the original caption (limited to 1024 characters).
+        If you encounter any issues, please double-check the URL or try again later. Not all links may be supported, or there might be temporary issues.
+
+        {0}
+        ",
         Command::descriptions()
-    );
+    };
 
     match command {
         Command::Help => {

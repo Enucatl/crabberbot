@@ -37,7 +37,7 @@ pub trait TelegramApi: Send + Sync {
     ) -> Result<(), teloxide::RequestError>;
 }
 
-#[derive(Clone)] // Clone is needed for the dispatcher
+#[derive(Clone)]
 pub struct TeloxideApi {
     bot: Bot,
 }
@@ -58,6 +58,7 @@ impl TelegramApi for TeloxideApi {
         caption: &str,
     ) -> Result<(), teloxide::RequestError> {
         log::info!("Sending video {} to chat {}", file_path, chat_id);
+        self.bot.send_chat_action(chat_id, teloxide::types::ChatAction::UploadVideo).await?;
         self.bot
             .send_video(chat_id, InputFile::file(file_path))
             .caption(caption.to_string())
@@ -75,6 +76,7 @@ impl TelegramApi for TeloxideApi {
         caption: &str,
     ) -> Result<(), teloxide::RequestError> {
         log::info!("Sending photo {} to chat {}", file_path, chat_id);
+        self.bot.send_chat_action(chat_id, teloxide::types::ChatAction::UploadPhoto).await?;
         self.bot
             .send_photo(chat_id, InputFile::file(file_path))
             .caption(caption.to_string())
@@ -106,13 +108,14 @@ impl TelegramApi for TeloxideApi {
     ) -> Result<(), teloxide::RequestError> {
         if media.is_empty() {
             log::warn!("Attempted to send an empty media group to chat {}", chat_id);
-            return Ok(()); // Or return an error if empty groups are not allowed
+            return Ok(());
         }
         log::info!(
             "Sending media group ({} items) to chat {}",
             media.len(),
             chat_id
         );
+        self.bot.send_chat_action(chat_id, teloxide::types::ChatAction::UploadVideo).await?;
         self.bot
             .send_media_group(chat_id, media)
             .reply_to(message_id)

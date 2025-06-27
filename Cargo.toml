@@ -8,6 +8,7 @@ repository = "https://github.com/Enucatl/crabberbot"
 
 [dependencies]
 async-trait = "0.1"
+indoc = "2"
 log = "0.4"
 mockall = "0.12"
 pretty_env_logger = "0.5"
