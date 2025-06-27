@@ -109,10 +109,8 @@ async fn main() {
 
     // For Google Cloud Run, we use webhooks
     let addr = ([0, 0, 0, 0], 8080).into();
-    let url = std::env::var("WEBHOOK_URL")
-        .expect("WEBHOOK_URL env var not set")
-        .parse()
-        .unwrap();
+    let webhook_url_str = std::env::var("WEBHOOK_URL").expect("WEBHOOK_URL env var not set");
+    let url: Url = webhook_url_str.parse().unwrap();
 
     let listener = teloxide::update_listeners::webhooks::axum(
         bot.clone(),
@@ -133,12 +131,15 @@ async fn main() {
         .expect("Failed to set bot description.");
     log::info!("Successfully set bot description.");
 
-    let bot_name = "CrabberBot | Video Downloader";
-    bot.set_my_name()
-        .name(bot_name)
-        .await
-        .expect("Failed to set bot name.");
-    log::info!("Successfully set bot name.");
+    let mut bot_name = String::from("CrabberBot | Video Downloader");
+    if webhook_url_str.contains("test") {
+        bot_name = String::from("CrabberBot TEST");
+    }
+    // bot.set_my_name()
+    //     .name(bot_name.clone())
+    //     .await
+    //     .expect("Failed to set bot name.");
+    log::info!("Successfully set bot name. {}", bot_name);
 
     let handler = Update::filter_message()
         .branch(
