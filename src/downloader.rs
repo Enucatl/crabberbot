@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use mockall::automock;
 use serde::Deserialize;
 use thiserror::Error;
+use url::Url;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum DownloadError {
@@ -40,7 +41,7 @@ pub struct MediaMetadata {
 pub trait Downloader {
     async fn download_media(
         &self,
-        url: &str,
+        url: &Url,
     ) -> Result<(String, Vec<MediaMetadata>), DownloadError>;
 }
 
@@ -50,7 +51,7 @@ pub struct YtDlpDownloader;
 impl Downloader for YtDlpDownloader {
     async fn download_media(
         &self,
-        url: &str,
+        url: &Url,
     ) -> Result<(String, Vec<MediaMetadata>), DownloadError> {
         let uuid = uuid::Uuid::new_v4().to_string();
         let filename_template = format!("{}.%(id)s.%(ext)s", uuid);
@@ -63,7 +64,7 @@ impl Downloader for YtDlpDownloader {
             .arg("--ignore-config")
             .arg("-o")
             .arg(&filename_template)
-            .arg(url)
+            .arg(url.as_str())
             .output()
             .await
             .map_err(|e| DownloadError::CommandFailed(e.to_string()))?;

@@ -13,11 +13,11 @@ services:
       args: *common_build_args
     container_name: crabberbot
     # Load environment variables from a .env file
-    env_file:
-      - .env
     environment:
       # Set log level. Can be overridden in .env file.
       - RUST_LOG=info,crabberbot=debug
+      - WEBHOOK_URL
+      - TELOXIDE_TOKEN
     ports:
       # Map the container's port 8080 to the host's port 8080
       # This allows services like ngrok to forward traffic to the bot
@@ -37,6 +37,6 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      - TUNNEL_TOKEN
     command: tunnel run --token ${TUNNEL_TOKEN}

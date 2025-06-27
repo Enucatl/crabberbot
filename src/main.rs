@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
+use url::Url;
 
 // Use our library crate
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
@@ -9,25 +10,19 @@ use crabberbot::handler::process_download_request;
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 
 async fn handle_command(
-    bot: Bot,
-    downloader: Arc<dyn Downloader + Send + Sync>,
+    _bot: Bot,
     api: Arc<dyn TelegramApi + Send + Sync>,
     message: Message,
     command: Command,
 ) -> ResponseResult<()> {
-    // Acknowledge the request for better UX
-    bot.send_chat_action(message.chat.id, teloxide::types::ChatAction::Typing)
-        .await?;
-
-    // Define the comprehensive guide message
     let comprehensive_guide = indoc::formatdoc! { "
         Hello there! I am CrabberBot, your friendly media downloader.
 
         I can download videos and photos from various platforms like Instagram, TikTok, YouTube Shorts, and many more!
 
         <b>How to use me</b>
-        To download media, simply send me the <code>/download</code> command followed by the URL of the media you want to download.
-        Example: <code>/download https://www.youtube.com/shorts/tPEE9ZwTmy0</code>
+        To download media, simply send me the URL of the media you want to download.
+        Example: <code>https://www.youtube.com/shorts/tPEE9ZwTmy0</code>
 
         I'll try my best to fetch the media and send it back to you. I also include the original caption (limited to 1024 characters).
         If you encounter any issues, please double-check the URL or try again later. Not all links may be supported, or there might be temporary issues.
@@ -38,32 +33,46 @@ async fn handle_command(
     };
 
     match command {
-        Command::Help => {
-            // Send the comprehensive guide message for /help
-            api.send_text_message(message.chat.id, message.id, &comprehensive_guide)
-                .await?;
-        }
         Command::Start => {
             // Send the comprehensive guide message for /start
             api.send_text_message(message.chat.id, message.id, &comprehensive_guide)
                 .await?;
         }
-        Command::Download(url) => {
-            // Call our core logic with the extracted URL
-            process_download_request(
-                &url,
-                message.chat.id,
-                message.id,
-                downloader.as_ref(),
-                api.as_ref(),
-            )
-            .await;
-
-            // After sending, the real downloader leaves files in /tmp.
-            // A robust solution would also clean these up. For now, the OS will.
-        }
     }
 
+    Ok(())
+}
+
+async fn handle_url(
+    _bot: Bot,
+    downloader: Arc<dyn Downloader + Send + Sync>,
+    api: Arc<dyn TelegramApi + Send + Sync>,
+    message: Message,
+    url: Url,
+) -> ResponseResult<()> {
+    process_download_request(
+        &url,
+        message.chat.id,
+        message.id,
+        downloader.as_ref(),
+        api.as_ref(),
+    )
+    .await;
+    Ok(())
+}
+
+async fn handle_unhandled_message(
+    _bot: Bot,
+    _downloader: Arc<dyn Downloader + Send + Sync>,
+    api: Arc<dyn TelegramApi + Send + Sync>,
+    message: Message,
+) -> ResponseResult<()> {
+    api.send_text_message(
+        message.chat.id,
+        message.id,
+        "Your message isn't a valid link!",
+    )
+    .await?;
     Ok(())
 }
 
@@ -75,13 +84,8 @@ async fn handle_command(
 enum Command {
     #[command(description = "start interaction and display a guide.")]
     Start,
-    #[command(description = "display this help message.")]
-    Help,
-    #[command(
-        description = "download videos from a URL. Usage: /download URL",
-        parse_with = "split"
-    )]
-    Download(String),
+    #[command(description = "show bot version.")]
+    Version,
 }
 
 #[tokio::main]
@@ -111,18 +115,40 @@ async fn main() {
     .await
     .expect("Failed to set webhook");
 
-    bot.set_my_commands(Command::bot_commands()).await.expect("Failed to set bot commands.");
+    bot.set_my_commands(Command::bot_commands())
+        .await
+        .expect("Failed to set bot commands.");
     log::info!("Successfully set bot commands.");
 
     let bot_description = "Your friendly media downloader from various platforms like Instagram, TikTok, YouTube, and more!";
-    bot.set_my_description().description(bot_description).await.expect("Failed to set bot description.");
+    bot.set_my_description()
+        .description(bot_description)
+        .await
+        .expect("Failed to set bot description.");
     log::info!("Successfully set bot description.");
 
-    let handler = Update::filter_message().branch(
-        dptree::entry()
-            .filter_command::<Command>()
-            .endpoint(handle_command),
-    );
+    let bot_name = "CrabberBot | Video Downloader";
+    bot.set_my_name()
+        .name(bot_name)
+        .await
+        .expect("Failed to set bot name.");
+    log::info!("Successfully set bot name.");
+
+    let handler = Update::filter_message()
+        .branch(
+            dptree::entry()
+                .filter_command::<Command>()
+                .endpoint(handle_command),
+        )
+        .branch(
+            dptree::entry()
+                // Get the text, then try to parse it as a URL.
+                // .filter_map returns Some(Url) if successful, None if not,
+                .filter_map(|msg: Message| msg.text().and_then(|text| Url::parse(text).ok()))
+                .endpoint(handle_url),
+        )
+        // Handler for any message type not caught by the above branches
+        .branch(dptree::entry().endpoint(handle_unhandled_message));
 
     // The dispatcher will inject the dependencies into our handler
     Dispatcher::builder(bot, handler)

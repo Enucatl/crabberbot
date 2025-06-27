@@ -58,7 +58,9 @@ impl TelegramApi for TeloxideApi {
         caption: &str,
     ) -> Result<(), teloxide::RequestError> {
         log::info!("Sending video {} to chat {}", file_path, chat_id);
-        self.bot.send_chat_action(chat_id, teloxide::types::ChatAction::UploadVideo).await?;
+        self.bot
+            .send_chat_action(chat_id, teloxide::types::ChatAction::UploadVideo)
+            .await?;
         self.bot
             .send_video(chat_id, InputFile::file(file_path))
             .caption(caption.to_string())
@@ -76,7 +78,9 @@ impl TelegramApi for TeloxideApi {
         caption: &str,
     ) -> Result<(), teloxide::RequestError> {
         log::info!("Sending photo {} to chat {}", file_path, chat_id);
-        self.bot.send_chat_action(chat_id, teloxide::types::ChatAction::UploadPhoto).await?;
+        self.bot
+            .send_chat_action(chat_id, teloxide::types::ChatAction::UploadPhoto)
+            .await?;
         self.bot
             .send_photo(chat_id, InputFile::file(file_path))
             .caption(caption.to_string())
@@ -115,7 +119,9 @@ impl TelegramApi for TeloxideApi {
             media.len(),
             chat_id
         );
-        self.bot.send_chat_action(chat_id, teloxide::types::ChatAction::UploadVideo).await?;
+        self.bot
+            .send_chat_action(chat_id, teloxide::types::ChatAction::UploadVideo)
+            .await?;
         self.bot
             .send_media_group(chat_id, media)
             .reply_to(message_id)

@@ -1,12 +1,13 @@
 use teloxide::types::{
     ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, MessageId, ParseMode,
 };
+use url::Url;
 
 use crate::downloader::{Downloader, MediaMetadata};
 use crate::telegram_api::TelegramApi;
 
 pub async fn process_download_request(
-    url: &str,
+    url: &Url,
     chat_id: ChatId,
     message_id: MessageId,
     downloader: &(dyn Downloader + Send + Sync),
@@ -138,12 +139,13 @@ mod tests {
     use mockall::predicate::*;
     use teloxide::types::{ChatId, MessageId};
     use teloxide::types::{InputFile, InputMedia, ParseMode};
+    use url::Url;
 
     #[tokio::test]
     async fn test_process_download_request_sends_video_on_success_with_type() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
-        let test_url = "https://instagram.com/p/valid_post";
+        let test_url = Url::parse("https://instagram.com/p/valid_post").expect("");
         let video_uploader = "testuser";
         let video_description = "A detailed description of the video.";
         let expected_caption = "caption";
@@ -151,7 +153,7 @@ mod tests {
 
         mock_downloader
             .expect_download_media()
-            .with(eq(test_url))
+            .with(eq(test_url.clone()))
             .times(1)
             .returning(move |_| {
                 Ok((
@@ -182,7 +184,7 @@ mod tests {
             .returning(|_, _, _, _| Ok(()));
 
         process_download_request(
-            test_url,
+            &test_url,
             ChatId(123),
             MessageId(456),
             &mock_downloader,
@@ -195,7 +197,7 @@ mod tests {
     async fn test_process_download_request_sends_photo_on_success_with_type() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
-        let test_url = "https://instagram.com/p/valid_photo";
+        let test_url = Url::parse("https://instagram.com/p/valid_photo").expect("");
         let photo_uploader = "photographer123";
         let photo_description = "Detailed description of the sunset.";
         let expected_caption = format!(
@@ -206,7 +208,7 @@ mod tests {
 
         mock_downloader
             .expect_download_media()
-            .with(eq(test_url))
+            .with(eq(test_url.clone()))
             .times(1)
             .returning(move |_| {
                 Ok((
@@ -237,7 +239,7 @@ mod tests {
             .returning(|_, _, _, _| Ok(()));
 
         process_download_request(
-            test_url,
+            &test_url,
             ChatId(123),
             MessageId(456),
             &mock_downloader,
@@ -250,11 +252,11 @@ mod tests {
     async fn test_process_download_request_sends_error_on_failure() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
-        let test_url = "https://instagram.com/p/invalid_post";
+        let test_url = Url::parse("https://instagram.com/p/invalid_post").expect("");
 
         mock_downloader
             .expect_download_media()
-            .with(eq(test_url))
+            .with(eq(test_url.clone()))
             .times(1)
             .returning(|_| Err(DownloadError::CommandFailed("Failed".to_string())));
 
@@ -273,7 +275,7 @@ mod tests {
         mock_telegram_api.expect_send_media_group().times(0);
 
         process_download_request(
-            test_url,
+            &test_url,
             ChatId(123),
             MessageId(456),
             &mock_downloader,
@@ -286,12 +288,12 @@ mod tests {
     async fn test_process_download_request_sends_media_group_on_multiple_items() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
-        let test_url = "https://instagram.com/p/multiple_media";
+        let test_url = Url::parse("https://instagram.com/p/multiple_media").expect("");
         let expected_caption = "caption";
 
         mock_downloader
             .expect_download_media()
-            .with(eq(test_url))
+            .with(eq(test_url.clone()))
             .times(1)
             .returning(move |_| {
                 Ok((
@@ -350,7 +352,7 @@ mod tests {
             .returning(|_, _, _| Ok(()));
 
         process_download_request(
-            test_url,
+            &test_url,
             ChatId(123),
             MessageId(456),
             &mock_downloader,
@@ -363,12 +365,12 @@ mod tests {
     async fn test_process_download_request_no_supported_media() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
-        let test_url = "https://example.com/unsupported";
+        let test_url = Url::parse("https://example.com/unsupported").expect("");
         let title_of_unsupported = "Unsupported File";
 
         mock_downloader
             .expect_download_media()
-            .with(eq(test_url))
+            .with(eq(test_url.clone()))
             .times(1)
             .returning(move |_| {
                 Ok((
@@ -402,7 +404,7 @@ mod tests {
         mock_telegram_api.expect_send_media_group().times(0);
 
         process_download_request(
-            test_url,
+            &test_url,
             ChatId(123),
             MessageId(456),
             &mock_downloader,
