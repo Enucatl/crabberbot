@@ -9,7 +9,6 @@ env:
   # The image name in GHCR format: ghcr.io/OWNER/REPO_NAME/APP_NAME
   # ${{ github.repository }} expands to OWNER/REPO_NAME (e.g., your_username/your_repo)
   APP_NAME: crabberbot # Replace with the chosen name for your app image (e.g., my-rust-app)
-  DOCKER_IMAGE_NAME: ghcr.io/${{ github.repository }}/${{ env.APP_NAME }}
   DOCKERFILE_PATH: Dockerfile
 
 jobs:
@@ -18,6 +17,9 @@ jobs:
     permissions:
       contents: read   # Allows checking out code
       packages: write  # Allows pushing to GitHub Container Registry (ghcr.io)
+
+    env:
+      DOCKER_IMAGE_NAME: ghcr.io/${{ github.repository }}/${{ env.APP_NAME }}
 
     steps:
       - name: Checkout code
@@ -53,9 +55,9 @@ jobs:
 
       - name: Trigger Portainer Stack Update Webhook
         # This step will only run if the PORTAINER_WEBHOOK_URL secret is provided
-        if: ${{ secrets.PORTAINER_WEBHOOK_URL != '' }}
+        if: secrets.PORTAINER_WEBHOOK_URL != '' 
         run: |
-          echo "Triggering Portainer stack update for ${{ env.DOCKER_IMAGE_NAME }}:${{ env.CARGO_PACKAGE_VERSION }}..."
+          echo "Triggering Portainer stack update for ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}..."
           curl -X POST "${{ secrets.PORTAINER_WEBHOOK_URL }}"
           echo "Portainer webhook triggered successfully."
         env:
