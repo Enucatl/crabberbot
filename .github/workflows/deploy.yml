@@ -10,6 +10,8 @@ env:
   # ${{ github.repository }} expands to OWNER/REPO_NAME (e.g., your_username/your_repo)
   APP_NAME: crabberbot # Replace with the chosen name for your app image (e.g., my-rust-app)
   DOCKERFILE_PATH: Dockerfile
+  DOCKER_IMAGE_NAME: ghcr.io/enucatl/crabberbot
+  PORTAINER_WEBHOOK_URL: ${{ secrets.PORTAINER_WEBHOOK_URL }}
 
 jobs:
   deploy:
@@ -18,14 +20,12 @@ jobs:
       contents: read   # Allows checking out code
       packages: write  # Allows pushing to GitHub Container Registry (ghcr.io)
 
-    env:
-      DOCKER_IMAGE_NAME: ghcr.io/${{ github.repository }}/${{ APP_NAME }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Important: Fetches full history for git describe to work
+          # Important: Fetches full history for git describe to work
+          fetch-depth: 0 
 
       - name: Get CARGO_PACKAGE_VERSION from git
         id: get_version
@@ -45,19 +45,19 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: . # Build context (usually the root of your repo)
-          file: ${{ DOCKERFILE_PATH }} # Path to your Dockerfile
+          file: ${{ env.DOCKERFILE_PATH }}
           push: true
           tags: |
-            ${{ DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
-            ${{ DOCKER_IMAGE_NAME }}:latest
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
+            ${{ env.DOCKER_IMAGE_NAME }}:latest
           build-args: |
             CARGO_PACKAGE_VERSION=${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
 
       - name: Trigger Portainer Stack Update Webhook
         # This step will only run if the PORTAINER_WEBHOOK_URL secret is provided
-        if: secrets.PORTAINER_WEBHOOK_URL != '' 
+        if: env.PORTAINER_WEBHOOK_URL != '' 
         run: |
-          echo "Triggering Portainer stack update for ${{ DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}..."
+          echo "Triggering Portainer stack update for ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}..."
           curl -X POST "${{ secrets.PORTAINER_WEBHOOK_URL }}"
           echo "Portainer webhook triggered successfully."
         env:
