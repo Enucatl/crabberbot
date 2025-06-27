@@ -67,7 +67,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "crabberbot_test_tunn
     ingress   = [
       {
         hostname = "crabberbot_test.${var.zone}"
-        service  = "http://crabberbot_test:8080"
+        service  = "http://crabberbot:8080"
       },
       {
         service  = "http_status:404"
