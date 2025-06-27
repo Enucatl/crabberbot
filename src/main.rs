@@ -44,12 +44,13 @@ async fn handle_command(
 }
 
 async fn handle_url(
-    _bot: Bot,
+    bot: Bot,
     downloader: Arc<dyn Downloader + Send + Sync>,
     api: Arc<dyn TelegramApi + Send + Sync>,
     message: Message,
     url: Url,
 ) -> ResponseResult<()> {
+    bot.send_chat_action(message.chat.id, teloxide::types::ChatAction::Typing).await?;
     process_download_request(
         &url,
         message.chat.id,
