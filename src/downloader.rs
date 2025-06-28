@@ -23,9 +23,9 @@ pub struct MediaMetadata {
 
     // ---- Fields for Both Pre- and Post-Download Info ----
     #[serde(default)]
-    pub title: String,
+    pub title: Option<String>,
     #[serde(default)]
-    pub description: String,
+    pub description: Option<String>,
     #[serde(rename = "_type", default)]
     pub media_type: Option<String>,
     #[serde(default)]
@@ -163,9 +163,11 @@ impl Downloader for YtDlpDownloader {
                 quote_parts.push(format!("<i>{}</i>", uploader));
             }
         }
-        let description = result_metadata.description.trim();
-        if !description.is_empty() {
-            quote_parts.push(description.to_string());
+        if let Some(description) = &result_metadata.description {
+            let description = description.trim();
+            if !description.is_empty() {
+                quote_parts.push(description.to_string());
+            }
         }
 
         let final_caption_untruncated = if !quote_parts.is_empty() {

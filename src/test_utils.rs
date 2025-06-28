@@ -5,8 +5,8 @@ use crate::downloader::MediaMetadata;
 pub fn create_test_metadata() -> MediaMetadata {
     MediaMetadata {
         filepath: "".to_string(),
-        description: "".to_string(),
-        title: "".to_string(),
+        description: Some("".to_string()),
+        title: Some("".to_string()),
         ext: "".to_string(),
         media_type: None,
         uploader: None,
