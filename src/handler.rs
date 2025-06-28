@@ -57,10 +57,14 @@ pub async fn process_download_request(
                     }
                 } else {
                     // _type not available, fallback to ext check
-                    match item.ext.as_str() {
-                        "mp4" | "webm" | "gif" | "mov" => Some("video"),
-                        "jpg" | "jpeg" | "png" | "webp" => Some("photo"),
-                        _ => None, // Unsupported extension
+                    if let Some(ext) = &item.ext {
+                        match ext.as_str() {
+                            "mp4" | "webm" | "gif" | "mov" => Some("video"),
+                            "jpg" | "jpeg" | "png" | "webp" => Some("photo"),
+                            _ => None, // Unsupported extension
+                        }
+                    } else {
+                        None
                     }
                 }
             };
@@ -70,36 +74,41 @@ pub async fn process_download_request(
                 // --- Handle Media Group ---
                 let mut media_group: Vec<InputMedia> = Vec::new();
                 for (i, item) in media_items.into_iter().enumerate() {
-                    let input_file = InputFile::file(item.filepath.clone());
-                    // The main caption is now on the top-level object
-                    let item_caption = if i == 0 {
-                        result_metadata.final_caption.clone()
-                    } else {
-                        String::new()
-                    };
+                    if let Some(filepath) = &item.filepath {
+                        let input_file = InputFile::file(filepath);
 
-                    match get_telegram_media_type(&item) {
-                        Some("video") => {
-                            media_group.push(InputMedia::Video(
-                                InputMediaVideo::new(input_file)
-                                    .caption(item_caption)
-                                    .parse_mode(ParseMode::Html),
-                            ));
+                        // The main caption is now on the top-level object
+                        let item_caption = if i == 0 {
+                            result_metadata.final_caption.clone()
+                        } else {
+                            String::new()
+                        };
+
+                        match get_telegram_media_type(&item) {
+                            Some("video") => {
+                                media_group.push(InputMedia::Video(
+                                    InputMediaVideo::new(input_file)
+                                        .caption(item_caption)
+                                        .parse_mode(ParseMode::Html),
+                                ));
+                            }
+                            Some("photo") => {
+                                media_group.push(InputMedia::Photo(
+                                    InputMediaPhoto::new(input_file)
+                                        .caption(item_caption)
+                                        .parse_mode(ParseMode::Html),
+                                ));
+                            }
+                            _ => {
+                                log::warn!(
+                                    "Unsupported media type in group encountered: {}",
+                                    filepath
+                                );
+                                // For group sends, we typically just skip unsupported types quietly
+                            }
                         }
-                        Some("photo") => {
-                            media_group.push(InputMedia::Photo(
-                                InputMediaPhoto::new(input_file)
-                                    .caption(item_caption)
-                                    .parse_mode(ParseMode::Html),
-                            ));
-                        }
-                        _ => {
-                            log::warn!(
-                                "Unsupported media type in group encountered: {}",
-                                item.filepath
-                            );
-                            // For group sends, we typically just skip unsupported types quietly
-                        }
+                    } else {
+                        continue;
                     }
                 }
 
@@ -119,30 +128,31 @@ pub async fn process_download_request(
             } else {
                 // --- Handle Single Item ---
                 // The result_metadata object itself represents the single downloaded file.
-                let file_path = &result_metadata.filepath;
-                let final_caption = &result_metadata.final_caption;
+                if let Some(filepath) = &result_metadata.filepath {
+                    let final_caption = &result_metadata.final_caption;
 
-                match get_telegram_media_type(&result_metadata) {
-                    Some("video") => {
-                        let _ = telegram_api
-                            .send_video(chat_id, message_id, file_path, final_caption)
-                            .await;
-                    }
-                    Some("photo") => {
-                        let _ = telegram_api
-                            .send_photo(chat_id, message_id, file_path, final_caption)
-                            .await;
-                    }
-                    _ => {
-                        log::warn!(
-                            "Unsupported single media type encountered for: {}",
-                            result_metadata.filepath
-                        );
-                        let _ = telegram_api.send_text_message(
+                    match get_telegram_media_type(&result_metadata) {
+                        Some("video") => {
+                            let _ = telegram_api
+                                .send_video(chat_id, message_id, filepath, final_caption)
+                                .await;
+                        }
+                        Some("photo") => {
+                            let _ = telegram_api
+                                .send_photo(chat_id, message_id, filepath, final_caption)
+                                .await;
+                        }
+                        _ => {
+                            log::warn!(
+                                "Unsupported single media type encountered for: {}",
+                                filepath
+                            );
+                            let _ = telegram_api.send_text_message(
                             chat_id,
                             message_id,
-                            &format!("Sorry, the single media item downloaded had an unsupported type ({}).", result_metadata.ext),
+                            &format!("Sorry, the single media item downloaded had an unsupported type."),
                         ).await;
+                        }
                     }
                 }
             }
@@ -191,8 +201,8 @@ mod tests {
             .times(1)
             .returning(move |_| {
                 Ok(MediaMetadata {
-                    filepath: "/tmp/video.mp4".to_string(),
-                    ext: "mp4".to_string(),
+                    filepath: Some("/tmp/video.mp4".to_string()),
+                    ext: Some("mp4".to_string()),
                     media_type: Some("video".to_string()),
                     final_caption: returned_caption.clone(),
                     ..create_test_metadata() // Use the helper for all other fields
@@ -244,8 +254,8 @@ mod tests {
             .times(1)
             .returning(move |_| {
                 Ok(MediaMetadata {
-                    filepath: "/tmp/photo.jpg".to_string(),
-                    ext: "jpg".to_string(),
+                    filepath: Some("/tmp/photo.jpg".to_string()),
+                    ext: Some("jpg".to_string()),
                     media_type: Some("image".to_string()),
                     final_caption: returned_caption.clone(),
                     ..create_test_metadata()
@@ -307,12 +317,12 @@ mod tests {
                     final_caption: returned_caption.clone(),
                     entries: Some(vec![
                         MediaMetadata {
-                            filepath: "/tmp/item1.mp4".to_string(),
+                            filepath: Some("/tmp/item1.mp4".to_string()),
                             media_type: Some("video".to_string()),
                             ..create_test_metadata()
                         },
                         MediaMetadata {
-                            filepath: "/tmp/item2.jpg".to_string(),
+                            filepath: Some("/tmp/item2.jpg".to_string()),
                             media_type: Some("image".to_string()),
                             ..create_test_metadata()
                         },

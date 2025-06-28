@@ -6,8 +6,6 @@ on:
       - main
 
 env:
-  # The image name in GHCR format: ghcr.io/OWNER/REPO_NAME/APP_NAME
-  # ${{ github.repository }} expands to OWNER/REPO_NAME (e.g., your_username/your_repo)
   APP_NAME: crabberbot # Replace with the chosen name for your app image (e.g., my-rust-app)
   DOCKERFILE_PATH: Dockerfile
   DOCKER_IMAGE_NAME: ghcr.io/enucatl/crabberbot
@@ -49,7 +47,7 @@ jobs:
       - name: Build and push Docker image to GHCR
         uses: docker/build-push-action@v5
         with:
-          context: . # Build context (usually the root of your repo)
+          context: .
           file: ${{ env.DOCKERFILE_PATH }}
           push: true
           tags: |

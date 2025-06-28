@@ -18,8 +18,8 @@ pub enum DownloadError {
 pub struct MediaMetadata {
     // ---- Fields for Post-Download Info
     #[serde(rename = "_filename")]
-    pub filepath: String,
-    pub ext: String,
+    pub filepath: Option<String>,
+    pub ext: Option<String>,
 
     // ---- Fields for Both Pre- and Post-Download Info ----
     #[serde(default)]
@@ -74,7 +74,7 @@ impl Downloader for YtDlpDownloader {
         log::info!("Fetching metadata for {}", url);
 
         let output = tokio::process::Command::new("yt-dlp")
-            .arg("--dump-json")
+            .arg("--dump-single-json")
             .arg("--no-warnings")
             .arg("--ignore-config")
             .arg(url.as_str())
@@ -84,7 +84,11 @@ impl Downloader for YtDlpDownloader {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            log::error!("yt-dlp --dump-json failed for url {}: {}", url, stderr);
+            log::error!(
+                "yt-dlp --dump-single-json failed for url {}: {}",
+                url,
+                stderr
+            );
             return Err(DownloadError::CommandFailed(stderr.to_string()));
         }
 
@@ -129,7 +133,8 @@ impl Downloader for YtDlpDownloader {
             }
             match serde_json::from_str::<MediaMetadata>(line) {
                 Ok(metadata) => {
-                    log::info!("Successfully downloaded and parsed: {}", metadata.filepath);
+                    let path_str = metadata.filepath.as_deref().unwrap_or("[unknown filepath]");
+                    log::info!("Successfully downloaded and parsed: {}", path_str);
                     downloaded_items.push(metadata);
                 }
                 Err(e) => {
