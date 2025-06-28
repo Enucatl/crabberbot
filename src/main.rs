@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
+use dashmap::DashSet;
 use teloxide::prelude::*;
+use teloxide::types::ChatId;
 use teloxide::utils::command::BotCommands;
 use url::Url;
 
@@ -8,6 +10,22 @@ use url::Url;
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
 use crabberbot::handler::process_download_request;
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
+
+type ProcessingUsers = Arc<DashSet<ChatId>>;
+
+// This RAII guard will automatically remove a user from the set when it goes out of scope.
+// This ensures that the user's lock is always released, even if the handler panics or errors out.
+struct CleanupGuard<'a> {
+    set: &'a ProcessingUsers,
+    id: ChatId,
+}
+
+impl<'a> Drop for CleanupGuard<'a> {
+    fn drop(&mut self) {
+        log::info!("Releasing lock for chat_id: {}", self.id);
+        self.set.remove(&self.id);
+    }
+}
 
 async fn handle_command(
     _bot: Bot,
@@ -52,13 +70,40 @@ async fn handle_url(
     bot: Bot,
     downloader: Arc<dyn Downloader + Send + Sync>,
     api: Arc<dyn TelegramApi + Send + Sync>,
+    processing_users: ProcessingUsers,    
     message: Message,
     url: Url,
 ) -> ResponseResult<()> {
-    bot.send_chat_action(message.chat.id, teloxide::types::ChatAction::Typing).await?;
+    let chat_id = message.chat.id;
+    // --- CONCURRENCY CHECK ---
+    // Try to insert the user's ID into the set. `insert` returns `true` if the key
+    // was not present, and `false` if it was already there.
+    if !processing_users.insert(chat_id) {
+        log::info!(
+            "User {} tried to send a new request while another was in progress.",
+            chat_id
+        );
+        api.send_text_message(
+            chat_id,
+            message.id,
+            "I'm already working on a request for you. Please wait until it's finished!",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // If the insert was successful, the user is now "locked".
+    // We create the guard which will automatically unlock the user when this function ends.
+    let _guard = CleanupGuard {
+        set: &processing_users,
+        id: chat_id,
+    };
+    log::info!("Acquired lock for chat_id: {}", chat_id);
+
+    bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
     process_download_request(
         &url,
-        message.chat.id,
+        chat_id,
         message.id,
         downloader.as_ref(),
         api.as_ref(),
@@ -106,6 +151,7 @@ async fn main() {
     // Instantiate our REAL dependencies
     let downloader: Arc<dyn Downloader + Send + Sync> = Arc::new(YtDlpDownloader);
     let api: Arc<dyn TelegramApi + Send + Sync> = Arc::new(TeloxideApi::new(bot.clone()));
+    let processing_users: ProcessingUsers = Arc::new(DashSet::new());
 
     // For Google Cloud Run, we use webhooks
     let addr = ([0, 0, 0, 0], 8080).into();
@@ -160,7 +206,7 @@ async fn main() {
 
     // The dispatcher will inject the dependencies into our handler
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![downloader, api])
+        .dependencies(dptree::deps![downloader, api, processing_users])
         .enable_ctrlc_handler()
         .build()
         .dispatch_with_listener(

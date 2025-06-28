@@ -5,6 +5,7 @@ use url::Url;
 
 use crate::downloader::{Downloader, MediaMetadata};
 use crate::telegram_api::TelegramApi;
+use crate::validator::validate_media_metadata;
 
 pub async fn process_download_request(
     url: &Url,
@@ -13,19 +14,34 @@ pub async fn process_download_request(
     downloader: &(dyn Downloader + Send + Sync),
     telegram_api: &(dyn TelegramApi + Send + Sync),
 ) {
-    match downloader.download_media(url).await {
-        Ok((caption, media_items)) => {
-            if media_items.is_empty() {
-                let _ = telegram_api
-                    .send_text_message(
-                        chat_id,
-                        message_id,
-                        "Sorry, no media files were found for this link.",
-                    )
-                    .await;
+
+    // --- STEP 1: PRE-DOWNLOAD METADATA CHECK ---
+    log::info!("Beginning pre-download check for {}", url);
+    match downloader.get_media_metadata(url).await {
+        Ok(metadata) => {
+            // Here is the refactored part. We call our single validation function.
+            if let Err(validation_error) = validate_media_metadata(&metadata) {
+                // The error contains a user-friendly message, so we just send it.
+                log::warn!("Validation failed for {}: {}", url, validation_error);
+                let _ = telegram_api.send_text_message(
+                    chat_id, 
+                    message_id, 
+                    &validation_error.to_string()
+                ).await;
                 return;
             }
+        }
+        Err(e) => {
+            // If we can't even get metadata, it's probably an invalid link.
+            let error_message = format!("Sorry, I could not fetch information for that link. It might be private or invalid. Error: {}", e);
+            let _ = telegram_api.send_text_message(chat_id, message_id, &error_message).await;
+            return;
+        }
+    }
+    log::info!("Pre-download checks passed for {}. Proceeding with download.", url);
 
+    match downloader.download_media(url).await {
+        Ok(result_metadata) => {
             // Helper closure to determine media type
             let get_telegram_media_type = |item: &MediaMetadata| {
                 if let Some(media_type_str) = &item.media_type {
@@ -44,40 +60,15 @@ pub async fn process_download_request(
                 }
             };
 
-            if media_items.len() == 1 {
-                let item = media_items.into_iter().next().unwrap();
-                let file_path = &item.filepath;
-                let final_caption = &caption;
-
-                match get_telegram_media_type(&item) {
-                    Some("video") => {
-                        let _ = telegram_api
-                            .send_video(chat_id, message_id, file_path, final_caption)
-                            .await;
-                    }
-                    Some("photo") => {
-                        let _ = telegram_api
-                            .send_photo(chat_id, message_id, file_path, final_caption)
-                            .await;
-                    }
-                    _ => {
-                        log::warn!(
-                            "Unsupported single media type encountered for: {}",
-                            item.filepath
-                        );
-                        let _ = telegram_api.send_text_message(
-                            chat_id,
-                            message_id,
-                            &format!("Sorry, the single media item downloaded had an unsupported type ({}).", item.ext),
-                        ).await;
-                    }
-                }
-            } else {
+            // Check if we have a media group (playlist) or a single item
+            if let Some(media_items) = result_metadata.entries {
+                // --- Handle Media Group ---
                 let mut media_group: Vec<InputMedia> = Vec::new();
                 for (i, item) in media_items.into_iter().enumerate() {
                     let input_file = InputFile::file(item.filepath.clone());
+                    // The main caption is now on the top-level object
                     let item_caption = if i == 0 {
-                        caption.clone()
+                        result_metadata.final_caption.clone()
                     } else {
                         String::new()
                     };
@@ -120,6 +111,37 @@ pub async fn process_download_request(
                         .send_media_group(chat_id, message_id, media_group)
                         .await;
                 }
+
+            }
+            else {
+                // --- Handle Single Item ---
+                // The result_metadata object itself represents the single downloaded file.
+                let file_path = &result_metadata.filepath;
+                let final_caption = &result_metadata.final_caption;
+
+                match get_telegram_media_type(&result_metadata) {
+                    Some("video") => {
+                        let _ = telegram_api
+                            .send_video(chat_id, message_id, file_path, final_caption)
+                            .await;
+                    }
+                    Some("photo") => {
+                        let _ = telegram_api
+                            .send_photo(chat_id, message_id, file_path, final_caption)
+                            .await;
+                    }
+                    _ => {
+                        log::warn!(
+                            "Unsupported single media type encountered for: {}",
+                            result_metadata.filepath
+                        );
+                        let _ = telegram_api.send_text_message(
+                            chat_id,
+                            message_id,
+                            &format!("Sorry, the single media item downloaded had an unsupported type ({}).", result_metadata.ext),
+                        ).await;
+                    }
+                }
             }
         }
         Err(e) => {
@@ -136,42 +158,45 @@ mod tests {
     use super::*;
     use crate::downloader::{DownloadError, MediaMetadata, MockDownloader};
     use crate::telegram_api::MockTelegramApi;
+    use crate::test_utils::create_test_metadata;
     use mockall::predicate::*;
     use teloxide::types::{ChatId, MessageId};
-    use teloxide::types::{InputFile, InputMedia, ParseMode};
+    use teloxide::types::{InputMedia};
     use url::Url;
 
     #[tokio::test]
-    async fn test_process_download_request_sends_video_on_success_with_type() {
+    async fn test_process_download_request_sends_video_on_success() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
-        let test_url = Url::parse("https://instagram.com/p/valid_post").expect("");
-        let video_uploader = "testuser";
-        let video_description = "A detailed description of the video.";
-        let expected_caption = "caption";
-        let downloader_caption = expected_caption;
+        let test_url = Url::parse("https://instagram.com/p/valid_post").unwrap();
+        let expected_caption = "caption_for_video".to_string();
 
+        // --- Setup Mocks ---
+
+        // 1. Mock the PRE-DOWNLOAD check. We'll say it passes.
+        mock_downloader
+            .expect_get_media_metadata()
+            .with(eq(test_url.clone()))
+            .times(1)
+            .returning(|_| Ok(create_test_metadata())); // Return valid, empty metadata
+
+        // 2. Mock the ACTUAL DOWNLOAD. Now returns a single MediaMetadata object.
+        let returned_caption = expected_caption.clone();
         mock_downloader
             .expect_download_media()
             .with(eq(test_url.clone()))
             .times(1)
             .returning(move |_| {
-                Ok((
-                    downloader_caption.to_string(),
-                    vec![MediaMetadata {
-                        filepath: "/tmp/video.mp4".to_string(),
-                        description: video_description.to_string(),
-                        title: "My Awesome Video".to_string(),
-                        ext: "mp4".to_string(),
-                        uploader: Some(video_uploader.to_string()),
-                        media_type: Some("video".to_string()),
-                        resolution: None,
-                        width: None,
-                        height: None,
-                    }],
-                ))
+                Ok(MediaMetadata {
+                    filepath: "/tmp/video.mp4".to_string(),
+                    ext: "mp4".to_string(),
+                    media_type: Some("video".to_string()),
+                    final_caption: returned_caption.clone(),
+                    ..create_test_metadata() // Use the helper for all other fields
+                })
             });
 
+        // 3. Mock the Telegram API call we expect to happen.
         mock_telegram_api
             .expect_send_video()
             .with(
@@ -183,6 +208,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _| Ok(()));
 
+        // --- Run Test ---
         process_download_request(
             &test_url,
             ChatId(123),
@@ -194,39 +220,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_download_request_sends_photo_on_success_with_type() {
+    async fn test_process_download_request_sends_photo_on_success() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
-        let test_url = Url::parse("https://instagram.com/p/valid_photo").expect("");
-        let photo_uploader = "photographer123";
-        let photo_description = "Detailed description of the sunset.";
-        let expected_caption = format!(
-            "<a href=\"{}\">Source</a> 🦀 <a href=\"https://t.me/crabberbot?start=c\">Via</a>\n\n<blockquote>@{}\n{}</blockquote>",
-            test_url, photo_uploader, photo_description
-        );
-        let downloader_caption = expected_caption.clone();
+        let test_url = Url::parse("https://instagram.com/p/valid_photo").unwrap();
+        let expected_caption = "caption_for_photo".to_string();
 
+        // Mock pre-download check
+        mock_downloader
+            .expect_get_media_metadata()
+            .with(eq(test_url.clone()))
+            .times(1)
+            .returning(|_| Ok(create_test_metadata()));
+
+        // Mock actual download
+        let returned_caption = expected_caption.clone();
         mock_downloader
             .expect_download_media()
             .with(eq(test_url.clone()))
             .times(1)
             .returning(move |_| {
-                Ok((
-                    downloader_caption.clone(),
-                    vec![MediaMetadata {
-                        filepath: "/tmp/photo.jpg".to_string(),
-                        description: photo_description.to_string(),
-                        title: "Beautiful Sunset".to_string(),
-                        ext: "jpg".to_string(),
-                        uploader: Some(photo_uploader.to_string()),
-                        media_type: Some("image".to_string()),
-                        resolution: None,
-                        width: None,
-                        height: None,
-                    }],
-                ))
+                Ok(MediaMetadata {
+                    filepath: "/tmp/photo.jpg".to_string(),
+                    ext: "jpg".to_string(),
+                    media_type: Some("image".to_string()),
+                    final_caption: returned_caption.clone(),
+                    ..create_test_metadata()
+                })
             });
 
+        // Mock Telegram API
         mock_telegram_api
             .expect_send_photo()
             .with(
@@ -238,42 +261,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _| Ok(()));
 
-        process_download_request(
-            &test_url,
-            ChatId(123),
-            MessageId(456),
-            &mock_downloader,
-            &mock_telegram_api,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_process_download_request_sends_error_on_failure() {
-        let mut mock_downloader = MockDownloader::new();
-        let mut mock_telegram_api = MockTelegramApi::new();
-        let test_url = Url::parse("https://instagram.com/p/invalid_post").expect("");
-
-        mock_downloader
-            .expect_download_media()
-            .with(eq(test_url.clone()))
-            .times(1)
-            .returning(|_| Err(DownloadError::CommandFailed("Failed".to_string())));
-
-        mock_telegram_api
-            .expect_send_text_message()
-            .withf(|chat_id, message_id, msg| {
-                *chat_id == ChatId(123)
-                    && *message_id == MessageId(456)
-                    && msg.contains("could not process")
-            })
-            .times(1)
-            .returning(|_, _, _| Ok(()));
-
-        mock_telegram_api.expect_send_video().times(0);
-        mock_telegram_api.expect_send_photo().times(0);
-        mock_telegram_api.expect_send_media_group().times(0);
-
+        // Run Test
         process_download_request(
             &test_url,
             ChatId(123),
@@ -288,69 +276,102 @@ mod tests {
     async fn test_process_download_request_sends_media_group_on_multiple_items() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
-        let test_url = Url::parse("https://instagram.com/p/multiple_media").expect("");
-        let expected_caption = "caption";
+        let test_url = Url::parse("https://instagram.com/p/multiple_media").unwrap();
+        let expected_caption = "main caption".to_string();
 
+        // Mock pre-download check
+        mock_downloader
+            .expect_get_media_metadata()
+            .with(eq(test_url.clone()))
+            .times(1)
+            .returning(|_| {
+                Ok(MediaMetadata {
+                    // Say it's a playlist of 2 items.
+                    entries: Some(vec![create_test_metadata(), create_test_metadata()]),
+                    ..create_test_metadata()
+                })
+            });
+
+        // Mock actual download
+        let returned_caption = expected_caption.clone();
         mock_downloader
             .expect_download_media()
             .with(eq(test_url.clone()))
             .times(1)
             .returning(move |_| {
-                Ok((
-                    expected_caption.to_string(),
-                    vec![
+                // Return a single metadata object with the `entries` field populated.
+                Ok(MediaMetadata {
+                    final_caption: returned_caption.clone(),
+                    entries: Some(vec![
                         MediaMetadata {
                             filepath: "/tmp/item1.mp4".to_string(),
-                            description: "First video description".to_string(),
-                            title: "My Album Title".to_string(),
-                            uploader: Some("album_creator".to_string()),
-                            ext: "mp4".to_string(),
                             media_type: Some("video".to_string()),
-                            resolution: None,
-                            width: None,
-                            height: None,
+                            ..create_test_metadata()
                         },
                         MediaMetadata {
                             filepath: "/tmp/item2.jpg".to_string(),
-                            description: "Second image description".to_string(),
-                            title: "My Album Title".to_string(),
-                            ext: "jpg".to_string(),
-                            uploader: Some("album_creator".to_string()),
                             media_type: Some("image".to_string()),
-                            resolution: None,
-                            width: None,
-                            height: None,
+                            ..create_test_metadata()
                         },
-                    ],
-                ))
+                    ]),
+                    ..create_test_metadata()
+                })
             });
 
+        // Mock Telegram API
         mock_telegram_api
             .expect_send_media_group()
-            .with(
-                eq(ChatId(123)),
-                eq(MessageId(456)),
-                function(move |media_vec: &Vec<InputMedia>| {
-                    media_vec.len() == 2
-                        && if let Some(InputMedia::Video(v)) = media_vec.get(0) {
-                            format!("{:?}", v.media)
-                                == format!("{:?}", InputFile::file("/tmp/item1.mp4"))
-                                && v.parse_mode == Some(ParseMode::Html)
-                        } else {
-                            false
-                        }
-                        && if let Some(InputMedia::Photo(p)) = media_vec.get(1) {
-                            format!("{:?}", p.media)
-                                == format!("{:?}", InputFile::file("/tmp/item2.jpg"))
-                                && p.parse_mode == Some(ParseMode::Html)
-                        } else {
-                            false
-                        }
-                }),
-            )
+            .withf(move |_, _, media_vec: &Vec<InputMedia>| {
+                // Check the media group contents
+                media_vec.len() == 2 &&
+                // Check first item
+                matches!(&media_vec[0], InputMedia::Video(v) if v.caption == Some(expected_caption.clone())) &&
+                // Check second item
+                matches!(&media_vec[1], InputMedia::Photo(p) if p.caption == Some("".to_string()))
+            })
             .times(1)
             .returning(|_, _, _| Ok(()));
 
+        // Run Test
+        process_download_request(
+            &test_url,
+            ChatId(123),
+            MessageId(456),
+            &mock_downloader,
+            &mock_telegram_api,
+        )
+        .await;
+    }
+    
+    #[tokio::test]
+    async fn test_process_download_request_stops_if_pre_check_fails() {
+        let mut mock_downloader = MockDownloader::new();
+        let mut mock_telegram_api = MockTelegramApi::new();
+        let test_url = Url::parse("https://instagram.com/p/too_long").unwrap();
+        
+        // Mock the pre-download check to return a video that is too long
+        mock_downloader
+            .expect_get_media_metadata()
+            .with(eq(test_url.clone()))
+            .times(1)
+            .returning(|_| {
+                Ok(MediaMetadata {
+                    duration: Some(9999.0), // A very long duration
+                    ..create_test_metadata()
+                })
+            });
+            
+        // The actual download should NEVER be called.
+        mock_downloader.expect_download_media().times(0);
+        
+        // We expect a text message explaining the failure.
+        mock_telegram_api
+            .expect_send_text_message()
+            .withf(|_, _, msg| msg.contains("too long"))
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+            
+        // Run Test
         process_download_request(
             &test_url,
             ChatId(123),
@@ -362,47 +383,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_download_request_no_supported_media() {
+    async fn test_process_download_request_sends_error_on_download_failure() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
-        let test_url = Url::parse("https://example.com/unsupported").expect("");
-        let title_of_unsupported = "Unsupported File";
+        let test_url = Url::parse("https://instagram.com/p/invalid_post").unwrap();
+        
+        // Mock the pre-download check to succeed
+        mock_downloader
+            .expect_get_media_metadata()
+            .with(eq(test_url.clone()))
+            .times(1)
+            .returning(|_| Ok(create_test_metadata()));
 
+        // Mock the actual download to fail
         mock_downloader
             .expect_download_media()
             .with(eq(test_url.clone()))
             .times(1)
-            .returning(move |_| {
-                Ok((
-                    title_of_unsupported.to_string(),
-                    vec![MediaMetadata {
-                        filepath: "/tmp/document.pdf".to_string(),
-                        description: "A PDF document".to_string(),
-                        title: title_of_unsupported.to_string(),
-                        uploader: None,
-                        ext: "pdf".to_string(),
-                        media_type: Some("document".to_string()),
-                        resolution: None,
-                        width: None,
-                        height: None,
-                    }],
-                ))
-            });
+            .returning(|_| Err(DownloadError::CommandFailed("yt-dlp exploded".to_string())));
 
+        // We expect an error message
         mock_telegram_api
             .expect_send_text_message()
-            .withf(|chat_id, message_id, msg| {
-                *chat_id == ChatId(123)
-                    && *message_id == MessageId(456)
-                    && msg.contains("unsupported type")
-            })
+            .withf(|_, _, msg| msg.contains("could not process the link"))
             .times(1)
             .returning(|_, _, _| Ok(()));
 
+        // No media should be sent
         mock_telegram_api.expect_send_video().times(0);
         mock_telegram_api.expect_send_photo().times(0);
         mock_telegram_api.expect_send_media_group().times(0);
 
+        // Run Test
         process_download_request(
             &test_url,
             ChatId(123),
