@@ -114,10 +114,11 @@ async fn main() {
 
     let listener = teloxide::update_listeners::webhooks::axum(
         bot.clone(),
-        teloxide::update_listeners::webhooks::Options::new(addr, url),
+        teloxide::update_listeners::webhooks::Options::new(addr, url.clone()),
     )
     .await
     .expect("Failed to set webhook");
+    log::info!("Successfully set webhook {}", url);
 
     bot.set_my_commands(Command::bot_commands())
         .await

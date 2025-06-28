@@ -96,6 +96,7 @@ impl TelegramApi for TeloxideApi {
         message_id: MessageId,
         message: &str,
     ) -> Result<(), teloxide::RequestError> {
+        log::info!("Sending text to chat {}", chat_id);
         self.bot
             .send_message(chat_id, message)
             .parse_mode(ParseMode::Html)
