@@ -14,7 +14,6 @@ pub async fn process_download_request(
     downloader: &(dyn Downloader + Send + Sync),
     telegram_api: &(dyn TelegramApi + Send + Sync),
 ) {
-
     // --- STEP 1: PRE-DOWNLOAD METADATA CHECK ---
     log::info!("Beginning pre-download check for {}", url);
     match downloader.get_media_metadata(url).await {
@@ -23,22 +22,28 @@ pub async fn process_download_request(
             if let Err(validation_error) = validate_media_metadata(&metadata) {
                 // The error contains a user-friendly message, so we just send it.
                 log::warn!("Validation failed for {}: {}", url, validation_error);
-                let _ = telegram_api.send_text_message(
-                    chat_id, 
-                    message_id, 
-                    &validation_error.to_string()
-                ).await;
+                let _ = telegram_api
+                    .send_text_message(chat_id, message_id, &validation_error.to_string())
+                    .await;
                 return;
             }
         }
         Err(e) => {
             // If we can't even get metadata, it's probably an invalid link.
-            let error_message = format!("Sorry, I could not fetch information for that link. It might be private or invalid. Error: {}", e);
-            let _ = telegram_api.send_text_message(chat_id, message_id, &error_message).await;
+            let error_message = format!(
+                "Sorry, I could not fetch information for that link. It might be private or invalid. Error: {}",
+                e
+            );
+            let _ = telegram_api
+                .send_text_message(chat_id, message_id, &error_message)
+                .await;
             return;
         }
     }
-    log::info!("Pre-download checks passed for {}. Proceeding with download.", url);
+    log::info!(
+        "Pre-download checks passed for {}. Proceeding with download.",
+        url
+    );
 
     match downloader.download_media(url).await {
         Ok(result_metadata) => {
@@ -111,9 +116,7 @@ pub async fn process_download_request(
                         .send_media_group(chat_id, message_id, media_group)
                         .await;
                 }
-
-            }
-            else {
+            } else {
                 // --- Handle Single Item ---
                 // The result_metadata object itself represents the single downloaded file.
                 let file_path = &result_metadata.filepath;
@@ -160,8 +163,8 @@ mod tests {
     use crate::telegram_api::MockTelegramApi;
     use crate::test_utils::create_test_metadata;
     use mockall::predicate::*;
+    use teloxide::types::InputMedia;
     use teloxide::types::{ChatId, MessageId};
-    use teloxide::types::{InputMedia};
     use url::Url;
 
     #[tokio::test]
@@ -342,13 +345,13 @@ mod tests {
         )
         .await;
     }
-    
+
     #[tokio::test]
     async fn test_process_download_request_stops_if_pre_check_fails() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
         let test_url = Url::parse("https://instagram.com/p/too_long").unwrap();
-        
+
         // Mock the pre-download check to return a video that is too long
         mock_downloader
             .expect_get_media_metadata()
@@ -360,17 +363,17 @@ mod tests {
                     ..create_test_metadata()
                 })
             });
-            
+
         // The actual download should NEVER be called.
         mock_downloader.expect_download_media().times(0);
-        
+
         // We expect a text message explaining the failure.
         mock_telegram_api
             .expect_send_text_message()
             .withf(|_, _, msg| msg.contains("too long"))
             .times(1)
             .returning(|_, _, _| Ok(()));
-            
+
         // Run Test
         process_download_request(
             &test_url,
@@ -387,7 +390,7 @@ mod tests {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
         let test_url = Url::parse("https://instagram.com/p/invalid_post").unwrap();
-        
+
         // Mock the pre-download check to succeed
         mock_downloader
             .expect_get_media_metadata()

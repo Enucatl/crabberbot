@@ -1,5 +1,5 @@
-use thiserror::Error;
 use crate::downloader::MediaMetadata;
+use thiserror::Error;
 
 // These are our limits. Placing them here makes them easy to find and change.
 const MAX_DURATION_SECONDS: f64 = 600.0;
@@ -14,7 +14,7 @@ pub enum ValidationError {
 
     #[error("The media file is too large: {found_mb:.0} MB is over the {limit_mb:.0} MB limit.")]
     TooLarge { found_mb: u64, limit_mb: u64 },
-    
+
     #[error("The playlist is too long: {found} items is more than the maximum of {limit}.")]
     TooManyItems { found: usize, limit: usize },
 }
@@ -59,7 +59,6 @@ pub fn validate_media_metadata(metadata: &MediaMetadata) -> Result<(), Validatio
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*; // Imports everything from the parent module (validator)
@@ -78,7 +77,7 @@ mod tests {
     fn test_item_too_long() {
         let mut metadata = create_test_metadata();
         let duration = MAX_DURATION_SECONDS * 2.0;
-        metadata.duration = Some(duration); 
+        metadata.duration = Some(duration);
 
         let result = validate_media_metadata(&metadata);
         assert!(result.is_err());
@@ -90,7 +89,7 @@ mod tests {
             }
         );
     }
-    
+
     #[test]
     fn test_item_too_large() {
         let mut metadata = create_test_metadata();
@@ -107,7 +106,7 @@ mod tests {
             }
         );
     }
-    
+
     #[test]
     fn test_valid_playlist() {
         let mut metadata = create_test_metadata();

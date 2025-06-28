@@ -59,7 +59,8 @@ async fn handle_command(
         Command::Version => {
             let version = env!("CARGO_PACKAGE_VERSION");
             let version_message = format!("CrabberBot version {0}", version);
-            api.send_text_message(message.chat.id, message.id, &version_message).await?;
+            api.send_text_message(message.chat.id, message.id, &version_message)
+                .await?;
         }
     }
 
@@ -70,7 +71,7 @@ async fn handle_url(
     bot: Bot,
     downloader: Arc<dyn Downloader + Send + Sync>,
     api: Arc<dyn TelegramApi + Send + Sync>,
-    processing_users: ProcessingUsers,    
+    processing_users: ProcessingUsers,
     message: Message,
     url: Url,
 ) -> ResponseResult<()> {
@@ -100,15 +101,9 @@ async fn handle_url(
     };
     log::info!("Acquired lock for chat_id: {}", chat_id);
 
-    bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
-    process_download_request(
-        &url,
-        chat_id,
-        message.id,
-        downloader.as_ref(),
-        api.as_ref(),
-    )
-    .await;
+    bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
+        .await?;
+    process_download_request(&url, chat_id, message.id, downloader.as_ref(), api.as_ref()).await;
     Ok(())
 }
 

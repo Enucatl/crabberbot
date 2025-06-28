@@ -62,25 +62,15 @@ pub struct MediaMetadata {
 #[automock]
 #[async_trait]
 pub trait Downloader {
-    async fn get_media_metadata(
-        &self,
-        url: &Url,
-    ) -> Result<MediaMetadata, DownloadError>;
-    async fn download_media(
-        &self,
-        url: &Url,
-    ) -> Result<MediaMetadata, DownloadError>;
+    async fn get_media_metadata(&self, url: &Url) -> Result<MediaMetadata, DownloadError>;
+    async fn download_media(&self, url: &Url) -> Result<MediaMetadata, DownloadError>;
 }
 
 pub struct YtDlpDownloader;
 
 #[async_trait]
 impl Downloader for YtDlpDownloader {
-
-    async fn get_media_metadata(
-        &self,
-        url: &Url,
-    ) -> Result<MediaMetadata, DownloadError> {
+    async fn get_media_metadata(&self, url: &Url) -> Result<MediaMetadata, DownloadError> {
         log::info!("Fetching metadata for {}", url);
 
         let output = tokio::process::Command::new("yt-dlp")
@@ -99,18 +89,14 @@ impl Downloader for YtDlpDownloader {
         }
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
-        
-        serde_json::from_str::<MediaMetadata>(&stdout_str)
-            .map_err(|e| {
-                log::error!("Failed to parse metadata JSON for {}: {}", url, e);
-                DownloadError::ParsingFailed(e.to_string())
-            })
+
+        serde_json::from_str::<MediaMetadata>(&stdout_str).map_err(|e| {
+            log::error!("Failed to parse metadata JSON for {}: {}", url, e);
+            DownloadError::ParsingFailed(e.to_string())
+        })
     }
-    
-    async fn download_media(
-        &self,
-        url: &Url,
-    ) -> Result<MediaMetadata, DownloadError> {
+
+    async fn download_media(&self, url: &Url) -> Result<MediaMetadata, DownloadError> {
         let uuid = uuid::Uuid::new_v4().to_string();
         let filename_template = format!("{}.%(id)s.%(ext)s", uuid);
 
@@ -191,7 +177,7 @@ impl Downloader for YtDlpDownloader {
         } else {
             header
         };
-        
+
         // Truncate and store the caption in our new field.
         result_metadata.final_caption = final_caption_untruncated.chars().take(1024).collect();
 
