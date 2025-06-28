@@ -10,6 +10,7 @@ pub fn create_test_metadata() -> MediaMetadata {
         ext: Some("".to_string()),
         media_type: None,
         uploader: None,
+        playlist_uploader: None,
         resolution: None,
         width: None,
         height: None,

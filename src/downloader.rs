@@ -30,6 +30,8 @@ pub struct MediaMetadata {
     pub media_type: Option<String>,
     #[serde(default)]
     pub uploader: Option<String>,
+    #[serde(default)]
+    pub playlist_uploader: Option<String>,
 
     // Duration of the video in seconds.
     #[serde(default)]
@@ -167,8 +169,17 @@ impl Downloader for YtDlpDownloader {
             if !uploader.is_empty() {
                 quote_parts.push(format!("<i>{}</i>", uploader));
             }
+        } else if let Some(uploader) = &result_metadata.playlist_uploader {
+            if !uploader.is_empty() {
+                quote_parts.push(format!("<i>{}</i>", uploader));
+            }
         }
         if let Some(description) = &result_metadata.description {
+            let description = description.trim();
+            if !description.is_empty() {
+                quote_parts.push(description.to_string());
+            }
+        } else if let Some(description) = &result_metadata.title {
             let description = description.trim();
             if !description.is_empty() {
                 quote_parts.push(description.to_string());
