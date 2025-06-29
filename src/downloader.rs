@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use mockall::automock;
 use serde::Deserialize;
@@ -17,6 +19,7 @@ pub enum DownloadError {
 #[derive(Debug, Deserialize, PartialEq, Clone)]
 pub struct MediaMetadata {
     // ---- Fields for Post-Download Info
+    pub id: String,
     #[serde(rename = "_filename")]
     pub filepath: Option<String>,
     pub ext: Option<String>,
@@ -61,11 +64,74 @@ pub struct MediaMetadata {
     pub final_caption: String,
 }
 
+impl MediaMetadata {
+    /// Determines the Telegram media type ("photo" or "video") based on metadata.
+    ///
+    /// The logic prioritizes the `vcodec` field as it is the most reliable
+    /// indicator from yt-dlp. A `vcodec` of "none" signifies an image.
+    /// If `vcodec` is not present, it falls back to checking the file extension.
+    pub fn telegram_media_type(&self) -> Option<&'static str> {
+        if let Some(ext) = &self.ext {
+            match ext.as_str() {
+                "mp4" | "webm" | "gif" | "mov" => Some("video"),
+                "jpg" | "jpeg" | "png" | "webp" => Some("photo"),
+                _ => None, // Unsupported extension
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Builds and sets the `final_caption` field.
+    pub fn build_caption(&mut self, source_url: &Url) {
+        let via_link = "https://t.me/crabberbot?start=c";
+        let header = format!(
+            "<a href=\"{}\">CrabberBot</a> 🦀 <a href=\"{}\">Source</a>",
+            via_link, source_url
+        );
+
+        let mut quote_parts = Vec::new();
+        let uploader = self
+            .uploader
+            .as_deref()
+            .or(self.playlist_uploader.as_deref());
+        if let Some(uploader) = uploader {
+            if !uploader.is_empty() {
+                quote_parts.push(format!("<i>{}</i>", uploader));
+            }
+        }
+
+        let description = self.description.as_deref().or(self.title.as_deref());
+        if let Some(desc) = description {
+            let desc = desc.trim();
+            if !desc.is_empty() {
+                quote_parts.push(desc.to_string());
+            }
+        }
+
+        let final_caption_untruncated = if !quote_parts.is_empty() {
+            format!(
+                "{}\n\n<blockquote>{}</blockquote>",
+                header,
+                quote_parts.join("\n")
+            )
+        } else {
+            header
+        };
+
+        self.final_caption = final_caption_untruncated.chars().take(1024).collect();
+    }
+}
+
 #[automock]
 #[async_trait]
 pub trait Downloader {
     async fn get_media_metadata(&self, url: &Url) -> Result<MediaMetadata, DownloadError>;
-    async fn download_media(&self, url: &Url) -> Result<MediaMetadata, DownloadError>;
+    async fn download_media(
+        &self,
+        mut metadata: MediaMetadata,
+        url: &Url,
+    ) -> Result<MediaMetadata, DownloadError>;
 }
 
 pub struct YtDlpDownloader;
@@ -102,7 +168,11 @@ impl Downloader for YtDlpDownloader {
         })
     }
 
-    async fn download_media(&self, url: &Url) -> Result<MediaMetadata, DownloadError> {
+    async fn download_media(
+        &self,
+        mut metadata: MediaMetadata,
+        url: &Url,
+    ) -> Result<MediaMetadata, DownloadError> {
         let uuid = uuid::Uuid::new_v4().to_string();
         let filename_template = format!("{}.%(id)s.%(ext)s", uuid);
 
@@ -127,17 +197,17 @@ impl Downloader for YtDlpDownloader {
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
         // This will hold the metadata for each individual file downloaded.
-        let mut downloaded_items = Vec::new();
+        let mut downloaded_files = HashMap::new();
 
         for line in stdout_str.lines() {
             if line.trim().is_empty() {
                 continue;
             }
             match serde_json::from_str::<MediaMetadata>(line) {
-                Ok(metadata) => {
-                    let path_str = metadata.filepath.as_deref().unwrap_or("[unknown filepath]");
-                    log::info!("Successfully downloaded and parsed: {}", path_str);
-                    downloaded_items.push(metadata);
+                Ok(m) => {
+                    if let Some(path) = m.filepath {
+                        downloaded_files.insert(m.id, path);
+                    }
                 }
                 Err(e) => {
                     log::warn!("Failed to parse a line of yt-dlp JSON output: {}", e);
@@ -145,65 +215,32 @@ impl Downloader for YtDlpDownloader {
             }
         }
 
-        if downloaded_items.is_empty() {
+        if downloaded_files.is_empty() {
             return Err(DownloadError::ParsingFailed(
                 "Could not extract any media metadata from yt-dlp output.".to_string(),
             ));
         }
 
-        // Now, we construct the single, final MediaMetadata object.
-        // We'll use the metadata from the *first* downloaded item to build the caption
-        // and serve as the base for our return object.
-        let mut result_metadata = downloaded_items[0].clone();
-
-        // Build the caption
-        let source_link = url;
-        let via_link = "https://t.me/crabberbot?start=c";
-        let header = format!(
-            "<a href=\"{}\">CrabberBot</a> 🦀 <a href=\"{}\">Source</a>",
-            via_link, source_link
-        );
-
-        let mut quote_parts = Vec::new();
-        if let Some(uploader) = &result_metadata.uploader {
-            if !uploader.is_empty() {
-                quote_parts.push(format!("<i>{}</i>", uploader));
+        if let Some(entries) = &mut metadata.entries {
+            // Playlist case
+            for entry in entries.iter_mut() {
+                if let Some(path) = downloaded_files.get(&entry.id) {
+                    entry.filepath = Some(path.clone());
+                }
             }
-        } else if let Some(uploader) = &result_metadata.playlist_uploader {
-            if !uploader.is_empty() {
-                quote_parts.push(format!("<i>{}</i>", uploader));
+            // Also set the filepath for the top-level object for consistency
+            if !entries.is_empty() {
+                if let Some(path) = downloaded_files.get(&entries[0].id) {
+                    metadata.filepath = Some(path.clone());
+                }
             }
-        }
-        if let Some(description) = &result_metadata.description {
-            let description = description.trim();
-            if !description.is_empty() {
-                quote_parts.push(description.to_string());
-            }
-        } else if let Some(description) = &result_metadata.title {
-            let description = description.trim();
-            if !description.is_empty() {
-                quote_parts.push(description.to_string());
-            }
-        }
-
-        let final_caption_untruncated = if !quote_parts.is_empty() {
-            format!(
-                "{}\n\n<blockquote>{}</blockquote>",
-                header,
-                quote_parts.join("\n")
-            )
         } else {
-            header
-        };
-
-        // Truncate and store the caption in our new field.
-        result_metadata.final_caption = final_caption_untruncated.chars().take(1024).collect();
-
-        // If there was more than one item, populate the 'entries' field.
-        if downloaded_items.len() > 1 {
-            result_metadata.entries = Some(downloaded_items);
+            // Single item case
+            if let Some(path) = downloaded_files.get(&metadata.id) {
+                metadata.filepath = Some(path.clone());
+            }
         }
 
-        Ok(result_metadata)
+        Ok(metadata)
     }
 }
