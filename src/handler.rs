@@ -7,6 +7,40 @@ use crate::downloader::{Downloader, MediaMetadata};
 use crate::telegram_api::TelegramApi;
 use crate::validator::validate_media_metadata;
 
+/// An RAII guard to ensure downloaded files are cleaned up.
+/// When this struct goes out of scope, its `drop` implementation
+/// is called, which spawns a task to delete the files.
+struct FileCleanupGuard {
+    paths: Vec<String>,
+}
+
+impl Drop for FileCleanupGuard {
+    fn drop(&mut self) {
+        if self.paths.is_empty() {
+            return;
+        }
+
+        let paths_to_delete = self.paths.clone();
+        log::info!(
+            "Cleanup guard is dropping. Spawning task to delete {} file(s).",
+            paths_to_delete.len()
+        );
+
+        // Since `drop` is synchronous, we can't `.await` here.
+        // We spawn a new async task to handle the deletion in the background.
+        // This is a "fire-and-forget" task.
+        tokio::spawn(async move {
+            for path in &paths_to_delete {
+                match tokio::fs::remove_file(path).await {
+                    Ok(_) => log::info!("Successfully removed file: {}", path),
+                    Err(e) => log::error!("Failed to remove file {}: {}", path, e),
+                }
+            }
+        });
+    }
+}
+
+
 pub async fn process_download_request(
     url: &Url,
     chat_id: ChatId,
@@ -47,6 +81,26 @@ pub async fn process_download_request(
 
     match downloader.download_media(url).await {
         Ok(result_metadata) => {
+            // --- Collect file paths for cleanup ---
+            // We do this first, before `result_metadata` or its fields might be moved.
+            let files_to_delete: Vec<String> = if let Some(entries) = &result_metadata.entries {
+                entries
+                    .iter()
+                    .filter_map(|item| item.filepath.clone())
+                    .collect()
+            } else if let Some(filepath) = &result_metadata.filepath {
+                vec![filepath.clone()]
+            } else {
+                // No files were downloaded, nothing to clean up.
+                vec![]
+            };
+            
+            // The guard is created here. The `_` is important to bind it to the scope
+            // without getting an "unused variable" warning. Cleanup is now guaranteed.
+            let _cleanup_guard = FileCleanupGuard {
+                paths: files_to_delete,
+            };
+
             // Helper closure to determine media type
             let get_telegram_media_type = |item: &MediaMetadata| {
                 if let Some(media_type_str) = &item.media_type {

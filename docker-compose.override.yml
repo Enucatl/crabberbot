@@ -1,7 +1,7 @@
 # Define common build arguments using a YAML anchor
 x-common-build-args: &common_build_args
   YT_DLP_REPO_URL: "https://github.com/Enucatl/yt-dlp.git"
-  YT_DLP_COMMIT_HASH: "threads"
+  YT_DLP_COMMIT_HASH: "master"
   CARGO_PACKAGE_VERSION: "${CARGO_PACKAGE_VERSION:-unknown}"
 
 # docker-compose.override.yml
