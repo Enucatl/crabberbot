@@ -40,6 +40,32 @@ impl Drop for FileCleanupGuard {
     }
 }
 
+/// A helper to execute a Telegram send operation, log the result,
+/// and notify the user on failure.
+async fn handle_send_operation(
+    send_future: impl Future<Output = Result<(), teloxide::RequestError>> + Send,
+    chat_id: ChatId,
+    message_id: MessageId,
+    telegram_api: &(dyn TelegramApi + Send + Sync),
+) {
+    match send_future.await {
+        Ok(_) => {
+            log::info!("Successfully sent to chat_id: {}", chat_id);
+        }
+        Err(e) => {
+            log::error!("Failed to send: Error: {:?}", e);
+            // Optionally, inform the user about the failure.
+            let _ = telegram_api
+                .send_text_message(
+                    chat_id,
+                    message_id,
+                    "Sorry, I encountered an error while sending the media.",
+                )
+                .await;
+        }
+    }
+}
+
 pub async fn process_download_request(
     url: &Url,
     chat_id: ChatId,
@@ -160,29 +186,12 @@ pub async fn process_download_request(
                         )
                         .await;
         } else {
-            match telegram_api
-                .send_media_group(chat_id, message_id, media_group)
-                .await
-            {
-                Ok(_) => {
-                    log::info!("Successfully sent media group for chat_id: {}", chat_id);
-                }
-                Err(e) => {
-                    log::error!(
-                        "Failed to send media group for chat_id: {}. Error: {:?}",
-                        chat_id,
-                        e
-                    );
-                    // Optionally, inform the user about the failure.
-                    let _ = telegram_api
-                        .send_text_message(
-                            chat_id,
-                            message_id,
-                            "Sorry, I encountered an error while sending the media. Please try again.",
-                        )
-                    .await;
-                }
-            }
+            handle_send_operation(
+                telegram_api.send_media_group(chat_id, message_id, media_group),
+                chat_id,
+                message_id,
+                telegram_api,
+            ).await;
         }
     } else {
         // --- Handle Single Item ---
@@ -191,16 +200,18 @@ pub async fn process_download_request(
             let final_caption = &post_download_metadata.final_caption;
 
             match post_download_metadata.telegram_media_type() {
-                Some("video") => {
-                    let _ = telegram_api
-                        .send_video(chat_id, message_id, filepath, final_caption)
-                        .await;
-                }
-                Some("photo") => {
-                    let _ = telegram_api
-                        .send_photo(chat_id, message_id, filepath, final_caption)
-                        .await;
-                }
+                Some("video") => handle_send_operation(
+                    telegram_api.send_video(chat_id, message_id, filepath, final_caption),
+                    chat_id,
+                    message_id,
+                    telegram_api,
+                ).await,
+                Some("photo") => handle_send_operation(
+                    telegram_api.send_photo(chat_id, message_id, filepath, final_caption),
+                    chat_id,
+                    message_id,
+                    telegram_api,
+                ).await,
                 _ => {
                     log::warn!(
                         "Unsupported single media type encountered for: {}",

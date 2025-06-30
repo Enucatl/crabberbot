@@ -57,6 +57,7 @@ FROM debian:bullseye-slim AS runtime
 # We don't need git, make, or pip in the final image.
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    ffmpeg \
     python3 \
     && rm -rf /var/lib/apt/lists/*
 
