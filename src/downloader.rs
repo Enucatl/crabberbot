@@ -109,17 +109,20 @@ impl MediaMetadata {
             }
         }
 
-        let final_caption_untruncated = if !quote_parts.is_empty() {
-            format!(
-                "{}\n\n<blockquote>{}</blockquote>",
-                header,
-                quote_parts.join("\n")
-            )
-        } else {
-            header
-        };
+        let full_quote_content = quote_parts.join("\n");
+        // Calculate the space taken by the HTML scaffolding.
+        // header + "\n\n" + "<blockquote>" + "</blockquote> + 5 margin"
+        let overhead = header.len() + 2 + 12 + 13 + 5;
+        let available_space_for_quote = 1024_usize.saturating_sub(overhead);
+        let truncated_quote_content: String = full_quote_content
+            .chars()
+            .take(available_space_for_quote)
+            .collect();
 
-        self.final_caption = final_caption_untruncated.chars().take(1024).collect();
+        self.final_caption = format!(
+            "{}\n\n<blockquote>{}</blockquote>",
+            header, truncated_quote_content
+        );
     }
 }
 

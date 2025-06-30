@@ -160,9 +160,29 @@ pub async fn process_download_request(
                         )
                         .await;
         } else {
-            let _ = telegram_api
+            match telegram_api
                 .send_media_group(chat_id, message_id, media_group)
-                .await;
+                .await
+            {
+                Ok(_) => {
+                    log::info!("Successfully sent media group for chat_id: {}", chat_id);
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to send media group for chat_id: {}. Error: {:?}",
+                        chat_id,
+                        e
+                    );
+                    // Optionally, inform the user about the failure.
+                    let _ = telegram_api
+                        .send_text_message(
+                            chat_id,
+                            message_id,
+                            "Sorry, I encountered an error while sending the media. Please try again.",
+                        )
+                    .await;
+                }
+            }
         }
     } else {
         // --- Handle Single Item ---
