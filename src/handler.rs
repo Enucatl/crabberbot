@@ -191,7 +191,8 @@ pub async fn process_download_request(
                 chat_id,
                 message_id,
                 telegram_api,
-            ).await;
+            )
+            .await;
         }
     } else {
         // --- Handle Single Item ---
@@ -200,18 +201,24 @@ pub async fn process_download_request(
             let final_caption = &post_download_metadata.final_caption;
 
             match post_download_metadata.telegram_media_type() {
-                Some("video") => handle_send_operation(
-                    telegram_api.send_video(chat_id, message_id, filepath, final_caption),
-                    chat_id,
-                    message_id,
-                    telegram_api,
-                ).await,
-                Some("photo") => handle_send_operation(
-                    telegram_api.send_photo(chat_id, message_id, filepath, final_caption),
-                    chat_id,
-                    message_id,
-                    telegram_api,
-                ).await,
+                Some("video") => {
+                    handle_send_operation(
+                        telegram_api.send_video(chat_id, message_id, filepath, final_caption),
+                        chat_id,
+                        message_id,
+                        telegram_api,
+                    )
+                    .await
+                }
+                Some("photo") => {
+                    handle_send_operation(
+                        telegram_api.send_photo(chat_id, message_id, filepath, final_caption),
+                        chat_id,
+                        message_id,
+                        telegram_api,
+                    )
+                    .await
+                }
                 _ => {
                     log::warn!(
                         "Unsupported single media type encountered for: {}",
