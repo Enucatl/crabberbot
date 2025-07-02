@@ -6,7 +6,10 @@ services:
       - RUST_LOG=info,crabberbot=info
       - WEBHOOK_URL
       - TELOXIDE_TOKEN
+      - TELOXIDE_API_URL=http://telegram-bot-api:8081
     restart: unless-stopped
+    depends_on:
+      - telegram-bot-api
 
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -14,3 +17,13 @@ services:
     environment:
       - TUNNEL_TOKEN
     command: tunnel run
+
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    environment:
+      - TELEGRAM_API_ID
+      - TELEGRAM_API_HASH
+      - TELEGRAM_VERBOSITY
+      - TELEGRAM_LOCAL=1
+    depends_on:
+      - cloudflared
