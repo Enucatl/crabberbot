@@ -86,7 +86,6 @@ With your `.env` file configured, start the entire application stack with a sing
 ```bash
 docker-compose up -d
 ```
-```
 
 This will:
 -   Pull the pre-built images for the bot, API server, and tunnel.
