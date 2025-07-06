@@ -65,11 +65,7 @@ pub struct MediaMetadata {
 }
 
 impl MediaMetadata {
-    /// Determines the Telegram media type ("photo" or "video") based on metadata.
-    ///
-    /// The logic prioritizes the `vcodec` field as it is the most reliable
-    /// indicator from yt-dlp. A `vcodec` of "none" signifies an image.
-    /// If `vcodec` is not present, it falls back to checking the file extension.
+    /// Determines the Telegram media type ("photo" or "video") based on extension.
     pub fn telegram_media_type(&self) -> Option<&'static str> {
         if let Some(ext) = &self.ext {
             match ext.as_str() {

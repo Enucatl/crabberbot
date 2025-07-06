@@ -66,6 +66,16 @@ async fn handle_send_operation(
     }
 }
 
+/// Creates a new URL with the query string and fragment removed.
+/// This is useful for creating a canonical URL for processing and display,
+/// removing tracking parameters like `?utm_source=...` or `?si=...`.
+fn cleanup_url(original_url: &Url) -> Url {
+    let mut cleaned_url = original_url.clone();
+    cleaned_url.set_query(None);
+    cleaned_url.set_fragment(None); // Also good practice to remove the #fragment
+    cleaned_url
+}
+
 pub async fn process_download_request(
     url: &Url,
     chat_id: ChatId,
@@ -73,12 +83,13 @@ pub async fn process_download_request(
     downloader: &(dyn Downloader + Send + Sync),
     telegram_api: &(dyn TelegramApi + Send + Sync),
 ) {
+    let clean_url = cleanup_url(url);
     // --- STEP 1: PRE-DOWNLOAD METADATA CHECK ---
-    log::info!("Beginning pre-download check for {}", url);
-    let pre_download_metadata = match downloader.get_media_metadata(url).await {
+    log::info!("Beginning pre-download check for {}", clean_url);
+    let pre_download_metadata = match downloader.get_media_metadata(&clean_url).await {
         Ok(metadata) => {
             if let Err(validation_error) = validate_media_metadata(&metadata) {
-                log::warn!("Validation failed for {}: {}", url, validation_error);
+                log::warn!("Validation failed for {}: {}", clean_url, validation_error);
                 let _ = telegram_api
                     .send_text_message(chat_id, message_id, &validation_error.to_string())
                     .await;
@@ -100,11 +111,11 @@ pub async fn process_download_request(
     };
     log::info!(
         "Pre-download checks passed for {}. Proceeding with download.",
-        url
+        clean_url
     );
 
     let mut post_download_metadata =
-        match downloader.download_media(pre_download_metadata, url).await {
+        match downloader.download_media(pre_download_metadata, &clean_url).await {
             Ok(metadata) => metadata,
             Err(e) => {
                 let error_message = format!("Sorry, I could not download the media: {}", e);
@@ -129,7 +140,7 @@ pub async fn process_download_request(
         vec![]
     };
 
-    post_download_metadata.build_caption(url);
+    post_download_metadata.build_caption(&clean_url);
 
     // The guard is created here. The `_` is important to bind it to the scope
     // without getting an "unused variable" warning. Cleanup is now guaranteed.

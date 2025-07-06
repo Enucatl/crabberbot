@@ -5,7 +5,7 @@ use thiserror::Error;
 const MAX_DURATION_SECONDS: f64 = 600.0;
 const MAX_FILESIZE_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
 const MAX_VIDEO_PLAYLIST_ITEMS: usize = 5;
-const MAX_IMAGE_PLAYLIST_ITEMS: usize = 50; // New, larger limit for images/galleries
+const MAX_IMAGE_PLAYLIST_ITEMS: usize = 10; // New, larger limit for images/galleries
 
 /// Represents the specific reasons why media metadata might be invalid.
 #[derive(Error, Debug, PartialEq)]
@@ -30,7 +30,6 @@ pub enum ValidationError {
 /// * `Err(ValidationError)` if the metadata exceeds any of the limits.
 pub fn validate_media_metadata(metadata: &MediaMetadata) -> Result<(), ValidationError> {
     if let Some(entries) = &metadata.entries {
-        // --- CHANGED: Dynamic limit based on content type ---
         // We check the first item in the playlist to determine the content type.
         let is_video_playlist = entries
             .first()
