@@ -1,7 +1,6 @@
 # CrabberBot 🦀
 
 [![GitHub Actions CI/CD](https://github.com/Enucatl/crabberbot/actions/workflows/deploy.yml/badge.svg)](https://github.com/Enucatl/crabberbot/actions/workflows/deploy.yml)
-[![Docker Image](https://ghcr-badge.dnp.one/enucatl/crabberbot/tag/latest?trim=major&label=docker)](https://github.com/Enucatl/crabberbot/pkgs/container/crabberbot)
 [![Made with Rust](https://img.shields.io/badge/made%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
