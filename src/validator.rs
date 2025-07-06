@@ -143,7 +143,7 @@ mod tests {
     fn test_valid_image_playlist() {
         let mut metadata = create_test_metadata();
         // Use a number of items over the video limit but under the image limit
-        let n_items = MAX_IMAGE_PLAYLIST_ITEMS - 10;
+        let n_items = MAX_IMAGE_PLAYLIST_ITEMS - 1;
         assert!(n_items > MAX_VIDEO_PLAYLIST_ITEMS);
 
         let mut image_entry = create_test_metadata();
