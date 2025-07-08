@@ -70,7 +70,7 @@ impl MediaMetadata {
         if let Some(ext) = &self.ext {
             match ext.as_str() {
                 "mp4" | "webm" | "gif" | "mov" => Some("video"),
-                "jpg" | "jpeg" | "png" | "webp" => Some("photo"),
+                "jpg" | "jpeg" | "png" | "webp" | "heic" => Some("photo"),
                 _ => None, // Unsupported extension
             }
         } else {
