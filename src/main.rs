@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::io::Write; 
+use log::LevelFilter;
 
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
@@ -107,7 +109,27 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-    pretty_env_logger::init();
+
+    let mut builder = pretty_env_logger::formatted_builder();
+
+    // Set a default log level if RUST_LOG is not set.
+    builder.filter_level(LevelFilter::Info);
+
+    // Define and apply the custom format.
+    builder.format(|buf, record| {
+        writeln!(
+            buf,
+            "{} | {} | {}:{} | {}",
+            buf.timestamp(),
+            record.level(),
+            record.file().unwrap_or("unknown"),
+            record.line().unwrap_or(0),
+            record.args()
+        )
+    });
+
+    // Initialize the logger.
+    builder.init();
 
     let version = env!("CARGO_PACKAGE_VERSION");
     log::info!("Starting CrabberBot version {}", version);
@@ -119,7 +141,6 @@ async fn main() {
     let api: Arc<dyn TelegramApi + Send + Sync> = Arc::new(TeloxideApi::new(bot.clone()));
     let limiter = Arc::new(ConcurrencyLimiter::new());
 
-    // For Google Cloud Run, we use webhooks
     let addr = ([0, 0, 0, 0], 8080).into();
     let webhook_url_str = std::env::var("WEBHOOK_URL").expect("WEBHOOK_URL env var not set");
     let url: Url = webhook_url_str.parse().unwrap();
