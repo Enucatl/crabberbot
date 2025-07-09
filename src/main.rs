@@ -144,7 +144,7 @@ async fn main() {
     let bot = Bot::from_env();
 
     // Instantiate our REAL dependencies
-    let downloader: Arc<dyn Downloader + Send + Sync> = Arc::new(YtDlpDownloader);
+    let downloader: Arc<dyn Downloader + Send + Sync> = Arc::new(YtDlpDownloader::new());
     let api: Arc<dyn TelegramApi + Send + Sync> = Arc::new(TeloxideApi::new(bot.clone()));
     let processing_users: ProcessingUsers = Arc::new(DashSet::new());
 

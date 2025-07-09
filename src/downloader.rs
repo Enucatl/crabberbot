@@ -133,18 +133,41 @@ pub trait Downloader {
     ) -> Result<MediaMetadata, DownloadError>;
 }
 
-pub struct YtDlpDownloader;
+pub struct YtDlpDownloader {
+    yt_dlp_path: String,
+}
+
+impl YtDlpDownloader {
+    pub fn new() -> Self {
+        let yt_dlp_path = std::env::var("YT_DLP_PATH").unwrap_or_else(|_| "yt-dlp".to_string());
+        log::info!("Using yt-dlp executable at: {}", yt_dlp_path);
+        Self { yt_dlp_path }
+    }
+
+    /// Helper function to create a base `yt-dlp` command with common arguments.
+    fn build_base_command(&self) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(&self.yt_dlp_path);
+        command.arg("--no-warnings").arg("--ignore-config");
+        command
+    }
+}
+
+// Implement `Default` to make instantiation cleaner when no custom config is needed.
+impl Default for YtDlpDownloader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl Downloader for YtDlpDownloader {
     async fn get_media_metadata(&self, url: &Url) -> Result<MediaMetadata, DownloadError> {
         log::info!("Fetching metadata for {}", url);
 
-        let output = tokio::process::Command::new("yt-dlp")
-            .arg("--dump-single-json")
-            .arg("--no-warnings")
-            .arg("--ignore-config")
-            .arg(url.as_str())
+        let mut command = self.build_base_command();
+        command.arg("--dump-single-json").arg(url.as_str());
+
+        let output = command
             .output()
             .await
             .map_err(|e| DownloadError::CommandFailed(e.to_string()))?;
@@ -173,17 +196,20 @@ impl Downloader for YtDlpDownloader {
         url: &Url,
     ) -> Result<MediaMetadata, DownloadError> {
         let uuid = uuid::Uuid::new_v4().to_string();
-        let filename_template = format!("{}.%(id)s.%(ext)s", uuid);
+        // Prepending with `./` is a good practice to ensure the file is created in the
+        // current working directory, avoiding ambiguity.
+        let filename_template = format!("./{}.%(id)s.%(ext)s", uuid);
 
         log::info!("Downloading {}", url);
 
-        let output = tokio::process::Command::new("yt-dlp")
+        let mut command = self.build_base_command();
+        command
             .arg("--print-json")
-            .arg("--no-warnings")
-            .arg("--ignore-config")
             .arg("-o")
             .arg(&filename_template)
-            .arg(url.as_str())
+            .arg(url.as_str());
+
+        let output = command
             .output()
             .await
             .map_err(|e| DownloadError::CommandFailed(e.to_string()))?;
@@ -241,5 +267,38 @@ impl Downloader for YtDlpDownloader {
         }
 
         Ok(metadata)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use url::Url;
+
+    // This test confirms that the downloader attempts to use the path provided
+    // during its creation. We provide a path we know doesn't exist.
+    #[tokio::test]
+    async fn test_yt_dlp_uses_custom_path_and_fails_if_invalid() {
+        // This path is intentionally invalid.
+        let downloader = YtDlpDownloader {
+            yt_dlp_path: "/path/to/a/nonexistent/yt-dlp-binary".to_string(),
+        };
+
+        let url = Url::parse("https://example.com").unwrap();
+
+        let result = downloader.get_media_metadata(&url).await;
+
+        // We expect the operation to fail because the command cannot be found.
+        assert!(result.is_err());
+
+        // We can also be more specific about the error type.
+        match result {
+            Err(DownloadError::CommandFailed(msg)) => {
+                // The error message from the OS will contain something like "No such file or directory"
+                // This proves that it tried to execute the specific, invalid path.
+                assert!(msg.contains("No such file or directory"));
+            }
+            _ => panic!("Expected CommandFailed error, but got something else."),
+        }
     }
 }

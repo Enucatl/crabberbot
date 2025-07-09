@@ -1,9 +1,10 @@
+use std::future::Future;
 use teloxide::types::{
     ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, MessageId, ParseMode,
 };
 use url::Url;
 
-use crate::downloader::Downloader;
+use crate::downloader::{Downloader, MediaMetadata};
 use crate::telegram_api::TelegramApi;
 use crate::validator::validate_media_metadata;
 
@@ -76,6 +77,155 @@ fn cleanup_url(original_url: &Url) -> Url {
     cleaned_url
 }
 
+/// Step 1: Perform pre-download validation.
+async fn pre_download_validation(
+    url: &Url,
+    chat_id: ChatId,
+    message_id: MessageId,
+    downloader: &(dyn Downloader + Send + Sync),
+    telegram_api: &(dyn TelegramApi + Send + Sync),
+) -> Result<MediaMetadata, ()> {
+    log::info!("Beginning pre-download check for {}", url);
+    match downloader.get_media_metadata(url).await {
+        Ok(metadata) => {
+            if let Err(validation_error) = validate_media_metadata(&metadata) {
+                log::warn!("Validation failed for {}: {}", url, validation_error);
+                let _ = telegram_api
+                    .send_text_message(chat_id, message_id, &validation_error.to_string())
+                    .await;
+                Err(())
+            } else {
+                log::info!(
+                    "Pre-download checks passed for {}. Proceeding with download.",
+                    url
+                );
+                Ok(metadata)
+            }
+        }
+        Err(e) => {
+            let error_message = format!(
+                "Sorry, I could not fetch information for that link. It might be private or invalid. Error: {}",
+                e
+            );
+            let _ = telegram_api
+                .send_text_message(chat_id, message_id, &error_message)
+                .await;
+            Err(())
+        }
+    }
+}
+
+/// Step 2: Download the media and build the final caption.
+async fn download_and_prepare_media(
+    pre_download_metadata: MediaMetadata,
+    url: &Url,
+    chat_id: ChatId,
+    message_id: MessageId,
+    downloader: &(dyn Downloader + Send + Sync),
+    telegram_api: &(dyn TelegramApi + Send + Sync),
+) -> Result<MediaMetadata, ()> {
+    match downloader.download_media(pre_download_metadata, url).await {
+        Ok(mut metadata) => {
+            metadata.build_caption(url);
+            Ok(metadata)
+        }
+        Err(e) => {
+            let error_message = format!("Sorry, I could not download the media: {}", e);
+            let _ = telegram_api
+                .send_text_message(chat_id, message_id, &error_message)
+                .await;
+            Err(())
+        }
+    }
+}
+
+/// Step 3 (Branch A): Handle sending a single media item.
+async fn send_single_item(
+    metadata: &MediaMetadata,
+    chat_id: ChatId,
+    message_id: MessageId,
+    telegram_api: &(dyn TelegramApi + Send + Sync),
+) {
+    if let Some(filepath) = &metadata.filepath {
+        let caption = &metadata.final_caption;
+        let send_future = match metadata.telegram_media_type() {
+            Some("video") => telegram_api.send_video(chat_id, message_id, filepath, caption),
+            Some("photo") => telegram_api.send_photo(chat_id, message_id, filepath, caption),
+            _ => {
+                log::warn!(
+                    "Unsupported single media type encountered for: {}",
+                    filepath
+                );
+                let msg = "Sorry, the single media item downloaded had an unsupported type.";
+                // Send the message and then return. The `_` ignores the result.
+                let _ = telegram_api
+                    .send_text_message(chat_id, message_id, msg)
+                    .await;
+                return;
+            }
+        };
+        handle_send_operation(send_future, chat_id, message_id, telegram_api).await;
+    }
+}
+
+/// Step 3 (Branch B): Handle sending a media group.
+async fn send_media_group(
+    metadata: &MediaMetadata,
+    chat_id: ChatId,
+    message_id: MessageId,
+    telegram_api: &(dyn TelegramApi + Send + Sync),
+) {
+    let media_items = metadata.entries.as_ref().unwrap(); // Should only be called if entries exist
+    let mut media_group: Vec<InputMedia> = Vec::new();
+
+    for (i, item) in media_items.iter().enumerate() {
+        if let Some(filepath) = &item.filepath {
+            let input_file = InputFile::file(filepath);
+            let item_caption = if i == 0 {
+                metadata.final_caption.clone()
+            } else {
+                String::new()
+            };
+
+            let media = match item.telegram_media_type() {
+                Some("video") => Some(InputMedia::Video(
+                    InputMediaVideo::new(input_file)
+                        .parse_mode(ParseMode::Html)
+                        .caption(item_caption),
+                )),
+                Some("photo") => Some(InputMedia::Photo(
+                    InputMediaPhoto::new(input_file)
+                        .parse_mode(ParseMode::Html)
+                        .caption(item_caption),
+                )),
+                _ => {
+                    log::warn!("Unsupported media type in group: {}", filepath);
+                    None
+                }
+            };
+            if let Some(m) = media {
+                media_group.push(m);
+            }
+        }
+    }
+
+    if media_group.is_empty() {
+        let msg = "Sorry, although multiple items were found, none were of a supported type for a media group.";
+        let _ = telegram_api
+            .send_text_message(chat_id, message_id, msg)
+            .await;
+    } else {
+        handle_send_operation(
+            telegram_api.send_media_group(chat_id, message_id, media_group),
+            chat_id,
+            message_id,
+            telegram_api,
+        )
+        .await;
+    }
+}
+
+// --- REFACTORED ORCHESTRATOR FUNCTION ---
 pub async fn process_download_request(
     url: &Url,
     chat_id: ChatId,
@@ -84,171 +234,50 @@ pub async fn process_download_request(
     telegram_api: &(dyn TelegramApi + Send + Sync),
 ) {
     let clean_url = cleanup_url(url);
-    // --- STEP 1: PRE-DOWNLOAD METADATA CHECK ---
-    log::info!("Beginning pre-download check for {}", clean_url);
-    let pre_download_metadata = match downloader.get_media_metadata(&clean_url).await {
-        Ok(metadata) => {
-            if let Err(validation_error) = validate_media_metadata(&metadata) {
-                log::warn!("Validation failed for {}: {}", clean_url, validation_error);
-                let _ = telegram_api
-                    .send_text_message(chat_id, message_id, &validation_error.to_string())
-                    .await;
-                return;
-            }
-            metadata
-        }
-        Err(e) => {
-            // If we can't even get metadata, it's probably an invalid link.
-            let error_message = format!(
-                "Sorry, I could not fetch information for that link. It might be private or invalid. Error: {}",
-                e
-            );
-            let _ = telegram_api
-                .send_text_message(chat_id, message_id, &error_message)
-                .await;
-            return;
-        }
-    };
-    log::info!(
-        "Pre-download checks passed for {}. Proceeding with download.",
-        clean_url
-    );
 
-    let mut post_download_metadata = match downloader
-        .download_media(pre_download_metadata, &clean_url)
-        .await
+    let pre_download_metadata =
+        match pre_download_validation(&clean_url, chat_id, message_id, downloader, telegram_api)
+            .await
+        {
+            Ok(meta) => meta,
+            Err(_) => return,
+        };
+
+    let post_download_metadata = match download_and_prepare_media(
+        pre_download_metadata,
+        &clean_url,
+        chat_id,
+        message_id,
+        downloader,
+        telegram_api,
+    )
+    .await
     {
-        Ok(metadata) => metadata,
-        Err(e) => {
-            let error_message = format!("Sorry, I could not download the media: {}", e);
-            let _ = telegram_api
-                .send_text_message(chat_id, message_id, &error_message)
-                .await;
-            return;
-        }
+        Ok(meta) => meta,
+        Err(_) => return,
     };
 
-    // --- Collect file paths for cleanup ---
-    // We do this first, before `result_metadata` or its fields might be moved.
+    // --- File Cleanup Guard ---
     let files_to_delete: Vec<String> = if let Some(entries) = &post_download_metadata.entries {
         entries
             .iter()
             .filter_map(|item| item.filepath.clone())
             .collect()
-    } else if let Some(filepath) = &post_download_metadata.filepath {
-        vec![filepath.clone()]
     } else {
-        // No files were downloaded, nothing to clean up.
-        vec![]
+        post_download_metadata
+            .filepath
+            .clone()
+            .map_or(vec![], |p| vec![p])
     };
-
-    post_download_metadata.build_caption(&clean_url);
-
-    // The guard is created here. The `_` is important to bind it to the scope
-    // without getting an "unused variable" warning. Cleanup is now guaranteed.
     let _cleanup_guard = FileCleanupGuard {
         paths: files_to_delete,
     };
 
-    // Check if we have a media group (playlist) or a single item
-    if let Some(media_items) = post_download_metadata.entries {
-        // --- Handle Media Group ---
-        let mut media_group: Vec<InputMedia> = Vec::new();
-        for (i, item) in media_items.into_iter().enumerate() {
-            if let Some(filepath) = &item.filepath {
-                let input_file = InputFile::file(filepath);
-
-                // The main caption is now on the top-level object
-                let item_caption = if i == 0 {
-                    post_download_metadata.final_caption.clone()
-                } else {
-                    String::new()
-                };
-
-                match item.telegram_media_type() {
-                    Some("video") => {
-                        media_group.push(InputMedia::Video(
-                            InputMediaVideo::new(input_file)
-                                .caption(item_caption)
-                                .parse_mode(ParseMode::Html),
-                        ));
-                    }
-                    Some("photo") => {
-                        media_group.push(InputMedia::Photo(
-                            InputMediaPhoto::new(input_file)
-                                .caption(item_caption)
-                                .parse_mode(ParseMode::Html),
-                        ));
-                    }
-                    _ => {
-                        log::warn!("Unsupported media type in group encountered: {}", filepath);
-                        // For group sends, we typically just skip unsupported types quietly
-                    }
-                }
-            } else {
-                continue;
-            }
-        }
-
-        if media_group.is_empty() {
-            let _ = telegram_api
-                        .send_text_message(
-                            chat_id,
-                            message_id,
-                            "Sorry, although multiple items were found, none were of a supported type for a media group.",
-                        )
-                        .await;
-        } else {
-            handle_send_operation(
-                telegram_api.send_media_group(chat_id, message_id, media_group),
-                chat_id,
-                message_id,
-                telegram_api,
-            )
-            .await;
-        }
+    // --- Dispatch to appropriate sender ---
+    if post_download_metadata.entries.is_some() {
+        send_media_group(&post_download_metadata, chat_id, message_id, telegram_api).await;
     } else {
-        // --- Handle Single Item ---
-        // The result_metadata object itself represents the single downloaded file.
-        if let Some(filepath) = &post_download_metadata.filepath {
-            let final_caption = &post_download_metadata.final_caption;
-
-            match post_download_metadata.telegram_media_type() {
-                Some("video") => {
-                    handle_send_operation(
-                        telegram_api.send_video(chat_id, message_id, filepath, final_caption),
-                        chat_id,
-                        message_id,
-                        telegram_api,
-                    )
-                    .await
-                }
-                Some("photo") => {
-                    handle_send_operation(
-                        telegram_api.send_photo(chat_id, message_id, filepath, final_caption),
-                        chat_id,
-                        message_id,
-                        telegram_api,
-                    )
-                    .await
-                }
-                _ => {
-                    log::warn!(
-                        "Unsupported single media type encountered for: {}",
-                        filepath
-                    );
-                    let _ = telegram_api
-                        .send_text_message(
-                            chat_id,
-                            message_id,
-                            &format!(
-                                "Sorry, the single media item downloaded had an unsupported type."
-                            ),
-                        )
-                        .await;
-                }
-            }
-        }
+        send_single_item(&post_download_metadata, chat_id, message_id, telegram_api).await;
     }
 }
 
