@@ -203,8 +203,11 @@ impl Downloader for YtDlpDownloader {
         log::info!("Downloading {}", url);
 
         let mut command = self.build_base_command();
+        // -S flag to sort format and avoid webm video which can't be played by telegram
+        // https://github.com/yt-dlp/yt-dlp/issues/8322#issuecomment-1755932331
         command
             .arg("--print-json")
+            .arg("-S vcodec:h264,res,acodec:m4a")
             .arg("-o")
             .arg(&filename_template)
             .arg(url.as_str());
