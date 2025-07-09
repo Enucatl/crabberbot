@@ -68,7 +68,7 @@ async fn handle_command(
 }
 
 async fn handle_url(
-    bot: Bot,
+    _bot: Bot,
     downloader: Arc<dyn Downloader + Send + Sync>,
     api: Arc<dyn TelegramApi + Send + Sync>,
     processing_users: ProcessingUsers,
@@ -101,7 +101,7 @@ async fn handle_url(
     };
     log::info!("Acquired lock for chat_id: {}", chat_id);
 
-    bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
+    api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
         .await?;
     process_download_request(&url, chat_id, message.id, downloader.as_ref(), api.as_ref()).await;
     Ok(())

@@ -3,7 +3,7 @@ use mockall::automock;
 use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
     prelude::*,
-    types::{ChatId, InputFile, InputMedia, MessageId, ParseMode},
+    types::{ChatAction, ChatId, InputFile, InputMedia, MessageId, ParseMode},
 };
 
 #[automock]
@@ -35,6 +35,11 @@ pub trait TelegramApi: Send + Sync {
         message_id: MessageId,
         media: Vec<InputMedia>,
     ) -> Result<(), teloxide::RequestError>;
+    async fn send_chat_action(
+        &self,
+        chat_id: ChatId,
+        action: ChatAction,
+    ) -> Result<(), teloxide::RequestError>;
 }
 
 #[derive(Clone)]
@@ -45,6 +50,19 @@ pub struct TeloxideApi {
 impl TeloxideApi {
     pub fn new(bot: Bot) -> Self {
         Self { bot }
+    }
+
+    /// Helper to determine the appropriate chat action for a media group.
+    /// If any video is present, it's UploadVideo. Otherwise, it's UploadPhoto.
+    fn get_media_group_action(media: &[InputMedia]) -> ChatAction {
+        if media
+            .iter()
+            .any(|item| matches!(item, InputMedia::Video(_)))
+        {
+            ChatAction::UploadVideo
+        } else {
+            ChatAction::UploadPhoto
+        }
     }
 }
 
@@ -58,8 +76,7 @@ impl TelegramApi for TeloxideApi {
         caption: &str,
     ) -> Result<(), teloxide::RequestError> {
         log::info!("Sending video {} to chat {}", file_path, chat_id);
-        self.bot
-            .send_chat_action(chat_id, teloxide::types::ChatAction::UploadVideo)
+        self.send_chat_action(chat_id, ChatAction::UploadVideo)
             .await?;
         self.bot
             .send_video(chat_id, InputFile::file(file_path))
@@ -78,8 +95,7 @@ impl TelegramApi for TeloxideApi {
         caption: &str,
     ) -> Result<(), teloxide::RequestError> {
         log::info!("Sending photo {} to chat {}", file_path, chat_id);
-        self.bot
-            .send_chat_action(chat_id, teloxide::types::ChatAction::UploadPhoto)
+        self.send_chat_action(chat_id, ChatAction::UploadPhoto)
             .await?;
         self.bot
             .send_photo(chat_id, InputFile::file(file_path))
@@ -120,13 +136,21 @@ impl TelegramApi for TeloxideApi {
             media.len(),
             chat_id
         );
-        self.bot
-            .send_chat_action(chat_id, teloxide::types::ChatAction::UploadVideo)
-            .await?;
+        let action = Self::get_media_group_action(&media);
+        self.send_chat_action(chat_id, action).await?;
         self.bot
             .send_media_group(chat_id, media)
             .reply_to(message_id)
             .await?;
+        Ok(())
+    }
+
+    async fn send_chat_action(
+        &self,
+        chat_id: ChatId,
+        action: ChatAction,
+    ) -> Result<(), teloxide::RequestError> {
+        self.bot.send_chat_action(chat_id, action).await?;
         Ok(())
     }
 }

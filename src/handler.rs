@@ -114,17 +114,19 @@ pub async fn process_download_request(
         clean_url
     );
 
-    let mut post_download_metadata =
-        match downloader.download_media(pre_download_metadata, &clean_url).await {
-            Ok(metadata) => metadata,
-            Err(e) => {
-                let error_message = format!("Sorry, I could not download the media: {}", e);
-                let _ = telegram_api
-                    .send_text_message(chat_id, message_id, &error_message)
-                    .await;
-                return;
-            }
-        };
+    let mut post_download_metadata = match downloader
+        .download_media(pre_download_metadata, &clean_url)
+        .await
+    {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            let error_message = format!("Sorry, I could not download the media: {}", e);
+            let _ = telegram_api
+                .send_text_message(chat_id, message_id, &error_message)
+                .await;
+            return;
+        }
+    };
 
     // --- Collect file paths for cleanup ---
     // We do this first, before `result_metadata` or its fields might be moved.
