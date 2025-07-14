@@ -68,8 +68,9 @@ impl MediaMetadata {
     /// Determines the Telegram media type ("photo" or "video") based on extension.
     pub fn telegram_media_type(&self) -> Option<&'static str> {
         if let Some(ext) = &self.ext {
+            log::info!("file extension {}", &ext);
             match ext.as_str() {
-                "mp4" | "webm" | "gif" | "mov" => Some("video"),
+                "mp4" | "webm" | "gif" | "mov" | "mkv" => Some("video"),
                 "jpg" | "jpeg" | "png" | "webp" | "heic" => Some("photo"),
                 _ => None, // Unsupported extension
             }

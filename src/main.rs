@@ -1,16 +1,16 @@
-use std::sync::Arc;
-use std::io::Write; 
 use log::LevelFilter;
+use std::io::Write;
+use std::sync::Arc;
 
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 use url::Url;
 
 // Use our library crate
+use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
 use crabberbot::handler::process_download_request;
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
-use crabberbot::concurrency::ConcurrencyLimiter;
 
 async fn handle_command(
     _bot: Bot,
@@ -70,7 +70,8 @@ async fn handle_url(
                 chat_id,
                 message.id,
                 "I'm already working on a request for you. Please wait until it's finished!",
-            ).await?;
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -109,7 +110,6 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-
     let mut builder = pretty_env_logger::formatted_builder();
 
     // Set a default log level if RUST_LOG is not set.

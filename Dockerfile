@@ -32,7 +32,7 @@ RUN git clone --depth 1 --branch master "${YT_DLP_REPO_URL}" /tmp/yt-dlp && \
 WORKDIR /usr/src/crabberbot
 
 # Copy manifests and pre-build dependencies to leverage Docker layer caching.
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 # Create a dummy project to build only dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release && cargo test --no-run

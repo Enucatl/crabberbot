@@ -72,8 +72,33 @@ async fn handle_send_operation(
 /// removing tracking parameters like `?utm_source=...` or `?si=...`.
 fn cleanup_url(original_url: &Url) -> Url {
     let mut cleaned_url = original_url.clone();
-    cleaned_url.set_query(None);
     cleaned_url.set_fragment(None); // Also good practice to remove the #fragment
+
+    // Check if the host is a YouTube domain
+    // because they use the ?v= parameter to store the video id
+    let is_youtube = cleaned_url
+        .host_str()
+        .map_or(false, |h| h.ends_with("youtube.com") || h == "youtu.be");
+
+    if is_youtube {
+        // If it's a YouTube URL, find the 'v' parameter from the *original* query
+        if let Some(video_id) = original_url
+            .query_pairs()
+            .find(|(key, _)| key == "v")
+            .map(|(_, value)| value)
+        // We only care about the value
+        {
+            // Rebuild the query string with only the 'v' parameter
+            cleaned_url.set_query(Some(&format!("v={}", video_id)));
+        } else {
+            // It's a YouTube URL but has no 'v' param (e.g., a channel URL), so clear the query
+            cleaned_url.set_query(None);
+        }
+    } else {
+        // For all non-YouTube URLs, remove all query parameters
+        cleaned_url.set_query(None);
+    }
+
     cleaned_url
 }
 
