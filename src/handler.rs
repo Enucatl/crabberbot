@@ -174,7 +174,13 @@ async fn send_single_item(
     if let Some(filepath) = &metadata.filepath {
         let caption = &metadata.final_caption;
         let send_future = match metadata.telegram_media_type() {
-            Some("video") => telegram_api.send_video(chat_id, message_id, filepath, caption),
+            Some("video") => telegram_api.send_video(
+                chat_id,
+                message_id,
+                filepath,
+                caption,
+                metadata.thumbnail_filepath.clone(),
+            ),
             Some("photo") => telegram_api.send_photo(chat_id, message_id, filepath, caption),
             _ => {
                 log::warn!(
@@ -289,10 +295,14 @@ pub async fn process_download_request(
             .filter_map(|item| item.filepath.clone())
             .collect()
     } else {
-        post_download_metadata
-            .filepath
-            .clone()
-            .map_or(vec![], |p| vec![p])
+        let mut paths = Vec::new();
+        if let Some(media_path) = &post_download_metadata.filepath {
+            paths.push(media_path.clone());
+        }
+        if let Some(thumb_path) = &post_download_metadata.thumbnail_filepath {
+            paths.push(thumb_path.clone());
+        }
+        paths
     };
     let _cleanup_guard = FileCleanupGuard {
         paths: files_to_delete,
@@ -341,6 +351,7 @@ mod tests {
                 post_meta.filepath = Some("/tmp/video.mp4".to_string());
                 // Set the extension to signal a video
                 post_meta.ext = Some("mp4".to_string());
+                post_meta.thumbnail_filepath = Some("thumb.jpg".to_string());
                 Ok(post_meta)
             });
 
@@ -351,9 +362,59 @@ mod tests {
                 eq(MessageId(456)),
                 eq("/tmp/video.mp4"),
                 always(),
+                eq(Some("thumb.jpg".to_string())),
             )
             .times(1)
-            .returning(|_, _, _, _| Ok(()));
+            .returning(|_, _, _, _, _| Ok(()));
+
+        process_download_request(
+            &test_url,
+            ChatId(123),
+            MessageId(456),
+            &mock_downloader,
+            &mock_telegram_api,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_process_download_request_sends_video_without_thumbnail_when_unavailable() {
+        let mut mock_downloader = MockDownloader::new();
+        let mut mock_telegram_api = MockTelegramApi::new();
+        let test_url = Url::parse("https://instagram.com/p/valid_post_no_thumb").unwrap();
+        let pre_download_meta = create_test_metadata();
+
+        let meta_for_get = pre_download_meta.clone();
+        mock_downloader
+            .expect_get_media_metadata()
+            .with(eq(test_url.clone())) // It will be called with the cleaned URL
+            .times(1)
+            .returning(move |_| Ok(meta_for_get.clone()));
+
+        mock_downloader
+            .expect_download_media()
+            .with(eq(pre_download_meta.clone()), eq(test_url.clone()))
+            .times(1)
+            .returning(|_metadata, _url| {
+                let mut post_meta = create_test_metadata();
+                post_meta.filepath = Some("/tmp/video.mp4".to_string());
+                post_meta.ext = Some("mp4".to_string());
+                // Simulate that no thumbnail was downloaded.
+                post_meta.thumbnail_filepath = None;
+                Ok(post_meta)
+            });
+
+        mock_telegram_api
+            .expect_send_video()
+            .with(
+                eq(ChatId(123)),
+                eq(MessageId(456)),
+                eq("/tmp/video.mp4"),
+                always(), // caption
+                eq(None), // ** Check that the thumbnail path is correctly None **
+            )
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
 
         process_download_request(
             &test_url,

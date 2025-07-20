@@ -14,6 +14,8 @@ pub enum DownloadError {
     ParsingFailed(String),
     #[error("Could not create temporary directory: {0}")]
     IoError(String),
+    #[error("Could not find downloaded thumbnail: {0}")]
+    ThumbnailError(String),
 }
 
 #[derive(Debug, Deserialize, PartialEq, Clone)]
@@ -23,6 +25,7 @@ pub struct MediaMetadata {
     #[serde(rename = "_filename")]
     pub filepath: Option<String>,
     pub ext: Option<String>,
+    pub thumbnail_filepath: Option<String>,
 
     // ---- Fields for Both Pre- and Post-Download Info ----
     #[serde(default)]
@@ -35,6 +38,8 @@ pub struct MediaMetadata {
     pub uploader: Option<String>,
     #[serde(default)]
     pub playlist_uploader: Option<String>,
+    #[serde(default)]
+    pub thumbnail: Option<String>,
 
     // Duration of the video in seconds.
     #[serde(default)]
@@ -50,7 +55,6 @@ pub struct MediaMetadata {
     #[serde(default)]
     pub entries: Option<Vec<MediaMetadata>>,
 
-    // -- Unused but useful for debugging
     #[serde(default)]
     pub resolution: Option<String>,
     #[serde(default)]
@@ -108,18 +112,21 @@ impl MediaMetadata {
 
         let full_quote_content = quote_parts.join("\n");
         // Calculate the space taken by the HTML scaffolding.
-        // header + "\n\n" + "<blockquote>" + "</blockquote> + 5 margin"
+        // header + "\n\n" + "<blockquote>" + "</blockquote> + 5 margin for [...]"
         let overhead = header.len() + 2 + 12 + 13 + 5;
         let available_space_for_quote = 1024_usize.saturating_sub(overhead);
-        let truncated_quote_content: String = full_quote_content
-            .chars()
-            .take(available_space_for_quote)
-            .collect();
+        let final_caption = if full_quote_content.len() > available_space_for_quote {
+            let mut truncated_quote_content: String = full_quote_content
+                .chars()
+                .take(available_space_for_quote)
+                .collect();
+            truncated_quote_content.push_str("[...]");
+            truncated_quote_content
+        } else {
+            full_quote_content
+        };
 
-        self.final_caption = format!(
-            "{}\n\n<blockquote>{}</blockquote>",
-            header, truncated_quote_content
-        );
+        self.final_caption = format!("{}\n\n<blockquote>{}</blockquote>", header, final_caption);
     }
 }
 
@@ -132,6 +139,11 @@ pub trait Downloader {
         mut metadata: MediaMetadata,
         url: &Url,
     ) -> Result<MediaMetadata, DownloadError>;
+    async fn download_thumbnail(
+        &self,
+        metadata: &MediaMetadata,
+        url: &Url,
+    ) -> Result<Option<String>, DownloadError>;
 }
 
 pub struct YtDlpDownloader {
@@ -267,10 +279,88 @@ impl Downloader for YtDlpDownloader {
             // Single item case
             if let Some(path) = downloaded_files.get(&metadata.id) {
                 metadata.filepath = Some(path.clone());
+                if let Some(path) = self.download_thumbnail(&metadata, url).await? {
+                    metadata.thumbnail_filepath = Some(path);
+                }
             }
         }
 
         Ok(metadata)
+    }
+
+    /// Downloads only the thumbnail for a given video URL.
+    /// Returns the path to the downloaded thumbnail if successful.
+    async fn download_thumbnail(
+        &self,
+        metadata: &MediaMetadata,
+        url: &Url,
+    ) -> Result<Option<String>, DownloadError> {
+        // 1. Only proceed if a thumbnail is expected to exist.
+        if metadata.thumbnail.is_none() {
+            return Ok(None);
+        }
+
+        log::info!("Attempting to download thumbnail for {}...", &metadata.id);
+
+        // 3. Build the command to download *only* the thumbnail.
+        let filename_template = "./thumbnail.%(id)s.%(ext)s";
+        let mut command = self.build_base_command();
+        command
+            .arg("--write-thumbnail")
+            .arg("--skip-download")
+            .arg("-o")
+            .arg(&filename_template)
+            .arg(url.as_str());
+
+        // 4. Execute the command and check for errors.
+        let output = command
+            .output()
+            .await
+            .map_err(|e| DownloadError::CommandFailed(e.to_string()))?;
+
+        if !output.status.success() {
+            // Log the error from yt-dlp but don't crash; maybe the thumbnail is gone.
+            log::error!(
+                "yt-dlp failed to download thumbnail for {}:\n{}",
+                &metadata.id,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Ok(None); // Return Ok(None) to indicate non-fatal failure.
+        }
+
+        // 5. Find the actual file that was created. We use a glob pattern
+        // because we don't know if the extension will be .jpg, .webp, .png, etc.
+        let pattern = format!("thumbnail.{}.*", &metadata.id);
+
+        // Use the glob crate to find the one matching file
+        if let Some(found_path) = glob::glob(&pattern)
+            .map_err(|e| DownloadError::ThumbnailError(e.to_string()))?
+            .next()
+        {
+            let thumbnail_path =
+                found_path.map_err(|e| DownloadError::ThumbnailError(e.to_string()))?;
+            log::info!(
+                "Successfully downloaded thumbnail to: {:?}",
+                &thumbnail_path
+            );
+            if let Some(thumbnail_path_str) = thumbnail_path.to_str() {
+                Ok(Some(thumbnail_path_str.to_string()))
+            } else {
+                log::error!(
+                    "couldn't get the thumbnail path as string to: {:?}",
+                    &thumbnail_path
+                );
+                Err(DownloadError::ThumbnailError(
+                    "couldn't get the thumbnail path".to_string(),
+                ))
+            }
+        } else {
+            log::error!(
+                "Thumbnail downloaded, but could not find the output file for pattern: {}",
+                pattern
+            );
+            Ok(None)
+        }
     }
 }
 

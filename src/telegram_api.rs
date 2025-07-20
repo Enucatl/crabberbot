@@ -15,6 +15,7 @@ pub trait TelegramApi: Send + Sync {
         message_id: MessageId,
         file_path: &str,
         caption: &str,
+        thumbnail_filepath: Option<String>,
     ) -> Result<(), teloxide::RequestError>;
     async fn send_photo(
         &self,
@@ -80,16 +81,22 @@ impl TelegramApi for TeloxideApi {
         message_id: MessageId,
         file_path: &str,
         caption: &str,
+        thumbnail_filepath: Option<String>,
     ) -> Result<(), teloxide::RequestError> {
         log::info!("Sending video {} to chat {}", file_path, chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadVideo)
             .await?;
-        self.bot
+        let mut request = self
+            .bot
             .send_video(chat_id, InputFile::file(file_path))
             .caption(caption.to_string())
             .parse_mode(ParseMode::Html)
-            .reply_to(message_id)
-            .await?;
+            .reply_to(message_id);
+
+        if let Some(p) = thumbnail_filepath {
+            request = request.thumbnail(InputFile::file(p));
+        }
+        request.await?;
         Ok(())
     }
 

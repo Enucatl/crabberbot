@@ -16,6 +16,8 @@ pub fn create_test_metadata() -> MediaMetadata {
         media_type: None,
         playlist_uploader: None,
         resolution: None,
+        thumbnail: Some("http://example.com/thumb.jpg".to_string()),
+        thumbnail_filepath: None,
         title: Some("".to_string()),
         uploader: None,
         width: None,
