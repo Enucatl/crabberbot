@@ -3,7 +3,7 @@ use mockall::automock;
 use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
     prelude::*,
-    types::{ChatAction, ChatId, InputFile, InputMedia, MessageId, ParseMode},
+    types::{ChatAction, ChatId, InputFile, InputMedia, MessageId, ParseMode, ReactionType},
 };
 
 #[automock]
@@ -39,6 +39,12 @@ pub trait TelegramApi: Send + Sync {
         &self,
         chat_id: ChatId,
         action: ChatAction,
+    ) -> Result<(), teloxide::RequestError>;
+    async fn set_message_reaction(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        reaction: Option<ReactionType>,
     ) -> Result<(), teloxide::RequestError>;
 }
 
@@ -151,6 +157,20 @@ impl TelegramApi for TeloxideApi {
         action: ChatAction,
     ) -> Result<(), teloxide::RequestError> {
         self.bot.send_chat_action(chat_id, action).await?;
+        Ok(())
+    }
+
+    async fn set_message_reaction(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        reaction: Option<ReactionType>,
+    ) -> Result<(), teloxide::RequestError> {
+        self.bot
+            .set_message_reaction(chat_id, message_id)
+            .reaction(reaction)
+            .is_big(true)
+            .await?;
         Ok(())
     }
 }

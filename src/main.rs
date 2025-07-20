@@ -77,7 +77,16 @@ async fn handle_url(
     };
     api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
         .await?;
+    api.set_message_reaction(
+        chat_id,
+        message.id,
+        Some(teloxide::types::ReactionType::Emoji {
+            emoji: "👀".to_string(),
+        }),
+    )
+    .await?;
     process_download_request(&url, chat_id, message.id, downloader.as_ref(), api.as_ref()).await;
+    api.set_message_reaction(chat_id, message.id, None).await?;
     Ok(())
 }
 
