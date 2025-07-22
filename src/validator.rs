@@ -2,7 +2,7 @@ use crate::downloader::MediaMetadata;
 use thiserror::Error;
 
 // --- CHANGED: More descriptive constants for different media types ---
-const MAX_DURATION_SECONDS: f64 = 600.0;
+const MAX_DURATION_SECONDS: f64 = 1800.0;
 const MAX_FILESIZE_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
 const MAX_VIDEO_PLAYLIST_ITEMS: usize = 5;
 const MAX_IMAGE_PLAYLIST_ITEMS: usize = 10; // New, larger limit for images/galleries
