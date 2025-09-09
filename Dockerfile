@@ -1,5 +1,5 @@
 # ---- Build Stage: Compile the application and build yt-dlp ----
-FROM rust:1-slim-bullseye AS builder
+FROM rust:1-slim-trixie AS builder
 
 # Install system dependencies for Rust compilation and for building yt-dlp
 # We now need 'make' in addition to 'git'.
@@ -51,14 +51,13 @@ RUN echo "building release ${CARGO_PACKAGE_VERSION}" && cargo build --release &&
 
 
 # ---- Runtime Stage: Create the final, smaller image ----
-FROM debian:bullseye-slim AS runtime
+FROM python:3.13-slim-trixie AS runtime
 
 # The yt-dlp binary is a zipapp that requires the python3 interpreter to run.
 # We don't need git, make, or pip in the final image.
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     ffmpeg \
-    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user for security best practices
