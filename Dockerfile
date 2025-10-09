@@ -16,9 +16,6 @@ RUN apt update && apt install -y \
 # Build yt-dlp from source.
 # We do a shallow clone, build the binary, move it to a standard location,
 # and clean up the source code to keep this layer smaller.
-#
-# --- IMPORTANT ---
-# Change the URL below to point to your fork of yt-dlp.
 ARG YT_DLP_REPO_URL="https://github.com/Enucatl/yt-dlp.git"
 ARG YT_DLP_COMMIT_HASH="master"
 RUN git clone --depth 1 --branch master "${YT_DLP_REPO_URL}" /tmp/yt-dlp && \
