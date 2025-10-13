@@ -1,18 +1,15 @@
-# Creates a new remotely-managed tunnel for the crabberbot VM.
 resource "cloudflare_zero_trust_tunnel_cloudflared" "crabberbot_tunnel" {
-  account_id    = var.account_id
-  name          = "Terraform crabberbot tunnel"
+  account_id = var.cloudflare_account_id
+  name       = "Terraform crabberbot tunnel"
 }
 
-# Reads the token used to run the tunnel on the server.
 data "cloudflare_zero_trust_tunnel_cloudflared_token" "crabberbot_tunnel_token" {
-  account_id   = var.account_id
-  tunnel_id   = cloudflare_zero_trust_tunnel_cloudflared.crabberbot_tunnel.id
+  account_id = var.cloudflare_account_id
+  tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.crabberbot_tunnel.id
 }
 
-# Creates the CNAME record that routes crabberbot.${var.zone} to the tunnel.
 resource "cloudflare_dns_record" "crabberbot" {
-  zone_id = var.zone_id
+  zone_id = var.cloudflare_zone_id
   name    = "crabberbot"
   content = "${cloudflare_zero_trust_tunnel_cloudflared.crabberbot_tunnel.id}.cfargotunnel.com"
   type    = "CNAME"
@@ -20,38 +17,35 @@ resource "cloudflare_dns_record" "crabberbot" {
   proxied = true
 }
 
-# Configures tunnel with a public hostname route for clientless access.
 resource "cloudflare_zero_trust_tunnel_cloudflared_config" "crabberbot_tunnel_config" {
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.crabberbot_tunnel.id
-  account_id = var.account_id
-  config     = {
-    ingress   = [
+  account_id = var.cloudflare_account_id
+  config = {
+    ingress = [
       {
-        hostname = "crabberbot.${var.zone}"
+        hostname = "crabberbot.${var.cloudflare_zone}"
         service  = "http://crabberbot:8080"
       },
       {
-        service  = "http_status:404"
+        service = "http_status:404"
       }
     ]
   }
 }
 
-# For the test version
+# Test version resources
 resource "cloudflare_zero_trust_tunnel_cloudflared" "crabberbottest_tunnel" {
-  account_id    = var.account_id
-  name          = "Terraform crabberbottest tunnel"
+  account_id = var.cloudflare_account_id
+  name       = "Terraform crabberbottest tunnel"
 }
 
-# Reads the token used to run the tunnel on the server.
 data "cloudflare_zero_trust_tunnel_cloudflared_token" "crabberbottest_tunnel_token" {
-  account_id   = var.account_id
-  tunnel_id   = cloudflare_zero_trust_tunnel_cloudflared.crabberbottest_tunnel.id
+  account_id = var.cloudflare_account_id
+  tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.crabberbottest_tunnel.id
 }
 
-# Creates the CNAME record that routes crabberbottest.${var.zone} to the tunnel.
 resource "cloudflare_dns_record" "crabberbottest" {
-  zone_id = var.zone_id
+  zone_id = var.cloudflare_zone_id
   name    = "crabberbottest"
   content = "${cloudflare_zero_trust_tunnel_cloudflared.crabberbottest_tunnel.id}.cfargotunnel.com"
   type    = "CNAME"
@@ -59,18 +53,17 @@ resource "cloudflare_dns_record" "crabberbottest" {
   proxied = true
 }
 
-# Configures tunnel with a public hostname route for clientless access.
 resource "cloudflare_zero_trust_tunnel_cloudflared_config" "crabberbottest_tunnel_config" {
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.crabberbottest_tunnel.id
-  account_id = var.account_id
-  config     = {
-    ingress   = [
+  account_id = var.cloudflare_account_id
+  config = {
+    ingress = [
       {
-        hostname = "crabberbottest.${var.zone}"
+        hostname = "crabberbottest.${var.cloudflare_zone}"
         service  = "http://crabberbot:8080"
       },
       {
-        service  = "http_status:404"
+        service = "http_status:404"
       }
     ]
   }

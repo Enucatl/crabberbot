@@ -2,8 +2,10 @@ use log::LevelFilter;
 use std::io::Write;
 use std::sync::Arc;
 
+use reqwest::Client;
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
+use thiserror::Error;
 use url::Url;
 
 // Use our library crate
@@ -12,6 +14,74 @@ use crabberbot::downloader::{Downloader, YtDlpDownloader};
 use crabberbot::handler::process_download_request;
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 
+/// A dedicated error type for our application's setup.
+#[derive(Debug, Error)]
+pub enum SetupError {
+    #[error("Missing environment variable: {0}")]
+    EnvVarMissing(&'static str),
+
+    #[error("Couldn't get authentication headers: {0}")]
+    HeadersError(&'static str),
+
+    #[error("Failed to build Google Cloud authentication token")]
+    BuildAuthError(#[from] google_cloud_auth::build_errors::Error),
+
+    #[error("Failed to acquire Google Cloud authentication token")]
+    CredentialAuthError(#[from] google_cloud_auth::errors::CredentialsError),
+
+    #[error("Failed to build HTTP client")]
+    ClientBuildError(#[from] reqwest::Error),
+
+    #[error("The Authorization header value could not be created")]
+    InvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
+}
+
+/// Creates an HTTP client, authenticating for GCP if in that environment.
+///
+/// # Errors
+/// This function will return an error if:
+/// - A required environment variable is missing in the GCP environment.
+/// - It fails to get an identity token from Google Cloud.
+/// - It fails to build the reqwest::Client.
+async fn create_http_client() -> Result<Client, SetupError> {
+    // Determine the execution environment. Default to "local" if not set.
+    let exec_env = std::env::var("EXECUTION_ENVIRONMENT").unwrap_or_else(|_| "local".to_string());
+
+    match exec_env.as_str() {
+        "gcp" => {
+            log::info!("GCP environment detected. Creating authenticated reqwest client...");
+
+            let audience = std::env::var("TELOXIDE_API_URL")
+                .map_err(|_| SetupError::EnvVarMissing("TELOXIDE_API_URL"))?;
+
+            let credentials = google_cloud_auth::credentials::Builder::default().build()?;
+            let headers_resource = credentials.headers(http::Extensions::new()).await?;
+            if let google_cloud_auth::credentials::CacheableResource::New {
+                data: headers, ..
+            } = headers_resource
+            {
+                log::info!("Successfully obtained GCP authentication headers. {:?}", headers);
+                let client = Client::builder().default_headers(headers).build()?;
+                Ok(client)
+            } else {
+                // This case should be logically impossible when fetching headers for the first time,
+                // but it's robust to handle it.
+                Err(SetupError::HeadersError(
+                    "Failed to get new headers from credentials; received NotModified unexpectedly"
+                ))
+            }
+        }
+        _ => {
+            // "local", "homelab", or any other value
+            log::info!(
+                "Local or non-GCP environment detected. Creating standard reqwest client..."
+            );
+            // Building a default client can also fail, so we handle the result here too.
+            Ok(Client::new())
+        }
+    }
+}
+
 async fn handle_command(
     _bot: Bot,
     api: Arc<dyn TelegramApi + Send + Sync>,
@@ -19,19 +89,19 @@ async fn handle_command(
     command: Command,
 ) -> ResponseResult<()> {
     let comprehensive_guide = indoc::formatdoc! { "
-        Hello there! I am CrabberBot, your friendly media downloader.
+Hello there! I am CrabberBot, your friendly media downloader.
 
-        I can download videos and photos from various platforms like Instagram, TikTok, YouTube Shorts, and many more!
+I can download videos and photos from various platforms like Instagram, TikTok, YouTube Shorts, and many more!
 
-        <b>How to use me</b>
-        To download media, simply send me the URL of the media you want to download.
-        Example: <code>https://www.youtube.com/shorts/tPEE9ZwTmy0</code>
+<b>How to use me</b>
+To download media, simply send me the URL of the media you want to download.
+Example: <code>https://www.youtube.com/shorts/tPEE9ZwTmy0</code>
 
-        I'll try my best to fetch the media and send it back to you. I also include the original caption (limited to 1024 characters).
-        If you encounter any issues, please double-check the URL or try again later. Not all links may be supported, or there might be temporary issues.
+I'll try my best to fetch the media and send it back to you. I also include the original caption (limited to 1024 characters).
+If you encounter any issues, please double-check the URL or try again later. Not all links may be supported, or there might be temporary issues.
 
-        {0}
-        ",
+{0}
+",
         Command::descriptions()
     };
 
@@ -118,7 +188,7 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = pretty_env_logger::formatted_builder();
 
     // Set a default log level if RUST_LOG is not set.
@@ -143,17 +213,25 @@ async fn main() {
     let version = env!("CARGO_PACKAGE_VERSION");
     log::info!("Starting CrabberBot version {}", version);
 
-    let bot = Bot::from_env();
+    let client = create_http_client().await?;
+    let bot = Bot::from_env_with_client(client);
 
     // Instantiate our REAL dependencies
     let downloader: Arc<dyn Downloader + Send + Sync> = Arc::new(YtDlpDownloader::new());
     let api: Arc<dyn TelegramApi + Send + Sync> = Arc::new(TeloxideApi::new(bot.clone()));
     let limiter = Arc::new(ConcurrencyLimiter::new());
 
-    let addr = ([0, 0, 0, 0], 8080).into();
+    // Get port from environment, fallback to 8080 for local development
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse()
+        .expect("PORT must be a valid number");
+
+    let addr = ([0, 0, 0, 0], port).into();
     let webhook_url_str = std::env::var("WEBHOOK_URL").expect("WEBHOOK_URL env var not set");
     let url: Url = webhook_url_str.parse().unwrap();
 
+    log::info!("Setting webhook {}", url);
     let listener = teloxide::update_listeners::webhooks::axum(
         bot.clone(),
         teloxide::update_listeners::webhooks::Options::new(addr, url.clone()),
@@ -210,4 +288,6 @@ async fn main() {
             LoggingErrorHandler::with_custom_text("An error has occurred in the dispatcher"),
         )
         .await;
+
+    Ok(())
 }

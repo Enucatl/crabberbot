@@ -1,4 +1,4 @@
-name: Build & Deploy Application to GHCR
+name: Build & Deploy to Homelab and Google Cloud
 
 on:
   push:
@@ -6,22 +6,24 @@ on:
       - main
 
 env:
-  APP_NAME: crabberbot # Replace with the chosen name for your app image (e.g., my-rust-app)
   DOCKERFILE_PATH: Dockerfile
-  DOCKER_IMAGE_NAME: ghcr.io/enucatl/crabberbot
+  GHCR_IMAGE_NAME: ghcr.io/enucatl/crabberbot
+  GCP_REGION: europe-west1
+  GCP_ARTIFACT_REGISTRY_REPO: crabberbot-repo
+  GCP_CLOUD_RUN_SERVICE: crabberbot
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      contents: read   # Allows checking out code
-      packages: write  # Allows pushing to GitHub Container Registry (ghcr.io)
+      contents: read
+      packages: write
+      id-token: 'write' # Required for authenticating to Google Cloud
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # Important: Fetches full history for git describe to work
           fetch-depth: 0 
 
       - name: Setup Rust toolchain
@@ -37,28 +39,49 @@ jobs:
       - name: Run cargo test
         run: cargo test --verbose
 
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}          # The GitHub Actions bot username
-          password: ${{ secrets.GITHUB_TOKEN }} # The special token for repo/GHCR access
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image to GHCR
+      - name: Log in to Google Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GCP_REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Build and push Docker image to both registries
+        id: build-and-push
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ${{ env.DOCKERFILE_PATH }}
           push: true
           tags: |
-            ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
-            ${{ env.DOCKER_IMAGE_NAME }}:latest
+            ${{ env.GHCR_IMAGE_NAME }}:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
+            ${{ env.GHCR_IMAGE_NAME }}:latest
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.GCP_ARTIFACT_REGISTRY_REPO }}/crabberbot:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.GCP_ARTIFACT_REGISTRY_REPO }}/crabberbot:latest
           build-args: |
             CARGO_PACKAGE_VERSION=${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
 
+      - name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.GCP_CLOUD_RUN_SERVICE }}
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.GCP_ARTIFACT_REGISTRY_REPO }}/crabberbot:${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
+      
       - name: Trigger Portainer Redeploy
-        # This step runs only if the build and push was successful.
-        # It sends a POST request to a Portainer webhook, which triggers
-        # Portainer to pull the new :latest image and redeploy the service.
         if: success()
         run: curl -X POST ${{ secrets.PORTAINER_WEBHOOK_URL }}

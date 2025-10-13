@@ -26,7 +26,7 @@ impl ConcurrencyLimiter {
 
     /// Attempts to acquire a lock for a chat.
     /// Returns a guard if successful, or None if already locked.
-    pub fn try_lock(&self, chat_id: ChatId) -> Option<LockGuard> {
+    pub fn try_lock(&self, chat_id: ChatId) -> Option<LockGuard<'_>> {
         if self.processing_users.insert(chat_id) {
             log::info!("Acquired lock for chat_id: {}", chat_id);
             Some(LockGuard {
