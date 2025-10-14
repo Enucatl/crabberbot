@@ -98,7 +98,7 @@ resource "google_cloud_run_v2_service" "bot" {
   depends_on          = [google_cloud_run_v2_service.api_server]
   name                = "crabberbot"
   location            = var.gcp_region
-  ingress             = "INGRESS_TRAFFIC_ALL" # Keep this service public for webhooks.
+  ingress             = "INGRESS_TRAFFIC_ALL"
   deletion_protection = false
 
   template {
@@ -159,8 +159,8 @@ resource "google_cloud_run_v2_service_iam_member" "bot_invokes_api_server" {
   location = google_cloud_run_v2_service.api_server.location
   name     = google_cloud_run_v2_service.api_server.name
   role     = "roles/run.invoker"
-  member   = "serviceAccount:${google_service_account.bot_sa.email}"
-  # member   = "allUsers"
+  # member   = "serviceAccount:${google_service_account.bot_sa.email}"
+  member   = "allUsers"
 }
 
 resource "google_project_iam_member" "secret_accessor_binding" {

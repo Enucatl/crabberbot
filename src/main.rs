@@ -51,9 +51,6 @@ async fn create_http_client() -> Result<Client, SetupError> {
         "gcp" => {
             log::info!("GCP environment detected. Creating authenticated reqwest client...");
 
-            let audience = std::env::var("TELOXIDE_API_URL")
-                .map_err(|_| SetupError::EnvVarMissing("TELOXIDE_API_URL"))?;
-
             let credentials = google_cloud_auth::credentials::Builder::default().build()?;
             let headers_resource = credentials.headers(http::Extensions::new()).await?;
             if let google_cloud_auth::credentials::CacheableResource::New {
@@ -113,8 +110,14 @@ If you encounter any issues, please double-check the URL or try again later. Not
         }
         Command::Version => {
             let version = env!("CARGO_PACKAGE_VERSION");
-            let version_message = format!("CrabberBot version {0}", version);
-            api.send_text_message(message.chat.id, message.id, &version_message)
+            let value = format!("CrabberBot version {0}", version);
+            api.send_text_message(message.chat.id, message.id, &value)
+                .await?;
+        }
+        Command::Environment => {
+            let env = std::env::var("EXECUTION_ENVIRONMENT").unwrap_or_else(|_| "local".to_string());
+            let value = format!("CrabberBot environment {0}", env);
+            api.send_text_message(message.chat.id, message.id, &value)
                 .await?;
         }
     }
@@ -185,6 +188,8 @@ enum Command {
     Start,
     #[command(description = "show bot version.")]
     Version,
+    #[command(description = "show bot environment.")]
+    Environment,
 }
 
 #[tokio::main]
