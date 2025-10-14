@@ -48,7 +48,7 @@ RUN echo "building release ${CARGO_PACKAGE_VERSION}" && cargo build --release &&
 
 
 # ---- Runtime Stage: Create the final, smaller image ----
-FROM python:3.13-slim-trixie AS runtime
+FROM python:3.14-slim-trixie AS runtime
 
 # The yt-dlp binary is a zipapp that requires the python3 interpreter to run.
 # We don't need git, make, or pip in the final image.
