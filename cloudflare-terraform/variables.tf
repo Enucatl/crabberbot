@@ -50,3 +50,9 @@ variable "gcp_github_repo" {
   description = "Your GitHub repository in 'owner/repo' format."
   default     = "Enucatl/crabberbot"
 }
+
+variable "instance_name" {
+  description = "Name for the GCE instance."
+  type        = string
+  default     = "crabberbot-server"
+}

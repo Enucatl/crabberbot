@@ -10,16 +10,6 @@ output "cloudflare_test_tunnel_token" {
   sensitive   = true
 }
 
-output "gcp_bot_webhook_url" {
-  description = "The public HTTPS URL for your bot's webhook on GCP."
-  value       = google_cloud_run_v2_service.bot.uri
-}
-
-output "gcp_workload_identity_provider" {
-  description = "The full name of the Workload Identity Provider for GitHub Actions."
-  value       = google_iam_workload_identity_pool_provider.github_provider.name
-}
-
 output "gcp_bot_service_account_email" {
   description = "The email of the service account for the bot on GCP."
   value       = google_service_account.bot_sa.email
