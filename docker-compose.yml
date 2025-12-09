@@ -10,6 +10,8 @@ services:
     restart: unless-stopped
     depends_on:
       - telegram-bot-api
+    labels:
+      - "checkmk_monitor=true"
 
   cloudflared:
     image: cloudflare/cloudflared:latest
