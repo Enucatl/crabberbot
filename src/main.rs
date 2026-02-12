@@ -13,6 +13,7 @@ use url::Url;
 use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
 use crabberbot::handler::process_download_request;
+use crabberbot::storage::{PostgresStorage, Storage};
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 
 const OVERALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(360);
@@ -133,6 +134,7 @@ async fn handle_url(
     downloader: Arc<dyn Downloader>,
     api: Arc<dyn TelegramApi>,
     limiter: Arc<ConcurrencyLimiter>,
+    storage: Arc<dyn Storage>,
     message: Message,
     url: Url,
 ) -> ResponseResult<()> {
@@ -163,7 +165,14 @@ async fn handle_url(
     .await?;
     if tokio::time::timeout(
         OVERALL_REQUEST_TIMEOUT,
-        process_download_request(&url, chat_id, message.id, downloader.as_ref(), api.as_ref()),
+        process_download_request(
+            &url,
+            chat_id,
+            message.id,
+            downloader.as_ref(),
+            api.as_ref(),
+            storage.as_ref(),
+        ),
     )
     .await
     .is_err()
@@ -236,6 +245,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let version = env!("CARGO_PACKAGE_VERSION");
     log::info!("Starting CrabberBot version {}", version);
 
+    // Database setup
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("Failed to connect to database");
+    PostgresStorage::run_migrations(&pool)
+        .await
+        .expect("Failed to run database migrations");
+    log::info!("Database connected and migrations applied.");
+    let storage: Arc<dyn Storage> = Arc::new(PostgresStorage::new(pool.clone()));
+
+    // Periodic cache cleanup (hourly, 7-day TTL)
+    let cleanup_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            PostgresStorage::cleanup_expired(&cleanup_pool, 7).await;
+        }
+    });
+
     let client = create_http_client().await?;
     let bot = Bot::from_env_with_client(client);
 
@@ -303,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The dispatcher will inject the dependencies into our handler
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![downloader, api, limiter])
+        .dependencies(dptree::deps![downloader, api, limiter, storage])
         .enable_ctrlc_handler()
         .build()
         .dispatch_with_listener(

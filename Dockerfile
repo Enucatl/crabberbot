@@ -39,6 +39,7 @@ RUN rm -rf src target/release/deps/crabberbot*
 # Copy the actual source code and build files
 COPY src ./src
 COPY build.rs ./build.rs
+COPY migrations ./migrations
 
 ARG CARGO_PACKAGE_VERSION
 ENV CARGO_PACKAGE_VERSION=${CARGO_PACKAGE_VERSION}
