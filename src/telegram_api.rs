@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use async_trait::async_trait;
 use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
@@ -12,15 +14,15 @@ pub trait TelegramApi: Send + Sync {
         &self,
         chat_id: ChatId,
         message_id: MessageId,
-        file_path: &str,
+        file_path: &Path,
         caption: &str,
-        thumbnail_filepath: Option<String>,
+        thumbnail_filepath: Option<PathBuf>,
     ) -> Result<(), teloxide::RequestError>;
     async fn send_photo(
         &self,
         chat_id: ChatId,
         message_id: MessageId,
-        file_path: &str,
+        file_path: &Path,
         caption: &str,
     ) -> Result<(), teloxide::RequestError>;
     async fn send_text_message(
@@ -78,11 +80,11 @@ impl TelegramApi for TeloxideApi {
         &self,
         chat_id: ChatId,
         message_id: MessageId,
-        file_path: &str,
+        file_path: &Path,
         caption: &str,
-        thumbnail_filepath: Option<String>,
+        thumbnail_filepath: Option<PathBuf>,
     ) -> Result<(), teloxide::RequestError> {
-        log::info!("Sending video {} to chat {}", file_path, chat_id);
+        log::info!("Sending video {:?} to chat {}", file_path, chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadVideo)
             .await?;
         let mut request = self
@@ -103,10 +105,10 @@ impl TelegramApi for TeloxideApi {
         &self,
         chat_id: ChatId,
         message_id: MessageId,
-        file_path: &str,
+        file_path: &Path,
         caption: &str,
     ) -> Result<(), teloxide::RequestError> {
-        log::info!("Sending photo {} to chat {}", file_path, chat_id);
+        log::info!("Sending photo {:?} to chat {}", file_path, chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadPhoto)
             .await?;
         self.bot

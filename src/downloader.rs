@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -68,9 +69,9 @@ pub struct MediaInfo {
 /// A single downloaded file with its resolved media type.
 #[derive(Debug)]
 pub struct DownloadedItem {
-    pub filepath: String,
+    pub filepath: PathBuf,
     pub media_type: MediaType,
-    pub thumbnail_filepath: Option<String>,
+    pub thumbnail_filepath: Option<PathBuf>,
 }
 
 /// Result of a download operation: either a single item or a group.
@@ -89,6 +90,12 @@ struct DownloadOutputLine {
     ext: Option<String>,
 }
 
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Builds a caption string from pre-download metadata and the source URL.
 pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
     let via_link = "https://t.me/crabberbot?start=c";
@@ -104,7 +111,7 @@ pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
         .or(info.playlist_uploader.as_deref());
     if let Some(uploader) = uploader {
         if !uploader.is_empty() {
-            quote_parts.push(format!("<i>{}</i>", uploader));
+            quote_parts.push(format!("<i>{}</i>", escape_html(uploader)));
         }
     }
 
@@ -112,14 +119,14 @@ pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
     if let Some(desc) = description {
         let desc = desc.trim();
         if !desc.is_empty() {
-            quote_parts.push(desc.to_string());
+            quote_parts.push(escape_html(desc));
         }
     }
 
     let full_quote_content = quote_parts.join("\n");
-    let overhead = header.len() + 2 + 12 + 13 + 5;
+    let overhead = header.chars().count() + 2 + 12 + 13 + 5;
     let available_space_for_quote = 1024_usize.saturating_sub(overhead);
-    let final_quote = if full_quote_content.len() > available_space_for_quote {
+    let final_quote = if full_quote_content.chars().count() > available_space_for_quote {
         let mut truncated: String = full_quote_content
             .chars()
             .take(available_space_for_quote)
@@ -161,14 +168,27 @@ impl YtDlpDownloader {
         command
     }
 
+    fn escape_glob(s: &str) -> String {
+        let mut escaped = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '*' => escaped.push_str("[*]"),
+                '?' => escaped.push_str("[?]"),
+                '[' => escaped.push_str("[[]"),
+                ']' => escaped.push_str("[]]"),
+                _ => escaped.push(c),
+            }
+        }
+        escaped
+    }
+
     /// Finds a thumbnail file written by `--write-thumbnail`, excluding the video file itself.
-    fn find_thumbnail(uuid: &str, id: &str, video_filepath: &str) -> Option<String> {
-        let pattern = format!("./{}.{}.*", uuid, id);
+    fn find_thumbnail(uuid: &str, id: &str, video_filepath: &Path) -> Option<PathBuf> {
+        let pattern = format!("./{}.{}.*", uuid, Self::escape_glob(id));
         glob::glob(&pattern)
             .ok()?
             .filter_map(|entry| entry.ok())
-            .find(|path| path.to_str().is_some_and(|s| s != video_filepath))
-            .and_then(|path| path.to_str().map(String::from))
+            .find(|path| path != video_filepath)
     }
 }
 
@@ -278,7 +298,7 @@ impl Downloader for YtDlpDownloader {
                     let ext = dl.ext.as_deref()?;
                     let media_type = MediaType::from_extension(ext)?;
                     Some(DownloadedItem {
-                        filepath: filepath.clone(),
+                        filepath: PathBuf::from(filepath),
                         media_type,
                         thumbnail_filepath: None,
                     })
@@ -296,9 +316,10 @@ impl Downloader for YtDlpDownloader {
             let dl = downloaded_files.get(&info.id).ok_or_else(|| {
                 DownloadError::ParsingFailed(format!("No download output for id {}", info.id))
             })?;
-            let filepath = dl.filepath.as_ref().ok_or_else(|| {
+            let filepath_str = dl.filepath.as_ref().ok_or_else(|| {
                 DownloadError::ParsingFailed("Download output missing filepath".to_string())
             })?;
+            let filepath = PathBuf::from(filepath_str);
             let ext = dl.ext.as_deref().ok_or_else(|| {
                 DownloadError::ParsingFailed("Download output missing extension".to_string())
             })?;
@@ -307,13 +328,13 @@ impl Downloader for YtDlpDownloader {
             })?;
 
             let thumbnail_filepath = if is_single_with_thumbnail {
-                Self::find_thumbnail(&uuid, &info.id, filepath)
+                Self::find_thumbnail(&uuid, &info.id, &filepath)
             } else {
                 None
             };
 
             Ok(DownloadedMedia::Single(DownloadedItem {
-                filepath: filepath.clone(),
+                filepath,
                 media_type,
                 thumbnail_filepath,
             }))
@@ -325,6 +346,79 @@ impl Downloader for YtDlpDownloader {
 mod tests {
     use super::*;
     use url::Url;
+
+    #[test]
+    fn test_build_caption_normal_text() {
+        let info = MediaInfo {
+            id: "1".to_string(),
+            uploader: Some("TestUser".to_string()),
+            description: Some("A normal description".to_string()),
+            title: None,
+            media_type: None,
+            playlist_uploader: None,
+            thumbnail: None,
+            duration: None,
+            filesize: None,
+            entries: None,
+            resolution: None,
+            width: None,
+            height: None,
+        };
+        let url = Url::parse("https://example.com/video").unwrap();
+        let caption = build_caption(&info, &url);
+        assert!(caption.contains("<i>TestUser</i>"));
+        assert!(caption.contains("A normal description"));
+    }
+
+    #[test]
+    fn test_build_caption_escapes_html_tags() {
+        let info = MediaInfo {
+            id: "1".to_string(),
+            uploader: Some("<script>alert('xss')</script>".to_string()),
+            description: Some("desc with <b>tags</b>".to_string()),
+            title: None,
+            media_type: None,
+            playlist_uploader: None,
+            thumbnail: None,
+            duration: None,
+            filesize: None,
+            entries: None,
+            resolution: None,
+            width: None,
+            height: None,
+        };
+        let url = Url::parse("https://example.com/video").unwrap();
+        let caption = build_caption(&info, &url);
+        assert!(caption.contains("&lt;script&gt;"));
+        assert!(caption.contains("&lt;b&gt;tags&lt;/b&gt;"));
+        assert!(!caption.contains("<script>"));
+        assert!(!caption.contains("<b>tags"));
+    }
+
+    #[test]
+    fn test_build_caption_escapes_ampersands() {
+        let info = MediaInfo {
+            id: "1".to_string(),
+            uploader: Some("Tom & Jerry".to_string()),
+            description: Some("A & B < C > D".to_string()),
+            title: None,
+            media_type: None,
+            playlist_uploader: None,
+            thumbnail: None,
+            duration: None,
+            filesize: None,
+            entries: None,
+            resolution: None,
+            width: None,
+            height: None,
+        };
+        let url = Url::parse("https://example.com/video").unwrap();
+        let caption = build_caption(&info, &url);
+        assert!(caption.contains("Tom &amp; Jerry"));
+        assert!(caption.contains("A &amp; B &lt; C &gt; D"));
+        // Verify no double-escaping
+        assert!(!caption.contains("&amp;amp;"));
+    }
 
     #[tokio::test]
     async fn test_yt_dlp_uses_custom_path_and_fails_if_invalid() {

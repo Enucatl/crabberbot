@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::path::PathBuf;
 use teloxide::types::{
     ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, MessageId, ParseMode,
 };
@@ -12,7 +13,7 @@ use crate::validator::validate_media_metadata;
 
 /// An RAII guard to ensure downloaded files are cleaned up.
 struct FileCleanupGuard {
-    paths: Vec<String>,
+    paths: Vec<PathBuf>,
 }
 
 impl FileCleanupGuard {
@@ -48,8 +49,8 @@ impl Drop for FileCleanupGuard {
         tokio::spawn(async move {
             for path in &paths_to_delete {
                 match tokio::fs::remove_file(path).await {
-                    Ok(_) => log::info!("Successfully removed file: {}", path),
-                    Err(e) => log::error!("Failed to remove file {}: {}", path, e),
+                    Ok(_) => log::info!("Successfully removed file: {}", path.display()),
+                    Err(e) => log::error!("Failed to remove file {}: {}", path.display(), e),
                 }
             }
         });
@@ -133,12 +134,13 @@ async fn pre_download_validation(
             }
         }
         Err(e) => {
-            let error_message = format!(
-                "Sorry, I could not fetch information for that link. It might be private or invalid. Error: {}",
-                e
-            );
+            log::error!("Pre-download metadata fetch failed for {}: {}", url, e);
             let _ = telegram_api
-                .send_text_message(chat_id, message_id, &error_message)
+                .send_text_message(
+                    chat_id,
+                    message_id,
+                    "Sorry, I could not fetch information for that link. It might be private or unsupported.",
+                )
                 .await;
             Err(())
         }
@@ -157,9 +159,14 @@ async fn download_step(
     match downloader.download_media(info, url).await {
         Ok(media) => Ok(media),
         Err(e) => {
-            let error_message = format!("Sorry, I could not download the media: {}", e);
+            log::error!("Download failed for {}: {}", url, e);
+            let user_message = if matches!(e, crate::downloader::DownloadError::Timeout(_)) {
+                "Sorry, the download is taking too long. Please try a shorter video."
+            } else {
+                "Sorry, I could not download the media. Please try again later."
+            };
             let _ = telegram_api
-                .send_text_message(chat_id, message_id, &error_message)
+                .send_text_message(chat_id, message_id, user_message)
                 .await;
             Err(())
         }
@@ -182,7 +189,9 @@ async fn send_single_item(
             caption,
             item.thumbnail_filepath.clone(),
         ),
-        MediaType::Photo => telegram_api.send_photo(chat_id, message_id, &item.filepath, caption),
+        MediaType::Photo => {
+            telegram_api.send_photo(chat_id, message_id, &item.filepath, caption)
+        }
     };
     handle_send_operation(send_future, chat_id, message_id, telegram_api).await;
 }
@@ -283,6 +292,7 @@ pub async fn process_download_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use crate::downloader::{DownloadError, MockDownloader};
     use crate::telegram_api::MockTelegramApi;
     use crate::test_utils::create_test_info;
@@ -311,9 +321,9 @@ mod tests {
             .times(1)
             .returning(|_, _| {
                 Ok(DownloadedMedia::Single(DownloadedItem {
-                    filepath: "/tmp/video.mp4".to_string(),
+                    filepath: PathBuf::from("/tmp/video.mp4"),
                     media_type: MediaType::Video,
-                    thumbnail_filepath: Some("thumb.jpg".to_string()),
+                    thumbnail_filepath: Some(PathBuf::from("thumb.jpg")),
                 }))
             });
 
@@ -322,9 +332,9 @@ mod tests {
             .with(
                 eq(ChatId(123)),
                 eq(MessageId(456)),
-                eq("/tmp/video.mp4"),
+                eq(Path::new("/tmp/video.mp4")),
                 always(),
-                eq(Some("thumb.jpg".to_string())),
+                eq(Some(PathBuf::from("thumb.jpg"))),
             )
             .times(1)
             .returning(|_, _, _, _, _| Ok(()));
@@ -357,7 +367,7 @@ mod tests {
             .times(1)
             .returning(|_, _| {
                 Ok(DownloadedMedia::Single(DownloadedItem {
-                    filepath: "/tmp/video.mp4".to_string(),
+                    filepath: PathBuf::from("/tmp/video.mp4"),
                     media_type: MediaType::Video,
                     thumbnail_filepath: None,
                 }))
@@ -368,9 +378,9 @@ mod tests {
             .with(
                 eq(ChatId(123)),
                 eq(MessageId(456)),
-                eq("/tmp/video.mp4"),
+                eq(Path::new("/tmp/video.mp4")),
                 always(),
-                eq(None),
+                eq(None::<PathBuf>),
             )
             .times(1)
             .returning(|_, _, _, _, _| Ok(()));
@@ -403,7 +413,7 @@ mod tests {
             .times(1)
             .returning(|_, _| {
                 Ok(DownloadedMedia::Single(DownloadedItem {
-                    filepath: "/tmp/photo.jpg".to_string(),
+                    filepath: PathBuf::from("/tmp/photo.jpg"),
                     media_type: MediaType::Photo,
                     thumbnail_filepath: None,
                 }))
@@ -414,7 +424,7 @@ mod tests {
             .with(
                 eq(ChatId(123)),
                 eq(MessageId(456)),
-                eq("/tmp/photo.jpg"),
+                eq(Path::new("/tmp/photo.jpg")),
                 always(),
             )
             .times(1)
@@ -453,12 +463,12 @@ mod tests {
             .returning(|_, _| {
                 Ok(DownloadedMedia::Group(vec![
                     DownloadedItem {
-                        filepath: "/tmp/item1.mp4".to_string(),
+                        filepath: PathBuf::from("/tmp/item1.mp4"),
                         media_type: MediaType::Video,
                         thumbnail_filepath: None,
                     },
                     DownloadedItem {
-                        filepath: "/tmp/item2.jpg".to_string(),
+                        filepath: PathBuf::from("/tmp/item2.jpg"),
                         media_type: MediaType::Photo,
                         thumbnail_filepath: None,
                     },
@@ -546,6 +556,82 @@ mod tests {
         mock_telegram_api.expect_send_video().times(0);
         mock_telegram_api.expect_send_photo().times(0);
         mock_telegram_api.expect_send_media_group().times(0);
+
+        process_download_request(
+            &test_url,
+            ChatId(123),
+            MessageId(456),
+            &mock_downloader,
+            &mock_telegram_api,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_process_download_request_sends_timeout_message_on_timeout() {
+        let mut mock_downloader = MockDownloader::new();
+        let mut mock_telegram_api = MockTelegramApi::new();
+        let test_url = Url::parse("https://instagram.com/p/slow_video").unwrap();
+
+        mock_downloader
+            .expect_get_media_metadata()
+            .with(eq(test_url.clone()))
+            .times(1)
+            .returning(|_| Ok(create_test_info()));
+
+        mock_downloader
+            .expect_download_media()
+            .withf(|info, _url| info.id == "123")
+            .times(1)
+            .returning(|_, _| Err(DownloadError::Timeout(300)));
+
+        mock_telegram_api
+            .expect_send_text_message()
+            .withf(|_, _, msg| msg.contains("taking too long"))
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        mock_telegram_api.expect_send_video().times(0);
+        mock_telegram_api.expect_send_photo().times(0);
+        mock_telegram_api.expect_send_media_group().times(0);
+
+        process_download_request(
+            &test_url,
+            ChatId(123),
+            MessageId(456),
+            &mock_downloader,
+            &mock_telegram_api,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_process_download_request_sends_generic_error_on_metadata_failure() {
+        let mut mock_downloader = MockDownloader::new();
+        let mut mock_telegram_api = MockTelegramApi::new();
+        let test_url = Url::parse("https://instagram.com/p/private_post").unwrap();
+
+        mock_downloader
+            .expect_get_media_metadata()
+            .with(eq(test_url.clone()))
+            .times(1)
+            .returning(|_| {
+                Err(DownloadError::CommandFailed(
+                    "ERROR: /usr/local/bin/yt-dlp: private video".to_string(),
+                ))
+            });
+
+        mock_downloader.expect_download_media().times(0);
+
+        mock_telegram_api
+            .expect_send_text_message()
+            .withf(|_, _, msg| {
+                msg.contains("could not fetch information")
+                    && !msg.contains("ERROR:")
+                    && !msg.contains("yt-dlp")
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(()));
 
         process_download_request(
             &test_url,
