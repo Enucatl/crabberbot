@@ -99,7 +99,7 @@ The provided `docker-compose.override.yml` makes local development easy.
 
 -   **To build and run a local version of the bot (instead of pulling from GHCR)**:
     ```bash
-    CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/\./') docker compose --env-file .env up --build
+    CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/\./') docker compose --env-file .env.test up --build
     ```
 -   **To run the test suite inside a Docker container**:
     ```bash
