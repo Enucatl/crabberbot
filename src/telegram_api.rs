@@ -1,12 +1,11 @@
 use async_trait::async_trait;
-use mockall::automock;
 use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
     prelude::*,
     types::{ChatAction, ChatId, InputFile, InputMedia, MessageId, ParseMode, ReactionType},
 };
 
-#[automock]
+#[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait TelegramApi: Send + Sync {
     async fn send_video(

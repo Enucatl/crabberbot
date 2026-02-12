@@ -1,6 +1,7 @@
 use log::LevelFilter;
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::Client;
 use teloxide::prelude::*;
@@ -13,6 +14,8 @@ use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
 use crabberbot::handler::process_download_request;
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
+
+const OVERALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(360);
 
 /// A dedicated error type for our application's setup.
 #[derive(Debug, Error)]
@@ -81,7 +84,7 @@ async fn create_http_client() -> Result<Client, SetupError> {
 
 async fn handle_command(
     _bot: Bot,
-    api: Arc<dyn TelegramApi + Send + Sync>,
+    api: Arc<dyn TelegramApi>,
     message: Message,
     command: Command,
 ) -> ResponseResult<()> {
@@ -127,8 +130,8 @@ If you encounter any issues, please double-check the URL or try again later. Not
 
 async fn handle_url(
     _bot: Bot,
-    downloader: Arc<dyn Downloader + Send + Sync>,
-    api: Arc<dyn TelegramApi + Send + Sync>,
+    downloader: Arc<dyn Downloader>,
+    api: Arc<dyn TelegramApi>,
     limiter: Arc<ConcurrencyLimiter>,
     message: Message,
     url: Url,
@@ -158,15 +161,30 @@ async fn handle_url(
         }),
     )
     .await?;
-    process_download_request(&url, chat_id, message.id, downloader.as_ref(), api.as_ref()).await;
+    if tokio::time::timeout(
+        OVERALL_REQUEST_TIMEOUT,
+        process_download_request(&url, chat_id, message.id, downloader.as_ref(), api.as_ref()),
+    )
+    .await
+    .is_err()
+    {
+        log::error!("Overall request timed out for {}", url);
+        let _ = api
+            .send_text_message(
+                chat_id,
+                message.id,
+                "Sorry, the request timed out. Please try again.",
+            )
+            .await;
+    }
     api.set_message_reaction(chat_id, message.id, None).await?;
     Ok(())
 }
 
 async fn handle_unhandled_message(
     _bot: Bot,
-    _downloader: Arc<dyn Downloader + Send + Sync>,
-    api: Arc<dyn TelegramApi + Send + Sync>,
+    _downloader: Arc<dyn Downloader>,
+    api: Arc<dyn TelegramApi>,
     message: Message,
 ) -> ResponseResult<()> {
     api.send_text_message(
@@ -222,8 +240,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bot = Bot::from_env_with_client(client);
 
     // Instantiate our REAL dependencies
-    let downloader: Arc<dyn Downloader + Send + Sync> = Arc::new(YtDlpDownloader::new());
-    let api: Arc<dyn TelegramApi + Send + Sync> = Arc::new(TeloxideApi::new(bot.clone()));
+    let downloader: Arc<dyn Downloader> = Arc::new(YtDlpDownloader::new());
+    let api: Arc<dyn TelegramApi> = Arc::new(TeloxideApi::new(bot.clone()));
     let limiter = Arc::new(ConcurrencyLimiter::new());
 
     // Get port from environment, fallback to 8080 for local development

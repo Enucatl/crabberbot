@@ -1,5 +1,4 @@
 use dashmap::DashSet;
-use std::sync::Arc;
 use teloxide::types::ChatId;
 
 pub struct LockGuard<'a> {
@@ -14,9 +13,9 @@ impl<'a> Drop for LockGuard<'a> {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct ConcurrencyLimiter {
-    processing_users: Arc<DashSet<ChatId>>,
+    processing_users: DashSet<ChatId>,
 }
 
 impl ConcurrencyLimiter {
@@ -24,8 +23,6 @@ impl ConcurrencyLimiter {
         Self::default()
     }
 
-    /// Attempts to acquire a lock for a chat.
-    /// Returns a guard if successful, or None if already locked.
     pub fn try_lock(&self, chat_id: ChatId) -> Option<LockGuard<'_>> {
         if self.processing_users.insert(chat_id) {
             log::info!("Acquired lock for chat_id: {}", chat_id);
