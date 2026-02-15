@@ -55,6 +55,7 @@ jobs:
             ${{ env.DOCKER_IMAGE_NAME }}:latest
           build-args: |
             CARGO_PACKAGE_VERSION=${{ steps.get_version.outputs.CARGO_PACKAGE_VERSION }}
+            YT_DLP_CACHE_BUST=${{ github.run_id }}
 
       - name: Trigger Portainer Redeploy
         # This step runs only if the build and push was successful.
