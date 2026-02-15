@@ -50,5 +50,9 @@ services:
       timeout: 5s
       retries: 5
 
+networks:
+  default:
+    enable_ipv6: true
+
 volumes:
   pgdata:

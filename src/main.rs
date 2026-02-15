@@ -270,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bot = Bot::from_env_with_client(client);
 
     // Instantiate our REAL dependencies
-    let downloader: Arc<dyn Downloader> = Arc::new(YtDlpDownloader::new());
+    let downloader: Arc<dyn Downloader> = Arc::new(YtDlpDownloader::new().await);
     let api: Arc<dyn TelegramApi> = Arc::new(TeloxideApi::new(bot.clone()));
     let limiter = Arc::new(ConcurrencyLimiter::new());
 

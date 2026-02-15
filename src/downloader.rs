@@ -156,15 +156,56 @@ pub struct YtDlpDownloader {
 }
 
 impl YtDlpDownloader {
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
         let yt_dlp_path = std::env::var("YT_DLP_PATH").unwrap_or_else(|_| "yt-dlp".to_string());
         log::info!("Using yt-dlp executable at: {}", yt_dlp_path);
+
+        // Log yt-dlp version
+        if let Ok(output) = tokio::process::Command::new(&yt_dlp_path)
+            .arg("--version")
+            .output()
+            .await
+        {
+            let version = String::from_utf8_lossy(&output.stdout);
+            log::info!("yt-dlp version: {}", version.trim());
+        }
+
+        // Log available impersonate targets to verify curl_cffi is working
+        match tokio::process::Command::new(&yt_dlp_path)
+            .arg("--list-impersonate-targets")
+            .output()
+            .await
+        {
+            Ok(output) => {
+                if output.status.success() {
+                    let targets = String::from_utf8_lossy(&output.stdout);
+                    log::info!(
+                        "yt-dlp impersonate targets available (curl_cffi working):\n{}",
+                        targets.trim()
+                    );
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    log::warn!(
+                        "yt-dlp --list-impersonate-targets failed (curl_cffi may not be installed): {}",
+                        stderr.trim()
+                    );
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to check impersonate targets: {}", e);
+            }
+        }
+
         Self { yt_dlp_path }
     }
 
     fn build_base_command(&self) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.yt_dlp_path);
-        command.arg("--no-warnings").arg("--ignore-config");
+        command
+            .arg("--no-warnings")
+            .arg("--ignore-config")
+            .arg("--impersonate")
+            .arg("chrome");
         command
     }
 
@@ -192,11 +233,6 @@ impl YtDlpDownloader {
     }
 }
 
-impl Default for YtDlpDownloader {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[async_trait]
 impl Downloader for YtDlpDownloader {
@@ -222,6 +258,11 @@ impl Downloader for YtDlpDownloader {
         }
 
         let stdout_str = String::from_utf8_lossy(&output.stdout);
+        log::debug!(
+            "yt-dlp metadata stdout length for {}: {} bytes",
+            url,
+            stdout_str.len()
+        );
 
         serde_json::from_str::<MediaInfo>(&stdout_str).map_err(|e| {
             log::error!("Failed to parse metadata JSON for {}: {}", url, e);

@@ -54,10 +54,11 @@ FROM python:3.14-slim-trixie AS runtime
 
 # The yt-dlp binary is a zipapp that requires the python3 interpreter to run.
 # We don't need git, make, or pip in the final image.
-RUN apt-get update && apt-get install -y \
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
     ca-certificates \
     ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir curl_cffi requests brotli
 
 # Create a non-root user for security best practices
 RUN useradd --create-home --shell /bin/bash appuser
