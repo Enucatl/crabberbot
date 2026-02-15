@@ -18,6 +18,8 @@ services:
   # This service will ONLY be activated when the 'test' profile is enabled.
   test-runner:
     profiles: ["test"] # Assign this service to the 'test' profile
+    networks:
+      - crabberbot
     build:
       context: .
       dockerfile: Dockerfile

@@ -193,15 +193,9 @@ async fn handle_url(
 async fn handle_unhandled_message(
     _bot: Bot,
     _downloader: Arc<dyn Downloader>,
-    api: Arc<dyn TelegramApi>,
-    message: Message,
+    _api: Arc<dyn TelegramApi>,
+    _message: Message,
 ) -> ResponseResult<()> {
-    api.send_text_message(
-        message.chat.id,
-        message.id,
-        "Your message isn't a valid link!",
-    )
-    .await?;
     Ok(())
 }
 

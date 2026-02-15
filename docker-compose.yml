@@ -2,6 +2,8 @@ services:
   bot:
     image: ghcr.io/enucatl/crabberbot:latest
     container_name: crabberbot
+    networks:
+      - crabberbot
     environment:
       - RUST_LOG=info,crabberbot=info
       - TELOXIDE_API_URL=http://telegram-bot-api:8081
@@ -20,6 +22,8 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
+    networks:
+      - crabberbot
     environment:
       - TUNNEL_TOKEN
     command: tunnel run
@@ -27,6 +31,8 @@ services:
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
     restart: unless-stopped
+    networks:
+      - crabberbot
     environment:
       - TELEGRAM_API_HASH
       - TELEGRAM_API_ID
@@ -38,6 +44,8 @@ services:
   postgres:
     image: postgres:17
     restart: unless-stopped
+    networks:
+      - crabberbot
     environment:
       POSTGRES_DB: crabberbot
       POSTGRES_USER: crabberbot
@@ -51,7 +59,8 @@ services:
       retries: 5
 
 networks:
-  default:
+  crabberbot:
+    name: crabberbot
     enable_ipv6: true
 
 volumes:
