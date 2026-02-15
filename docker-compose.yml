@@ -7,7 +7,7 @@ services:
       - TELOXIDE_API_URL=http://telegram-bot-api:8081
       - TELOXIDE_TOKEN
       - WEBHOOK_URL
-      - DATABASE_URL=postgres://crabberbot:${POSTGRES_PASSWORD}@postgres:5432/crabberbot
+      - DATABASE_URL=postgres://crabberbot:${POSTGRES_PASSWORD}@crabberbot-postgres-1:5432/crabberbot
     restart: unless-stopped
     depends_on:
       telegram-bot-api:
@@ -36,7 +36,7 @@ services:
       - cloudflared
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17
     restart: unless-stopped
     environment:
       POSTGRES_DB: crabberbot
