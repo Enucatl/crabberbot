@@ -115,7 +115,7 @@ async fn pre_download_validation(
                 .send_text_message(
                     chat_id,
                     message_id,
-                    "Sorry, I could not fetch information for that link. It might be private or unsupported.",
+                    "Sorry, I could not fetch information for that link. It might require age verification, be private or unsupported.",
                 )
                 .await;
             Err(())
