@@ -300,6 +300,12 @@
           "refId": "A"
         }
       ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {"nameField": "status", "valueField": "count"}
+        }
+      ],
       "title": "Status Breakdown",
       "type": "piechart"
     },
