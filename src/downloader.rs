@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,6 +29,7 @@ pub enum MediaType {
 }
 
 impl MediaType {
+    #[must_use]
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "mp4" | "webm" | "gif" | "mov" | "mkv" => Some(MediaType::Video),
@@ -36,8 +39,28 @@ impl MediaType {
     }
 }
 
+impl fmt::Display for MediaType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Video => write!(f, "video"),
+            Self::Photo => write!(f, "photo"),
+        }
+    }
+}
+
+impl FromStr for MediaType {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "video" => Ok(Self::Video),
+            "photo" => Ok(Self::Photo),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Pre-download metadata returned by yt-dlp's `--dump-single-json`.
-#[derive(Debug, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Deserialize, PartialEq, Clone, Default)]
 pub struct MediaInfo {
     pub id: String,
     #[serde(default)]
@@ -90,14 +113,22 @@ struct DownloadOutputLine {
     ext: Option<String>,
 }
 
-fn escape_html(s: &str) -> String {
+#[must_use]
+fn escape_html_text(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
 
 /// Builds a caption string from pre-download metadata and the source URL.
+#[must_use]
 pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
+    const CAPTION_MAX_LEN: usize = 1024;
+    const BLOCKQUOTE_OPEN: &str = "<blockquote>";
+    const BLOCKQUOTE_CLOSE: &str = "</blockquote>";
+    const TRUNCATION_MARKER: &str = "[...]";
+    const SEPARATOR: &str = "\n\n";
+
     let via_link = "https://t.me/crabberbot?start=c";
     let header = format!(
         "<a href=\"{}\">CrabberBot</a> 🦀 <a href=\"{}\">Source</a>",
@@ -111,7 +142,7 @@ pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
         .or(info.playlist_uploader.as_deref());
     if let Some(uploader) = uploader {
         if !uploader.is_empty() {
-            quote_parts.push(format!("<i>{}</i>", escape_html(uploader)));
+            quote_parts.push(format!("<i>{}</i>", escape_html_text(uploader)));
         }
     }
 
@@ -119,25 +150,29 @@ pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
     if let Some(desc) = description {
         let desc = desc.trim();
         if !desc.is_empty() {
-            quote_parts.push(escape_html(desc));
+            quote_parts.push(escape_html_text(desc));
         }
     }
 
     let full_quote_content = quote_parts.join("\n");
-    let overhead = header.chars().count() + 2 + 12 + 13 + 5;
-    let available_space_for_quote = 1024_usize.saturating_sub(overhead);
+    let overhead = header.chars().count()
+        + SEPARATOR.len()
+        + BLOCKQUOTE_OPEN.len()
+        + BLOCKQUOTE_CLOSE.len()
+        + TRUNCATION_MARKER.len();
+    let available_space_for_quote = CAPTION_MAX_LEN.saturating_sub(overhead);
     let final_quote = if full_quote_content.chars().count() > available_space_for_quote {
         let mut truncated: String = full_quote_content
             .chars()
             .take(available_space_for_quote)
             .collect();
-        truncated.push_str("[...]");
+        truncated.push_str(TRUNCATION_MARKER);
         truncated
     } else {
         full_quote_content
     };
 
-    format!("{}\n\n<blockquote>{}</blockquote>", header, final_quote)
+    format!("{header}{SEPARATOR}{BLOCKQUOTE_OPEN}{final_quote}{BLOCKQUOTE_CLOSE}")
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -284,7 +319,8 @@ impl Downloader for YtDlpDownloader {
         let mut command = self.build_base_command();
         command
             .arg("--print-json")
-            .arg("-S vcodec:h264,res,acodec:m4a")
+            .arg("-S")
+            .arg("vcodec:h264,res,acodec:m4a")
             .arg("-o")
             .arg(&filename_template);
 
@@ -394,16 +430,7 @@ mod tests {
             id: "1".to_string(),
             uploader: Some("TestUser".to_string()),
             description: Some("A normal description".to_string()),
-            title: None,
-            media_type: None,
-            playlist_uploader: None,
-            thumbnail: None,
-            duration: None,
-            filesize: None,
-            entries: None,
-            resolution: None,
-            width: None,
-            height: None,
+            ..Default::default()
         };
         let url = Url::parse("https://example.com/video").unwrap();
         let caption = build_caption(&info, &url);
@@ -417,16 +444,7 @@ mod tests {
             id: "1".to_string(),
             uploader: Some("<script>alert('xss')</script>".to_string()),
             description: Some("desc with <b>tags</b>".to_string()),
-            title: None,
-            media_type: None,
-            playlist_uploader: None,
-            thumbnail: None,
-            duration: None,
-            filesize: None,
-            entries: None,
-            resolution: None,
-            width: None,
-            height: None,
+            ..Default::default()
         };
         let url = Url::parse("https://example.com/video").unwrap();
         let caption = build_caption(&info, &url);
@@ -442,16 +460,7 @@ mod tests {
             id: "1".to_string(),
             uploader: Some("Tom & Jerry".to_string()),
             description: Some("A & B < C > D".to_string()),
-            title: None,
-            media_type: None,
-            playlist_uploader: None,
-            thumbnail: None,
-            duration: None,
-            filesize: None,
-            entries: None,
-            resolution: None,
-            width: None,
-            height: None,
+            ..Default::default()
         };
         let url = Url::parse("https://example.com/video").unwrap();
         let caption = build_caption(&info, &url);

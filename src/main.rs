@@ -190,6 +190,7 @@ async fn handle_url(
     Ok(())
 }
 
+// Required catch-all branch — silently ignore messages that are neither commands nor URLs.
 async fn handle_unhandled_message(
     _bot: Bot,
     _downloader: Arc<dyn Downloader>,
@@ -239,7 +240,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let version = env!("CARGO_PACKAGE_VERSION");
     log::info!("Starting CrabberBot version {}", version);
 
-    // Database setup
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = sqlx::PgPool::connect(&database_url)
         .await
@@ -250,25 +250,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Database connected and migrations applied.");
     let storage: Arc<dyn Storage> = Arc::new(PostgresStorage::new(pool.clone()));
 
-    // Periodic cache cleanup (hourly, 7-day TTL)
     let cleanup_pool = pool.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3600));
         loop {
             interval.tick().await;
-            PostgresStorage::cleanup_expired(&cleanup_pool, 7).await;
+            PostgresStorage::cleanup_expired(&cleanup_pool, 7_i32).await;
         }
     });
 
     let client = create_http_client().await?;
     let bot = Bot::from_env_with_client(client);
 
-    // Instantiate our REAL dependencies
     let downloader: Arc<dyn Downloader> = Arc::new(YtDlpDownloader::new().await);
     let api: Arc<dyn TelegramApi> = Arc::new(TeloxideApi::new(bot.clone()));
     let limiter = Arc::new(ConcurrencyLimiter::new());
 
-    // Get port from environment, fallback to 8080 for local development
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string())
         .parse()
@@ -299,14 +296,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to set bot description.");
     log::info!("Successfully set bot description.");
 
-    let mut bot_name = String::from("CrabberBot | Video Downloader");
-    if webhook_url_str.contains("test") {
-        bot_name = String::from("CrabberBot TEST");
-    }
-    // bot.set_my_name()
-    //     .name(bot_name.clone())
-    //     .await
-    //     .expect("Failed to set bot name.");
+    let bot_name = if webhook_url_str.contains("test") {
+        "CrabberBot TEST"
+    } else {
+        "CrabberBot | Video Downloader"
+    };
     log::info!("Successfully set bot name. {}", bot_name);
 
     let handler = Update::filter_message()
@@ -325,7 +319,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Handler for any message type not caught by the above branches
         .branch(dptree::entry().endpoint(handle_unhandled_message));
 
-    // The dispatcher will inject the dependencies into our handler
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![downloader, api, limiter, storage])
         .enable_ctrlc_handler()

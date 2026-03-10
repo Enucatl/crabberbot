@@ -47,21 +47,46 @@ impl Drop for FileCleanupGuard {
             paths_to_delete.len()
         );
 
-        tokio::spawn(async move {
-            for path in &paths_to_delete {
-                match tokio::fs::remove_file(path).await {
-                    Ok(_) => log::info!("Successfully removed file: {}", path.display()),
-                    Err(e) => log::error!("Failed to remove file {}: {}", path.display(), e),
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    for path in &paths_to_delete {
+                        match tokio::fs::remove_file(path).await {
+                            Ok(_) => log::info!("Successfully removed file: {}", path.display()),
+                            Err(e) => {
+                                log::error!("Failed to remove file {}: {}", path.display(), e)
+                            }
+                        }
+                    }
+                });
+            }
+            Err(_) => {
+                for path in &paths_to_delete {
+                    if let Err(e) = std::fs::remove_file(path) {
+                        log::error!("Failed to remove file {}: {}", path.display(), e);
+                    }
                 }
             }
-        });
+        }
     }
 }
 
-/// Creates a new URL with the query string and fragment removed.
+/// Creates a normalized URL for use as a cache key:
+/// - strips fragment and query params (preserving YouTube `v=` param)
+/// - removes `www.` prefix
+/// - removes trailing slash from path
+#[must_use]
 fn cleanup_url(original_url: &Url) -> Url {
     let mut cleaned_url = original_url.clone();
     cleaned_url.set_fragment(None);
+
+    // Normalize www. prefix so e.g. www.instagram.com and instagram.com share a cache entry
+    if let Some(host) = cleaned_url.host_str() {
+        if let Some(stripped) = host.strip_prefix("www.") {
+            let normalized = stripped.to_owned();
+            let _ = cleaned_url.set_host(Some(&normalized));
+        }
+    }
 
     let is_youtube = cleaned_url
         .host_str()
@@ -79,6 +104,12 @@ fn cleanup_url(original_url: &Url) -> Url {
         }
     } else {
         cleaned_url.set_query(None);
+    }
+
+    // Remove trailing slash from path (e.g. /p/ABC123/ -> /p/ABC123)
+    let path = cleaned_url.path().to_owned();
+    if path.len() > 1 && path.ends_with('/') {
+        let _ = cleaned_url.set_path(path.trim_end_matches('/'));
     }
 
     cleaned_url
@@ -168,10 +199,19 @@ async fn send_single_item(
             )
             .await
             .map(|file_id| (file_id, MediaType::Video)),
-        MediaType::Photo => telegram_api
-            .send_photo(chat_id, message_id, &item.filepath, caption)
-            .await
-            .map(|file_id| (file_id, MediaType::Photo)),
+        MediaType::Photo => {
+            // Resize happens at the handler layer for both single and group photos.
+            let resized = resize_photo_if_needed(&item.filepath);
+            let effective_path = resized.as_deref().unwrap_or(&item.filepath);
+            let send_result = telegram_api
+                .send_photo(chat_id, message_id, effective_path, caption)
+                .await
+                .map(|file_id| (file_id, MediaType::Photo));
+            if let Some(p) = resized {
+                let _ = std::fs::remove_file(&p);
+            }
+            send_result
+        }
     };
 
     match result {
@@ -206,7 +246,7 @@ async fn send_media_group_step(
 
     for (i, item) in items.iter().enumerate() {
         let item_caption = if i == 0 {
-            caption.to_string()
+            caption.to_owned()
         } else {
             String::new()
         };
@@ -331,7 +371,7 @@ pub async fn process_download_request(
                     chat_id.0,
                     clean_url_str,
                     "cached",
-                    start.elapsed().as_millis() as i64,
+                    start.elapsed().as_millis() as i32,
                 )
                 .await;
             return;
@@ -356,7 +396,7 @@ pub async fn process_download_request(
                     chat_id.0,
                     clean_url_str,
                     "validation_error",
-                    start.elapsed().as_millis() as i64,
+                    start.elapsed().as_millis() as i32,
                 )
                 .await;
             return;
@@ -380,7 +420,7 @@ pub async fn process_download_request(
                     chat_id.0,
                     clean_url_str,
                     "error",
-                    start.elapsed().as_millis() as i64,
+                    start.elapsed().as_millis() as i32,
                 )
                 .await;
             return;
@@ -407,7 +447,7 @@ pub async fn process_download_request(
         }
     };
 
-    let elapsed_ms = start.elapsed().as_millis() as i64;
+    let elapsed_ms = start.elapsed().as_millis() as i32;
 
     if let Some(files) = &file_ids {
         storage

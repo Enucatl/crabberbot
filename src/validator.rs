@@ -18,6 +18,7 @@ pub enum ValidationError {
     TooManyItems { found: usize, limit: usize },
 }
 
+#[must_use]
 pub fn validate_media_metadata(info: &MediaInfo) -> Result<(), ValidationError> {
     if let Some(entries) = &info.entries {
         let is_video_playlist = entries
@@ -46,6 +47,7 @@ pub fn validate_media_metadata(info: &MediaInfo) -> Result<(), ValidationError> 
                 });
             }
         }
+
         if let Some(filesize) = info.filesize {
             if filesize > MAX_FILESIZE_BYTES {
                 return Err(ValidationError::TooLarge {

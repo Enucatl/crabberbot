@@ -152,7 +152,7 @@ impl TelegramApi for TeloxideApi {
         let mut request = self
             .bot
             .send_video(chat_id, InputFile::file(file_path))
-            .caption(caption.to_string())
+            .caption(caption.to_owned())
             .parse_mode(ParseMode::Html)
             .reply_to(message_id);
 
@@ -163,7 +163,12 @@ impl TelegramApi for TeloxideApi {
         let file_id = message
             .video()
             .map(|v| v.file.id.to_string())
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                log::warn!("send_video: Telegram response missing video file_id");
+                teloxide::RequestError::Api(teloxide::ApiError::Unknown(
+                    "Missing file_id in Telegram response".to_owned(),
+                ))
+            })?;
         Ok(file_id)
     }
 
@@ -177,23 +182,23 @@ impl TelegramApi for TeloxideApi {
         log::info!("Sending photo {:?} to chat {}", file_path, chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadPhoto)
             .await?;
-        let resized = resize_photo_if_needed(file_path);
-        let effective_path = resized.as_deref().unwrap_or(file_path);
         let message = self
             .bot
-            .send_photo(chat_id, InputFile::file(effective_path))
-            .caption(caption.to_string())
+            .send_photo(chat_id, InputFile::file(file_path))
+            .caption(caption.to_owned())
             .parse_mode(ParseMode::Html)
             .reply_to(message_id)
             .await?;
-        if let Some(p) = resized {
-            let _ = std::fs::remove_file(&p);
-        }
         let file_id = message
             .photo()
             .and_then(|photos| photos.last())
             .map(|p| p.file.id.to_string())
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                log::warn!("send_photo: Telegram response missing photo file_id");
+                teloxide::RequestError::Api(teloxide::ApiError::Unknown(
+                    "Missing file_id in Telegram response".to_owned(),
+                ))
+            })?;
         Ok(file_id)
     }
 
@@ -291,8 +296,8 @@ impl TelegramApi for TeloxideApi {
         self.send_chat_action(chat_id, ChatAction::UploadVideo)
             .await?;
         self.bot
-            .send_video(chat_id, InputFile::file_id(String::from(file_id).into()))
-            .caption(caption.to_string())
+            .send_video(chat_id, InputFile::file_id(file_id.to_owned().into()))
+            .caption(caption.to_owned())
             .parse_mode(ParseMode::Html)
             .reply_to(message_id)
             .await?;
@@ -310,8 +315,8 @@ impl TelegramApi for TeloxideApi {
         self.send_chat_action(chat_id, ChatAction::UploadPhoto)
             .await?;
         self.bot
-            .send_photo(chat_id, InputFile::file_id(String::from(file_id).into()))
-            .caption(caption.to_string())
+            .send_photo(chat_id, InputFile::file_id(file_id.to_owned().into()))
+            .caption(caption.to_owned())
             .parse_mode(ParseMode::Html)
             .reply_to(message_id)
             .await?;
@@ -340,7 +345,7 @@ impl TelegramApi for TeloxideApi {
             .map(|(i, file)| {
                 let input_file = InputFile::file_id(file.telegram_file_id.clone().into());
                 let item_caption = if i == 0 {
-                    caption.to_string()
+                    caption.to_owned()
                 } else {
                     String::new()
                 };

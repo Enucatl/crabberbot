@@ -30,7 +30,7 @@ pub trait Storage: Send + Sync {
         chat_id: i64,
         source_url: &str,
         status: &str,
-        processing_time_ms: i64,
+        processing_time_ms: i32,
     );
 }
 
@@ -47,31 +47,18 @@ impl PostgresStorage {
         sqlx::migrate!("./migrations").run(pool).await
     }
 
-    pub async fn cleanup_expired(pool: &PgPool, ttl_days: i64) {
-        let result = sqlx::query("DELETE FROM media_cache WHERE last_used_at < NOW() - make_interval(days => $1)")
-            .bind(ttl_days as i32)
-            .execute(pool)
-            .await;
+    pub async fn cleanup_expired(pool: &PgPool, ttl_days: i32) {
+        let result = sqlx::query(
+            "DELETE FROM media_cache WHERE last_used_at < NOW() - make_interval(days => $1)",
+        )
+        .bind(ttl_days)
+        .execute(pool)
+        .await;
 
         match result {
             Ok(r) => log::info!("Cache cleanup: removed {} expired entries", r.rows_affected()),
             Err(e) => log::error!("Cache cleanup failed: {}", e),
         }
-    }
-}
-
-fn media_type_to_str(media_type: MediaType) -> &'static str {
-    match media_type {
-        MediaType::Video => "video",
-        MediaType::Photo => "photo",
-    }
-}
-
-fn str_to_media_type(s: &str) -> Option<MediaType> {
-    match s {
-        "video" => Some(MediaType::Video),
-        "photo" => Some(MediaType::Photo),
-        _ => None,
     }
 }
 
@@ -116,7 +103,7 @@ impl Storage for PostgresStorage {
         let files: Vec<CachedFile> = file_rows
             .into_iter()
             .filter_map(|(file_id, media_type_str)| {
-                let media_type = str_to_media_type(&media_type_str)?;
+                let media_type = media_type_str.parse::<MediaType>().ok()?;
                 Some(CachedFile {
                     telegram_file_id: file_id,
                     media_type,
@@ -137,6 +124,14 @@ impl Storage for PostgresStorage {
         caption: &str,
         files: &[(String, MediaType)],
     ) {
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                log::error!("Failed to begin transaction for {}: {}", source_url, e);
+                return;
+            }
+        };
+
         let result: Result<(i32,), _> = sqlx::query_as(
             "INSERT INTO media_cache (source_url, caption) VALUES ($1, $2) \
              ON CONFLICT (source_url) DO UPDATE SET caption = $2, last_used_at = NOW() \
@@ -144,7 +139,7 @@ impl Storage for PostgresStorage {
         )
         .bind(source_url)
         .bind(caption)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await;
 
         let cache_id = match result {
@@ -156,10 +151,14 @@ impl Storage for PostgresStorage {
         };
 
         // Delete old files for this cache entry (in case of ON CONFLICT update)
-        let _ = sqlx::query("DELETE FROM cached_files WHERE cache_id = $1")
+        if let Err(e) = sqlx::query("DELETE FROM cached_files WHERE cache_id = $1")
             .bind(cache_id)
-            .execute(&self.pool)
-            .await;
+            .execute(&mut *tx)
+            .await
+        {
+            log::error!("Failed to delete old cached files for {}: {}", source_url, e);
+            return;
+        }
 
         for (position, (file_id, media_type)) in files.iter().enumerate() {
             if let Err(e) = sqlx::query(
@@ -168,20 +167,26 @@ impl Storage for PostgresStorage {
             )
             .bind(cache_id)
             .bind(file_id)
-            .bind(media_type_to_str(*media_type))
+            .bind(media_type.to_string())
             .bind(position as i32)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             {
                 log::error!("Failed to store cached file: {}", e);
+                return;
             }
         }
 
-        log::info!(
-            "Cached {} file(s) for {}",
-            files.len(),
-            source_url
-        );
+        if let Err(e) = tx.commit().await {
+            log::error!(
+                "Failed to commit cache transaction for {}: {}",
+                source_url,
+                e
+            );
+            return;
+        }
+
+        log::info!("Cached {} file(s) for {}", files.len(), source_url);
     }
 
     async fn log_request(
@@ -189,7 +194,7 @@ impl Storage for PostgresStorage {
         chat_id: i64,
         source_url: &str,
         status: &str,
-        processing_time_ms: i64,
+        processing_time_ms: i32,
     ) {
         if let Err(e) = sqlx::query(
             "INSERT INTO requests (chat_id, source_url, status, processing_time_ms) \
@@ -198,7 +203,7 @@ impl Storage for PostgresStorage {
         .bind(chat_id)
         .bind(source_url)
         .bind(status)
-        .bind(processing_time_ms as i32)
+        .bind(processing_time_ms)
         .execute(&self.pool)
         .await
         {
