@@ -30,7 +30,7 @@ pub trait Storage: Send + Sync {
         chat_id: i64,
         source_url: &str,
         status: &str,
-        processing_time_ms: i32,
+        processing_time_ms: i64,
     );
 }
 
@@ -47,7 +47,7 @@ impl PostgresStorage {
         sqlx::migrate!("./migrations").run(pool).await
     }
 
-    pub async fn cleanup_expired(pool: &PgPool, ttl_days: i32) {
+    pub async fn cleanup_expired(pool: &PgPool, ttl_days: i64) {
         let result = sqlx::query(
             "DELETE FROM media_cache WHERE last_used_at < NOW() - make_interval(days => $1)",
         )
@@ -194,7 +194,7 @@ impl Storage for PostgresStorage {
         chat_id: i64,
         source_url: &str,
         status: &str,
-        processing_time_ms: i32,
+        processing_time_ms: i64,
     ) {
         if let Err(e) = sqlx::query(
             "INSERT INTO requests (chat_id, source_url, status, processing_time_ms) \

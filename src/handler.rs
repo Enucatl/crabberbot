@@ -371,7 +371,7 @@ pub async fn process_download_request(
                     chat_id.0,
                     clean_url_str,
                     "cached",
-                    start.elapsed().as_millis() as i32,
+                    start.elapsed().as_millis() as i64,
                 )
                 .await;
             return;
@@ -396,7 +396,7 @@ pub async fn process_download_request(
                     chat_id.0,
                     clean_url_str,
                     "validation_error",
-                    start.elapsed().as_millis() as i32,
+                    start.elapsed().as_millis() as i64,
                 )
                 .await;
             return;
@@ -420,7 +420,7 @@ pub async fn process_download_request(
                     chat_id.0,
                     clean_url_str,
                     "error",
-                    start.elapsed().as_millis() as i32,
+                    start.elapsed().as_millis() as i64,
                 )
                 .await;
             return;
@@ -447,7 +447,7 @@ pub async fn process_download_request(
         }
     };
 
-    let elapsed_ms = start.elapsed().as_millis() as i32;
+    let elapsed_ms = start.elapsed().as_millis() as i64;
 
     if let Some(files) = &file_ids {
         storage

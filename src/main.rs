@@ -255,7 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut interval = tokio::time::interval(Duration::from_secs(3600));
         loop {
             interval.tick().await;
-            PostgresStorage::cleanup_expired(&cleanup_pool, 7_i32).await;
+            PostgresStorage::cleanup_expired(&cleanup_pool, 7).await;
         }
     });
 
