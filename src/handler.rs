@@ -149,6 +149,47 @@ async fn download_step(
     }
 }
 
+/// Convert a PNG file to JPEG using ffmpeg. Returns the new JPEG path on success.
+/// The caller is responsible for deleting the returned file.
+async fn convert_png_to_jpeg(png_path: &std::path::Path) -> Option<PathBuf> {
+    let jpg_path = png_path.with_extension("jpg");
+    let output = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-i",
+            png_path.to_str()?,
+            "-q:v",
+            "2",
+            "-y",
+            jpg_path.to_str()?,
+        ])
+        .output()
+        .await
+        .ok()?;
+    if output.status.success() {
+        Some(jpg_path)
+    } else {
+        log::warn!("ffmpeg PNG->JPEG conversion failed for {:?}", png_path);
+        None
+    }
+}
+
+/// Returns the effective path for sending a photo: converts PNG to JPEG if needed.
+/// Returns (effective_path, Option<converted_path_to_cleanup>).
+async fn effective_photo_path(path: &std::path::Path) -> (std::path::PathBuf, Option<PathBuf>) {
+    let is_png = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("png"))
+        .unwrap_or(false);
+    if is_png {
+        if let Some(jpg_path) = convert_png_to_jpeg(path).await {
+            let converted = jpg_path.clone();
+            return (jpg_path, Some(converted));
+        }
+    }
+    (path.to_path_buf(), None)
+}
+
 /// Step 3 (Branch A): Handle sending a single media item. Returns file_id on success.
 async fn send_single_item(
     item: &DownloadedItem,
@@ -157,6 +198,12 @@ async fn send_single_item(
     message_id: MessageId,
     telegram_api: &dyn TelegramApi,
 ) -> Option<(String, MediaType)> {
+    let (photo_path, converted_photo) = if item.media_type == MediaType::Photo {
+        effective_photo_path(&item.filepath).await
+    } else {
+        (item.filepath.clone(), None)
+    };
+
     let result = match item.media_type {
         MediaType::Video => telegram_api
             .send_video(
@@ -169,10 +216,14 @@ async fn send_single_item(
             .await
             .map(|file_id| (file_id, MediaType::Video)),
         MediaType::Photo => telegram_api
-            .send_photo(chat_id, message_id, &item.filepath, caption)
+            .send_photo(chat_id, message_id, &photo_path, caption)
             .await
             .map(|file_id| (file_id, MediaType::Photo)),
     };
+
+    if let Some(p) = converted_photo {
+        let _ = tokio::fs::remove_file(&p).await;
+    }
 
     match result {
         Ok(sent) => {
@@ -202,9 +253,19 @@ async fn send_media_group_step(
     telegram_api: &dyn TelegramApi,
 ) -> Option<Vec<SentMedia>> {
     let mut media_group: Vec<InputMedia> = Vec::new();
+    let mut converted_files: Vec<PathBuf> = Vec::new();
 
     for (i, item) in items.iter().enumerate() {
-        let input_file = InputFile::file(&item.filepath);
+        let (effective_path, converted) = if item.media_type == MediaType::Photo {
+            effective_photo_path(&item.filepath).await
+        } else {
+            (item.filepath.clone(), None)
+        };
+        if let Some(p) = converted {
+            converted_files.push(p);
+        }
+
+        let input_file = InputFile::file(&effective_path);
         let item_caption = if i == 0 {
             caption.to_string()
         } else {
@@ -234,7 +295,7 @@ async fn send_media_group_step(
         return None;
     }
 
-    match telegram_api
+    let result = match telegram_api
         .send_media_group(chat_id, message_id, media_group)
         .await
     {
@@ -253,7 +314,13 @@ async fn send_media_group_step(
                 .await;
             None
         }
+    };
+
+    for p in &converted_files {
+        let _ = tokio::fs::remove_file(p).await;
     }
+
+    result
 }
 
 /// Send cached media back to the user.
