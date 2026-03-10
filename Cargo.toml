@@ -8,6 +8,7 @@ repository = "https://github.com/Enucatl/crabberbot"
 
 [dependencies]
 async-trait = "0.1"
+image = "0.25"
 dashmap = "6.1.0"
 dotenvy = "0.15"
 google-cloud-auth = "1.0.1"

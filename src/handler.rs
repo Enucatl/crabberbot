@@ -9,7 +9,7 @@ use crate::downloader::{
     build_caption, DownloadedItem, DownloadedMedia, Downloader, MediaInfo, MediaType,
 };
 use crate::storage::{CachedMedia, Storage};
-use crate::telegram_api::{SentMedia, TelegramApi};
+use crate::telegram_api::{resize_photo_if_needed, SentMedia, TelegramApi};
 use crate::validator::validate_media_metadata;
 
 /// An RAII guard to ensure downloaded files are cleaned up.
@@ -202,9 +202,9 @@ async fn send_media_group_step(
     telegram_api: &dyn TelegramApi,
 ) -> Option<Vec<SentMedia>> {
     let mut media_group: Vec<InputMedia> = Vec::new();
+    let mut temp_resized: Vec<PathBuf> = Vec::new();
 
     for (i, item) in items.iter().enumerate() {
-        let input_file = InputFile::file(&item.filepath);
         let item_caption = if i == 0 {
             caption.to_string()
         } else {
@@ -212,16 +212,29 @@ async fn send_media_group_step(
         };
 
         let media = match item.media_type {
-            MediaType::Video => InputMedia::Video(
-                InputMediaVideo::new(input_file)
-                    .parse_mode(ParseMode::Html)
-                    .caption(item_caption),
-            ),
-            MediaType::Photo => InputMedia::Photo(
-                InputMediaPhoto::new(input_file)
-                    .parse_mode(ParseMode::Html)
-                    .caption(item_caption),
-            ),
+            MediaType::Video => {
+                let input_file = InputFile::file(&item.filepath);
+                InputMedia::Video(
+                    InputMediaVideo::new(input_file)
+                        .parse_mode(ParseMode::Html)
+                        .caption(item_caption),
+                )
+            }
+            MediaType::Photo => {
+                let resized = resize_photo_if_needed(&item.filepath);
+                let path = resized
+                    .as_deref()
+                    .unwrap_or(&item.filepath)
+                    .to_path_buf();
+                if let Some(p) = resized {
+                    temp_resized.push(p);
+                }
+                InputMedia::Photo(
+                    InputMediaPhoto::new(InputFile::file(path))
+                        .parse_mode(ParseMode::Html)
+                        .caption(item_caption),
+                )
+            }
         };
         media_group.push(media);
     }
@@ -234,10 +247,13 @@ async fn send_media_group_step(
         return None;
     }
 
-    match telegram_api
+    let result = telegram_api
         .send_media_group(chat_id, message_id, media_group)
-        .await
-    {
+        .await;
+    for p in temp_resized {
+        let _ = std::fs::remove_file(&p);
+    }
+    match result {
         Ok(sent) => {
             log::info!("Successfully sent media group to chat_id: {}", chat_id);
             Some(sent)

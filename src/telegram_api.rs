@@ -10,6 +10,38 @@ use teloxide::{
 use crate::downloader::MediaType;
 use crate::storage::CachedFile;
 
+/// Resize a photo if its dimension sum exceeds Telegram's 10000 limit.
+/// Returns the path to a temporary resized file, or None if no resize was needed.
+/// The caller is responsible for deleting the temp file when done.
+pub(crate) fn resize_photo_if_needed(path: &Path) -> Option<PathBuf> {
+    let img = match image::open(path) {
+        Ok(img) => img,
+        Err(e) => {
+            log::warn!("Could not open {:?} for resize check: {}", path, e);
+            return None;
+        }
+    };
+    let (w, h) = (img.width(), img.height());
+    if w + h <= 10000 {
+        return None;
+    }
+    let scale = 9999.0 / (w + h) as f64;
+    let new_w = (w as f64 * scale).round() as u32;
+    let new_h = (h as f64 * scale).round() as u32;
+    log::info!(
+        "Resizing photo from {}x{} to {}x{} before sending to Telegram",
+        w, h, new_w, new_h
+    );
+    let resized = img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+    let temp_path = std::env::temp_dir().join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
+    if let Err(e) = resized.save(&temp_path) {
+        log::warn!("Could not save resized image to {:?}: {}", temp_path, e);
+        return None;
+    }
+    Some(temp_path)
+}
+
 #[derive(Debug, Clone)]
 pub struct SentMedia {
     pub file_id: String,
@@ -145,13 +177,18 @@ impl TelegramApi for TeloxideApi {
         log::info!("Sending photo {:?} to chat {}", file_path, chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadPhoto)
             .await?;
+        let resized = resize_photo_if_needed(file_path);
+        let effective_path = resized.as_deref().unwrap_or(file_path);
         let message = self
             .bot
-            .send_photo(chat_id, InputFile::file(file_path))
+            .send_photo(chat_id, InputFile::file(effective_path))
             .caption(caption.to_string())
             .parse_mode(ParseMode::Html)
             .reply_to(message_id)
             .await?;
+        if let Some(p) = resized {
+            let _ = std::fs::remove_file(&p);
+        }
         let file_id = message
             .photo()
             .and_then(|photos| photos.last())
