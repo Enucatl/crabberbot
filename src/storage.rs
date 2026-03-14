@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 
 use crate::downloader::MediaType;
+use crate::subscription::{CallbackContext, SubscriptionInfo, SubscriptionTier};
 
 #[derive(Debug, Clone)]
 pub struct CachedMedia {
@@ -32,6 +33,47 @@ pub trait Storage: Send + Sync {
         status: &str,
         processing_time_ms: i64,
     );
+
+    // Subscription management
+    async fn get_subscription(&self, chat_id: i64) -> SubscriptionInfo;
+    async fn upsert_subscription(
+        &self,
+        chat_id: i64,
+        tier: SubscriptionTier,
+        duration_days: i64,
+    );
+
+    // Payment recording
+    async fn record_payment(
+        &self,
+        chat_id: i64,
+        telegram_charge_id: &str,
+        provider_charge_id: &str,
+        product: &str,
+        amount: i32,
+    );
+
+    // AI Seconds tracking
+    async fn consume_ai_seconds(&self, chat_id: i64, seconds: i32);
+    async fn add_topup_seconds(&self, chat_id: i64, seconds: i32);
+    async fn record_premium_usage(
+        &self,
+        chat_id: i64,
+        feature: &str,
+        source_url: &str,
+        duration_secs: i32,
+        cost_usd: f64,
+    );
+
+    // Callback context
+    async fn store_callback_context(&self, ctx: &CallbackContext) -> i32;
+    async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext>;
+
+    // Subscription downgrade (for refunds)
+    async fn revoke_subscription(&self, chat_id: i64);
+
+    // Cleanup
+    async fn cleanup_expired_callback_contexts(&self);
 }
 
 pub struct PostgresStorage {
@@ -208,6 +250,223 @@ impl Storage for PostgresStorage {
         .await
         {
             log::error!("Failed to log request: {}", e);
+        }
+    }
+
+    async fn get_subscription(&self, chat_id: i64) -> SubscriptionInfo {
+        let row: Option<(String, i32, i32, i32, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> =
+            sqlx::query_as(
+                "SELECT tier, ai_seconds_used, ai_seconds_limit, topup_seconds_available, \
+                 last_topup_at, expires_at FROM subscriptions WHERE chat_id = $1",
+            )
+            .bind(chat_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| {
+                log::error!("Failed to get subscription for {}: {}", chat_id, e);
+                e
+            })
+            .ok()
+            .flatten();
+
+        match row {
+            Some((tier_str, used, limit, topup, last_topup_at, expires_at)) => {
+                let tier = tier_str.parse().unwrap_or(SubscriptionTier::Free);
+                SubscriptionInfo {
+                    tier,
+                    ai_seconds_used: used,
+                    ai_seconds_limit: limit,
+                    topup_seconds_available: topup,
+                    last_topup_at,
+                    expires_at,
+                }
+            }
+            None => SubscriptionInfo::free_default(),
+        }
+    }
+
+    async fn upsert_subscription(
+        &self,
+        chat_id: i64,
+        tier: SubscriptionTier,
+        duration_days: i64,
+    ) {
+        let limit = tier.ai_seconds_limit();
+        let tier_str = tier.to_string();
+        if let Err(e) = sqlx::query(
+            "INSERT INTO subscriptions (chat_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, updated_at) \
+             VALUES ($1, $2, 0, $3, NOW() + make_interval(days => $4), NOW()) \
+             ON CONFLICT (chat_id) DO UPDATE SET \
+               tier = $2, ai_seconds_used = 0, ai_seconds_limit = $3, \
+               expires_at = NOW() + make_interval(days => $4), updated_at = NOW()",
+        )
+        .bind(chat_id)
+        .bind(&tier_str)
+        .bind(limit)
+        .bind(duration_days)
+        .execute(&self.pool)
+        .await
+        {
+            log::error!("Failed to upsert subscription for {}: {}", chat_id, e);
+        }
+    }
+
+    async fn record_payment(
+        &self,
+        chat_id: i64,
+        telegram_charge_id: &str,
+        provider_charge_id: &str,
+        product: &str,
+        amount: i32,
+    ) {
+        if let Err(e) = sqlx::query(
+            "INSERT INTO payments (chat_id, telegram_payment_charge_id, provider_payment_charge_id, product, amount) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (telegram_payment_charge_id) DO NOTHING",
+        )
+        .bind(chat_id)
+        .bind(telegram_charge_id)
+        .bind(provider_charge_id)
+        .bind(product)
+        .bind(amount)
+        .execute(&self.pool)
+        .await
+        {
+            log::error!("Failed to record payment for {}: {}", chat_id, e);
+        }
+    }
+
+    async fn consume_ai_seconds(&self, chat_id: i64, seconds: i32) {
+        if let Err(e) = sqlx::query(
+            "UPDATE subscriptions SET \
+               ai_seconds_used = LEAST(ai_seconds_used + $2, ai_seconds_limit), \
+               topup_seconds_available = topup_seconds_available \
+                   - GREATEST($2 - (ai_seconds_limit - ai_seconds_used), 0), \
+               updated_at = NOW() \
+             WHERE chat_id = $1",
+        )
+        .bind(chat_id)
+        .bind(seconds)
+        .execute(&self.pool)
+        .await
+        {
+            log::error!("Failed to consume ai_seconds for {}: {}", chat_id, e);
+        }
+    }
+
+    async fn add_topup_seconds(&self, chat_id: i64, seconds: i32) {
+        if let Err(e) = sqlx::query(
+            "INSERT INTO subscriptions (chat_id, tier, topup_seconds_available, last_topup_at, updated_at) \
+             VALUES ($1, 'free', $2, NOW(), NOW()) \
+             ON CONFLICT (chat_id) DO UPDATE SET \
+               topup_seconds_available = subscriptions.topup_seconds_available + $2, \
+               last_topup_at = NOW(), updated_at = NOW()",
+        )
+        .bind(chat_id)
+        .bind(seconds)
+        .execute(&self.pool)
+        .await
+        {
+            log::error!("Failed to add topup_seconds for {}: {}", chat_id, e);
+        }
+    }
+
+    async fn record_premium_usage(
+        &self,
+        chat_id: i64,
+        feature: &str,
+        source_url: &str,
+        duration_secs: i32,
+        cost_usd: f64,
+    ) {
+        if let Err(e) = sqlx::query(
+            "INSERT INTO premium_usage (chat_id, feature, source_url, duration_secs, estimated_cost_usd) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(chat_id)
+        .bind(feature)
+        .bind(source_url)
+        .bind(duration_secs)
+        .bind(cost_usd as f32)
+        .execute(&self.pool)
+        .await
+        {
+            log::error!("Failed to record premium usage for {}: {}", chat_id, e);
+        }
+    }
+
+    async fn store_callback_context(&self, ctx: &CallbackContext) -> i32 {
+        let result: Result<(i32,), _> = sqlx::query_as(
+            "INSERT INTO callback_contexts (source_url, chat_id, has_video, media_duration_secs, audio_cache_path) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        )
+        .bind(&ctx.source_url)
+        .bind(ctx.chat_id)
+        .bind(ctx.has_video)
+        .bind(ctx.media_duration_secs)
+        .bind(&ctx.audio_cache_path)
+        .fetch_one(&self.pool)
+        .await;
+
+        match result {
+            Ok((id,)) => id,
+            Err(e) => {
+                log::error!("Failed to store callback context: {}", e);
+                0
+            }
+        }
+    }
+
+    async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext> {
+        let row: Option<(String, i64, bool, Option<i32>, Option<String>)> = sqlx::query_as(
+            "SELECT source_url, chat_id, has_video, media_duration_secs, audio_cache_path \
+             FROM callback_contexts WHERE id = $1",
+        )
+        .bind(context_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            log::error!("Failed to get callback context {}: {}", context_id, e);
+            e
+        })
+        .ok()
+        .flatten();
+
+        row.map(|(source_url, chat_id, has_video, media_duration_secs, audio_cache_path)| {
+            CallbackContext {
+                source_url,
+                chat_id,
+                has_video,
+                media_duration_secs,
+                audio_cache_path,
+            }
+        })
+    }
+
+    async fn revoke_subscription(&self, chat_id: i64) {
+        if let Err(e) = sqlx::query(
+            "UPDATE subscriptions SET tier = 'free', ai_seconds_limit = 0, \
+             expires_at = NULL, updated_at = NOW() WHERE chat_id = $1",
+        )
+        .bind(chat_id)
+        .execute(&self.pool)
+        .await
+        {
+            log::error!("Failed to revoke subscription for {}: {}", chat_id, e);
+        }
+    }
+
+    async fn cleanup_expired_callback_contexts(&self) {
+        let result = sqlx::query(
+            "DELETE FROM callback_contexts WHERE created_at < NOW() - INTERVAL '24 hours'",
+        )
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(r) => log::info!(
+                "Callback context cleanup: removed {} expired entries",
+                r.rows_affected()
+            ),
+            Err(e) => log::error!("Callback context cleanup failed: {}", e),
         }
     }
 }

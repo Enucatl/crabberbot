@@ -5,12 +5,24 @@ use teloxide::types::{
 };
 use url::Url;
 
+use teloxide::types::InlineKeyboardMarkup;
+
 use crate::downloader::{
     build_caption, DownloadedItem, DownloadedMedia, Downloader, MediaInfo, MediaType,
 };
+use crate::premium::audio_extractor::AudioExtractor;
 use crate::storage::{CachedMedia, Storage};
+use crate::subscription::CallbackContext;
 use crate::telegram_api::{resize_photo_if_needed, SentMedia, TelegramApi};
 use crate::validator::validate_media_metadata;
+
+/// Context returned after a successful download, containing info needed for premium buttons.
+pub struct DownloadContext {
+    pub source_url: Url,
+    pub has_video: bool,
+    pub media_duration_secs: Option<i32>,
+    pub audio_cache_path: Option<PathBuf>,
+}
 
 /// An RAII guard to ensure downloaded files are cleaned up.
 struct FileCleanupGuard {
@@ -354,7 +366,8 @@ pub async fn process_download_request(
     downloader: &dyn Downloader,
     telegram_api: &dyn TelegramApi,
     storage: &dyn Storage,
-) {
+    audio_extractor: &dyn AudioExtractor,
+) -> Option<DownloadContext> {
     let start = Instant::now();
     let clean_url = cleanup_url(url);
     let clean_url_str = clean_url.as_str();
@@ -374,7 +387,7 @@ pub async fn process_download_request(
                     start.elapsed().as_millis() as i64,
                 )
                 .await;
-            return;
+            return None;
         }
         // Cache send failed — fall through to normal download
         log::warn!("Cache send failed for {}, falling through to download", clean_url);
@@ -399,7 +412,7 @@ pub async fn process_download_request(
                     start.elapsed().as_millis() as i64,
                 )
                 .await;
-            return;
+            return None;
         }
     };
 
@@ -423,27 +436,49 @@ pub async fn process_download_request(
                     start.elapsed().as_millis() as i64,
                 )
                 .await;
-            return;
+            return None;
         }
     };
 
     let caption = build_caption(&info, &clean_url);
     let _cleanup_guard = FileCleanupGuard::from_downloaded_media(&downloaded);
 
-    let file_ids: Option<Vec<(String, MediaType)>> = match &downloaded {
+    // For a single video item, run upload and audio extraction concurrently.
+    // For groups or photos, just upload normally (no audio extraction).
+    let (file_ids, audio_cache_path, media_duration_secs, has_video) = match &downloaded {
+        DownloadedMedia::Single(item) if item.media_type == MediaType::Video => {
+            let (send_result, audio_result) = tokio::join!(
+                send_single_item(item, &caption, chat_id, message_id, telegram_api),
+                audio_extractor.extract_audio(&item.filepath)
+            );
+            let file_ids = send_result.map(|sent| vec![sent]);
+            let (audio_cache_path, media_duration_secs) = match audio_result {
+                Ok(result) => (
+                    Some(result.audio_path),
+                    Some(result.duration_secs),
+                ),
+                Err(e) => {
+                    log::warn!("Audio cache extraction failed (non-fatal): {}", e);
+                    (None, None)
+                }
+            };
+            (file_ids, audio_cache_path, media_duration_secs, true)
+        }
         DownloadedMedia::Single(item) => {
-            send_single_item(item, &caption, chat_id, message_id, telegram_api)
+            let file_ids = send_single_item(item, &caption, chat_id, message_id, telegram_api)
                 .await
-                .map(|sent| vec![sent])
+                .map(|sent| vec![sent]);
+            (file_ids, None, None, false)
         }
         DownloadedMedia::Group(items) => {
-            send_media_group_step(items, &caption, chat_id, message_id, telegram_api)
+            let file_ids = send_media_group_step(items, &caption, chat_id, message_id, telegram_api)
                 .await
                 .map(|sent| {
                     sent.into_iter()
                         .map(|s| (s.file_id, s.media_type))
                         .collect()
-                })
+                });
+            (file_ids, None, None, false)
         }
     };
 
@@ -456,10 +491,88 @@ pub async fn process_download_request(
         storage
             .log_request(chat_id.0, clean_url_str, "success", elapsed_ms)
             .await;
+        Some(DownloadContext {
+            source_url: clean_url,
+            has_video,
+            media_duration_secs,
+            audio_cache_path,
+        })
     } else {
         storage
             .log_request(chat_id.0, clean_url_str, "error", elapsed_ms)
             .await;
+        None
+    }
+}
+
+/// Split long text into multiple messages (Telegram max ~4000 chars per message).
+pub async fn send_long_text(
+    chat_id: ChatId,
+    message_id: MessageId,
+    text: &str,
+    api: &dyn TelegramApi,
+) {
+    const MAX_LEN: usize = 4000;
+    if text.len() <= MAX_LEN {
+        let _ = api.send_text_message(chat_id, message_id, text).await;
+        return;
+    }
+    let mut start = 0;
+    while start < text.len() {
+        let end = (start + MAX_LEN).min(text.len());
+        let chunk = &text[start..end];
+        let _ = api.send_text_message(chat_id, message_id, chunk).await;
+        start = end;
+    }
+}
+
+/// Store a callback context and send premium action buttons if the download has
+/// a video with a cached audio file.
+pub async fn maybe_send_premium_buttons(
+    chat_id: ChatId,
+    message_id: MessageId,
+    ctx: DownloadContext,
+    api: &dyn TelegramApi,
+    storage: &dyn Storage,
+) {
+    if !ctx.has_video || ctx.audio_cache_path.is_none() {
+        return;
+    }
+
+    let callback_ctx = CallbackContext {
+        source_url: ctx.source_url.to_string(),
+        chat_id: chat_id.0,
+        has_video: ctx.has_video,
+        media_duration_secs: ctx.media_duration_secs,
+        audio_cache_path: ctx.audio_cache_path.map(|p| p.to_string_lossy().to_string()),
+    };
+
+    let context_id = storage.store_callback_context(&callback_ctx).await;
+    if context_id == 0 {
+        log::warn!("Failed to store callback context, skipping premium buttons");
+        return;
+    }
+
+    let keyboard = InlineKeyboardMarkup::new(vec![vec![
+        teloxide::types::InlineKeyboardButton::callback(
+            "Extract Audio",
+            format!("audio:{}", context_id),
+        ),
+        teloxide::types::InlineKeyboardButton::callback(
+            "Transcribe",
+            format!("txn:{}", context_id),
+        ),
+        teloxide::types::InlineKeyboardButton::callback(
+            "Summarize",
+            format!("sum:{}", context_id),
+        ),
+    ]]);
+
+    if let Err(e) = api
+        .send_text_with_keyboard(chat_id, message_id, "Premium actions available:", keyboard)
+        .await
+    {
+        log::warn!("Failed to send premium buttons: {}", e);
     }
 }
 
@@ -467,6 +580,7 @@ pub async fn process_download_request(
 mod tests {
     use super::*;
     use crate::downloader::{DownloadError, MockDownloader};
+    use crate::premium::audio_extractor::{AudioExtractionResult, MockAudioExtractor};
     use crate::storage::MockStorage;
     use crate::telegram_api::{MockTelegramApi, SentMedia};
     use crate::test_utils::create_test_info;
@@ -491,7 +605,19 @@ mod tests {
         mock_storage
     }
 
-    #[tokio::test]
+    /// Helper to create a MockAudioExtractor that fails (non-fatal).
+    fn create_failing_audio_extractor() -> MockAudioExtractor {
+        let mut mock = MockAudioExtractor::new();
+        mock.expect_extract_audio()
+            .returning(|_| {
+                Err(crate::premium::audio_extractor::AudioExtractionError::FfmpegError(
+                    "not available in test".to_string(),
+                ))
+            });
+        mock
+    }
+
+#[tokio::test]
     async fn test_process_download_request_sends_video_on_success() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
@@ -537,6 +663,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -585,6 +712,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -632,6 +760,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -700,6 +829,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -746,6 +876,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -796,6 +927,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -846,6 +978,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -896,6 +1029,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -969,6 +1103,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -1028,6 +1163,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -1077,6 +1213,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -1122,6 +1259,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -1170,6 +1308,7 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
     }
@@ -1227,7 +1366,226 @@ mod tests {
             &mock_downloader,
             &mock_telegram_api,
             &mock_storage,
+            &create_failing_audio_extractor(),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_process_download_request_returns_audio_context_on_extraction_success() {
+        let mut mock_downloader = MockDownloader::new();
+        let mut mock_telegram_api = MockTelegramApi::new();
+        let mock_storage = create_default_mock_storage();
+        let test_url = Url::parse("https://instagram.com/p/valid_post").unwrap();
+
+        mock_downloader
+            .expect_get_media_metadata()
+            .with(eq(test_url.clone()))
+            .times(1)
+            .returning(|_| Ok(create_test_info()));
+
+        mock_downloader
+            .expect_download_media()
+            .times(1)
+            .returning(|_, _| {
+                Ok(DownloadedMedia::Single(DownloadedItem {
+                    filepath: PathBuf::from("/tmp/video.mp4"),
+                    media_type: MediaType::Video,
+                    thumbnail_filepath: None,
+                }))
+            });
+
+        mock_telegram_api
+            .expect_send_video()
+            .times(1)
+            .returning(|_, _, _, _, _| Ok("file_id_123".to_string()));
+
+        let mut mock_audio = MockAudioExtractor::new();
+        mock_audio
+            .expect_extract_audio()
+            .returning(|_| {
+                Ok(AudioExtractionResult {
+                    audio_path: PathBuf::from("/tmp/audio_cache/test.mp3"),
+                    duration_secs: 42,
+                })
+            });
+
+        let ctx = process_download_request(
+            &test_url,
+            ChatId(123),
+            MessageId(456),
+            &mock_downloader,
+            &mock_telegram_api,
+            &mock_storage,
+            &mock_audio,
+        )
+        .await
+        .expect("expected Some(DownloadContext)");
+
+        assert!(ctx.has_video);
+        assert_eq!(
+            ctx.audio_cache_path,
+            Some(PathBuf::from("/tmp/audio_cache/test.mp3"))
+        );
+        assert_eq!(ctx.media_duration_secs, Some(42));
+    }
+
+    #[tokio::test]
+    async fn test_process_download_request_photo_returns_no_video_context() {
+        let mut mock_downloader = MockDownloader::new();
+        let mut mock_telegram_api = MockTelegramApi::new();
+        let mock_storage = create_default_mock_storage();
+        let test_url = Url::parse("https://instagram.com/p/photo_post").unwrap();
+
+        mock_downloader
+            .expect_get_media_metadata()
+            .returning(|_| Ok(create_test_info()));
+
+        mock_downloader
+            .expect_download_media()
+            .returning(|_, _| {
+                Ok(DownloadedMedia::Single(DownloadedItem {
+                    filepath: PathBuf::from("/tmp/photo.jpg"),
+                    media_type: MediaType::Photo,
+                    thumbnail_filepath: None,
+                }))
+            });
+
+        mock_telegram_api
+            .expect_send_photo()
+            .times(1)
+            .returning(|_, _, _, _| Ok("photo_file_id".to_string()));
+
+        let ctx = process_download_request(
+            &test_url,
+            ChatId(123),
+            MessageId(456),
+            &mock_downloader,
+            &mock_telegram_api,
+            &mock_storage,
+            &create_failing_audio_extractor(),
+        )
+        .await
+        .expect("expected Some(DownloadContext)");
+
+        assert!(!ctx.has_video);
+        assert!(ctx.audio_cache_path.is_none());
+        assert!(ctx.media_duration_secs.is_none());
+    }
+
+    // ── send_long_text ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_send_long_text_short_sends_single_message() {
+        let mut mock_api = MockTelegramApi::new();
+        mock_api
+            .expect_send_text_message()
+            .with(eq(ChatId(1)), eq(MessageId(1)), eq("hello"))
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        send_long_text(ChatId(1), MessageId(1), "hello", &mock_api).await;
+    }
+
+    #[tokio::test]
+    async fn test_send_long_text_exactly_at_limit_is_single_message() {
+        let text = "x".repeat(4000);
+        let mut mock_api = MockTelegramApi::new();
+        mock_api
+            .expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        send_long_text(ChatId(1), MessageId(1), &text, &mock_api).await;
+    }
+
+    #[tokio::test]
+    async fn test_send_long_text_over_limit_splits_into_two_messages() {
+        let text = "y".repeat(4001);
+        let mut mock_api = MockTelegramApi::new();
+        mock_api
+            .expect_send_text_message()
+            .times(2)
+            .returning(|_, _, _| Ok(()));
+
+        send_long_text(ChatId(1), MessageId(1), &text, &mock_api).await;
+    }
+
+    #[tokio::test]
+    async fn test_send_long_text_large_sends_correct_number_of_chunks() {
+        let text = "z".repeat(4000 * 3 + 1); // 4 chunks
+        let mut mock_api = MockTelegramApi::new();
+        mock_api
+            .expect_send_text_message()
+            .times(4)
+            .returning(|_, _, _| Ok(()));
+
+        send_long_text(ChatId(1), MessageId(1), &text, &mock_api).await;
+    }
+
+    // ── maybe_send_premium_buttons ────────────────────────────────────
+
+    fn make_download_ctx(has_video: bool, audio_cache_path: Option<PathBuf>) -> DownloadContext {
+        DownloadContext {
+            source_url: "https://example.com/video".parse().unwrap(),
+            has_video,
+            media_duration_secs: audio_cache_path.as_ref().map(|_| 60),
+            audio_cache_path,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_maybe_send_premium_buttons_no_video_is_noop() {
+        let api = MockTelegramApi::new();
+        let storage = MockStorage::new();
+        let ctx = make_download_ctx(false, Some(PathBuf::from("/tmp/audio.mp3")));
+
+        maybe_send_premium_buttons(ChatId(1), MessageId(1), ctx, &api, &storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_maybe_send_premium_buttons_no_audio_cache_is_noop() {
+        let api = MockTelegramApi::new();
+        let storage = MockStorage::new();
+        let ctx = make_download_ctx(true, None);
+
+        maybe_send_premium_buttons(ChatId(1), MessageId(1), ctx, &api, &storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_maybe_send_premium_buttons_store_failure_skips_keyboard() {
+        let api = MockTelegramApi::new();
+        let mut storage = MockStorage::new();
+        storage
+            .expect_store_callback_context()
+            .times(1)
+            .returning(|_| 0);
+
+        let ctx = make_download_ctx(true, Some(PathBuf::from("/tmp/audio.mp3")));
+        maybe_send_premium_buttons(ChatId(1), MessageId(1), ctx, &api, &storage).await;
+    }
+
+    #[tokio::test]
+    async fn test_maybe_send_premium_buttons_success_sends_keyboard() {
+        let mut storage = MockStorage::new();
+        storage
+            .expect_store_callback_context()
+            .times(1)
+            .returning(|_| 42);
+
+        let mut api = MockTelegramApi::new();
+        api.expect_send_text_with_keyboard()
+            .withf(|chat_id, _, text: &str, keyboard| {
+                chat_id.0 == 1
+                    && text.contains("Premium actions")
+                    && keyboard.inline_keyboard.iter().flatten().any(|b| b.text == "Extract Audio")
+                    && keyboard.inline_keyboard.iter().flatten().any(|b| b.text == "Transcribe")
+                    && keyboard.inline_keyboard.iter().flatten().any(|b| b.text == "Summarize")
+            })
+            .times(1)
+            .returning(|_, _, _, _| Ok(()));
+
+        let ctx = make_download_ctx(true, Some(PathBuf::from("/tmp/audio.mp3")));
+        maybe_send_premium_buttons(ChatId(1), MessageId(1), ctx, &api, &storage).await;
     }
 }

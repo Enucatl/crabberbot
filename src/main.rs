@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use reqwest::Client;
 use teloxide::prelude::*;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::command::BotCommands;
 use thiserror::Error;
 use url::Url;
@@ -12,8 +13,13 @@ use url::Url;
 // Use our library crate
 use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
-use crabberbot::handler::process_download_request;
+use crabberbot::handler::{maybe_send_premium_buttons, process_download_request, send_long_text};
+use crabberbot::premium::audio_extractor::{AudioExtractor, FfmpegAudioExtractor};
+use crabberbot::premium::summarizer::{GeminiSummarizer, Summarizer};
+use crabberbot::premium::transcriber::{DeepgramTranscriber, Transcriber};
+use crabberbot::premium::{DEEPGRAM_COST_PER_SECOND, GEMINI_COST_PER_SECOND, MAX_PREMIUM_FILE_DURATION_SECS};
 use crabberbot::storage::{PostgresStorage, Storage};
+use crabberbot::subscription::SubscriptionTier;
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 
 const OVERALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(360);
@@ -41,14 +47,7 @@ pub enum SetupError {
 }
 
 /// Creates an HTTP client, authenticating for GCP if in that environment.
-///
-/// # Errors
-/// This function will return an error if:
-/// - A required environment variable is missing in the GCP environment.
-/// - It fails to get an identity token from Google Cloud.
-/// - It fails to build the reqwest::Client.
 async fn create_http_client() -> Result<Client, SetupError> {
-    // Determine the execution environment. Default to "local" if not set.
     let exec_env = std::env::var("EXECUTION_ENVIRONMENT").unwrap_or_else(|_| "local".to_string());
 
     match exec_env.as_str() {
@@ -65,19 +64,15 @@ async fn create_http_client() -> Result<Client, SetupError> {
                 let client = Client::builder().default_headers(headers).build()?;
                 Ok(client)
             } else {
-                // This case should be logically impossible when fetching headers for the first time,
-                // but it's robust to handle it.
                 Err(SetupError::HeadersError(
                     "Failed to get new headers from credentials; received NotModified unexpectedly"
                 ))
             }
         }
         _ => {
-            // "local", "homelab", or any other value
             log::info!(
                 "Local or non-GCP environment detected. Creating standard reqwest client..."
             );
-            // Building a default client can also fail, so we handle the result here too.
             Ok(Client::new())
         }
     }
@@ -86,8 +81,10 @@ async fn create_http_client() -> Result<Client, SetupError> {
 async fn handle_command(
     _bot: Bot,
     api: Arc<dyn TelegramApi>,
+    storage: Arc<dyn Storage>,
     message: Message,
     command: Command,
+    owner_chat_id: i64,
 ) -> ResponseResult<()> {
     let comprehensive_guide = indoc::formatdoc! { "
 Hello there! I am CrabberBot, your friendly media downloader.
@@ -108,7 +105,6 @@ If you encounter any issues, please double-check the URL or try again later. Not
 
     match command {
         Command::Start => {
-            // Send the comprehensive guide message for /start
             api.send_text_message(message.chat.id, message.id, &comprehensive_guide)
                 .await?;
         }
@@ -124,8 +120,139 @@ If you encounter any issues, please double-check the URL or try again later. Not
             api.send_text_message(message.chat.id, message.id, &value)
                 .await?;
         }
+        Command::Subscribe => {
+            handle_subscribe(api, message, storage).await?;
+        }
+        Command::Grant(args) => {
+            handle_grant(api, message, storage, args, owner_chat_id).await?;
+        }
     }
 
+    Ok(())
+}
+
+async fn handle_subscribe(
+    api: Arc<dyn TelegramApi>,
+    message: Message,
+    storage: Arc<dyn Storage>,
+) -> ResponseResult<()> {
+    let sub = storage.get_subscription(message.chat.id.0).await;
+    let status_line = if sub.tier == SubscriptionTier::Free {
+        if sub.topup_seconds_available > 0 {
+            format!(
+                "You have <b>{:.1} AI Minutes</b> of top-up credits remaining.",
+                sub.topup_seconds_available as f64 / 60.0
+            )
+        } else {
+            "You are currently on the <b>Free</b> plan.".to_string()
+        }
+    } else {
+        format!(
+            "You are on the <b>{}</b> plan with <b>{:.1} AI Minutes</b> remaining.",
+            sub.tier,
+            sub.remaining_ai_minutes()
+        )
+    };
+
+    let text = indoc::formatdoc! { "
+{status}
+
+<b>Monthly Plans</b> (AI Minutes reset each month):
+
+<b>Basic</b> — 50 ⭐/mo
+  • Unlimited audio extraction
+  • 60 AI Minutes (transcription + summarization)
+
+<b>Pro</b> — 150 ⭐/mo
+  • Unlimited audio extraction
+  • 200 AI Minutes (transcription + summarization)
+
+<b>Top-Up</b> (never expires):
+  • 60 AI Minutes — 50 ⭐ (one-time, no subscription needed)
+",
+        status = status_line
+    };
+
+    let keyboard = InlineKeyboardMarkup::new(vec![
+        vec![
+            InlineKeyboardButton::callback("Basic — 50 ⭐/mo", "sub:basic"),
+            InlineKeyboardButton::callback("Pro — 150 ⭐/mo", "sub:pro"),
+        ],
+        vec![InlineKeyboardButton::callback(
+            "Top-Up 60 min — 50 ⭐",
+            "topup:60",
+        )],
+    ]);
+
+    api.send_text_with_keyboard(message.chat.id, message.id, &text, keyboard)
+        .await?;
+    Ok(())
+}
+
+async fn handle_grant(
+    api: Arc<dyn TelegramApi>,
+    message: Message,
+    storage: Arc<dyn Storage>,
+    args: String,
+    owner_chat_id: i64,
+) -> ResponseResult<()> {
+    if message.chat.id.0 != owner_chat_id {
+        return Ok(()); // silently ignore non-owner
+    }
+
+    let parts: Vec<&str> = args.trim().split_whitespace().collect();
+    let (target_chat_id, tier_str) = match parts.as_slice() {
+        [chat_id_str, tier] => {
+            let chat_id = match chat_id_str.parse::<i64>() {
+                Ok(id) => id,
+                Err(_) => {
+                    api.send_text_message(
+                        message.chat.id,
+                        message.id,
+                        "Usage: /grant [chat_id] &lt;tier&gt; (tier: basic, pro, free)",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            (chat_id, *tier)
+        }
+        [tier] => (message.chat.id.0, *tier),
+        _ => {
+            api.send_text_message(
+                message.chat.id,
+                message.id,
+                "Usage: /grant [chat_id] &lt;tier&gt; (tier: basic, pro, free)",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    let tier = match tier_str.parse::<SubscriptionTier>() {
+        Ok(t) => t,
+        Err(_) => {
+            api.send_text_message(
+                message.chat.id,
+                message.id,
+                "Unknown tier. Valid: free, basic, pro",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // 36500 days ≈ 100 years = effectively permanent
+    storage
+        .upsert_subscription(target_chat_id, tier.clone(), 36500)
+        .await;
+
+    api.send_text_message(
+        message.chat.id,
+        message.id,
+        &format!("Granted {} to chat_id {}", tier, target_chat_id),
+    )
+    .await?;
     Ok(())
 }
 
@@ -133,15 +260,15 @@ async fn handle_url(
     _bot: Bot,
     downloader: Arc<dyn Downloader>,
     api: Arc<dyn TelegramApi>,
-    limiter: Arc<ConcurrencyLimiter>,
+    download_limiter: Arc<ConcurrencyLimiter>,
     storage: Arc<dyn Storage>,
+    audio_extractor: Arc<dyn AudioExtractor>,
     message: Message,
     url: Url,
 ) -> ResponseResult<()> {
     let chat_id = message.chat.id;
 
-    // --- CONCURRENCY CHECK ---
-    let _guard = match limiter.try_lock(chat_id) {
+    let _guard = match download_limiter.try_lock(chat_id) {
         Some(guard) => guard,
         None => {
             api.send_text_message(
@@ -163,7 +290,8 @@ async fn handle_url(
         }),
     )
     .await?;
-    if tokio::time::timeout(
+
+    let result = tokio::time::timeout(
         OVERALL_REQUEST_TIMEOUT,
         process_download_request(
             &url,
@@ -172,23 +300,370 @@ async fn handle_url(
             downloader.as_ref(),
             api.as_ref(),
             storage.as_ref(),
+            audio_extractor.as_ref(),
         ),
     )
-    .await
-    .is_err()
-    {
-        log::error!("Overall request timed out for {}", url);
+    .await;
+
+    let download_ctx = match result {
+        Err(_) => {
+            log::error!("Overall request timed out for {}", url);
+            let _ = api
+                .send_text_message(
+                    chat_id,
+                    message.id,
+                    "Sorry, the request timed out. Please try again.",
+                )
+                .await;
+            None
+        }
+        Ok(ctx) => ctx,
+    };
+
+    api.set_message_reaction(chat_id, message.id, None).await?;
+
+    // Send premium buttons if we have a download context with video + cached audio
+    if let Some(ctx) = download_ctx {
+        maybe_send_premium_buttons(chat_id, message.id, ctx, &*api, &*storage).await;
+    }
+
+    Ok(())
+}
+
+async fn handle_callback_query(
+    _bot: Bot,
+    api: Arc<dyn TelegramApi>,
+    storage: Arc<dyn Storage>,
+    premium_limiter: Arc<ConcurrencyLimiter>,
+    transcriber: Arc<dyn Transcriber>,
+    summarizer: Arc<dyn Summarizer>,
+    query: CallbackQuery,
+) -> ResponseResult<()> {
+    let data = match query.data.as_deref() {
+        Some(d) => d.to_string(),
+        None => return Ok(()),
+    };
+    let (chat_id, message_id) = match query.message.as_ref() {
+        Some(teloxide::types::MaybeInaccessibleMessage::Regular(msg)) => (msg.chat.id, msg.id),
+        Some(teloxide::types::MaybeInaccessibleMessage::Inaccessible(msg)) => (msg.chat.id, msg.message_id),
+        None => return Ok(()),
+    };
+
+    // Always dismiss spinner immediately
+    let _ = api.answer_callback_query(&query.id.0, None::<String>).await;
+
+    // Handle subscription/topup button presses — no DB lookup needed
+    if data == "sub:basic" || data == "sub:pro" || data == "topup:60" {
+        let (title, description, payload, amount) = match data.as_str() {
+            "sub:basic" => (
+                "Basic Subscription",
+                "60 AI Minutes/month + unlimited audio extraction",
+                "sub_basic",
+                SubscriptionTier::Basic.price_stars(),
+            ),
+            "sub:pro" => (
+                "Pro Subscription",
+                "200 AI Minutes/month + unlimited audio extraction",
+                "sub_pro",
+                SubscriptionTier::Pro.price_stars(),
+            ),
+            _ => (
+                "Top-Up 60 AI Minutes",
+                "Add 60 AI Minutes that never expire (no subscription required)",
+                "topup_60",
+                50u32,
+            ),
+        };
+        let _ = api
+            .send_invoice(chat_id, title, description, payload, amount)
+            .await;
+        return Ok(());
+    }
+
+    // Parse action:context_id
+    let (action, context_id_str) = match data.split_once(':') {
+        Some(pair) => pair,
+        None => return Ok(()),
+    };
+    let context_id: i32 = match context_id_str.parse() {
+        Ok(id) => id,
+        Err(_) => return Ok(()),
+    };
+
+    let ctx = match storage.get_callback_context(context_id).await {
+        Some(ctx) => ctx,
+        None => {
+            let _ = api
+                .send_text_message(
+                    chat_id,
+                    message_id,
+                    "This action has expired. Please download the video again.",
+                )
+                .await;
+            return Ok(());
+        }
+    };
+
+    // Check audio cache file exists
+    let audio_path = match &ctx.audio_cache_path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let _ = api
+                .send_text_message(
+                    chat_id,
+                    message_id,
+                    "This action has expired. Please download the video again.",
+                )
+                .await;
+            return Ok(());
+        }
+    };
+
+    if !audio_path.exists() {
         let _ = api
             .send_text_message(
                 chat_id,
-                message.id,
-                "Sorry, the request timed out. Please try again.",
+                message_id,
+                "This action has expired. Please download the video again.",
             )
             .await;
+        return Ok(());
     }
-    api.set_message_reaction(chat_id, message.id, None).await?;
+
+    // Per-chat premium concurrency lock
+    let _guard = match premium_limiter.try_lock(chat_id) {
+        Some(g) => g,
+        None => {
+            let _ = api
+                .send_text_message(
+                    chat_id,
+                    message_id,
+                    "I'm already processing a premium action for you. Please wait.",
+                )
+                .await;
+            return Ok(());
+        }
+    };
+
+    match action {
+        "audio" => {
+            let sub = storage.get_subscription(chat_id.0).await;
+            if !sub.can_extract_audio() {
+                let _ = api
+                    .send_text_message(
+                        chat_id,
+                        message_id,
+                        "Audio extraction requires a subscription or top-up credits. Use /subscribe to get started.",
+                    )
+                    .await;
+                return Ok(());
+            }
+            if let Err(e) = api
+                .send_audio(chat_id, message_id, &audio_path, "Extracted audio")
+                .await
+            {
+                log::error!("Failed to send audio: {}", e);
+                let _ = api
+                    .send_text_message(chat_id, message_id, "Sorry, failed to send the audio.")
+                    .await;
+                return Ok(());
+            }
+            storage
+                .record_premium_usage(
+                    chat_id.0,
+                    "audio_extract",
+                    &ctx.source_url,
+                    ctx.media_duration_secs.unwrap_or(0),
+                    0.0,
+                )
+                .await;
+        }
+        "txn" | "sum" => {
+            let sub = storage.get_subscription(chat_id.0).await;
+            let duration_secs = ctx.media_duration_secs.unwrap_or(0);
+
+            // Per-file duration gate
+            if duration_secs > MAX_PREMIUM_FILE_DURATION_SECS {
+                let _ = api
+                    .send_text_message(
+                        chat_id,
+                        message_id,
+                        &format!(
+                            "AI features are limited to videos under {} minutes.",
+                            MAX_PREMIUM_FILE_DURATION_SECS / 60
+                        ),
+                    )
+                    .await;
+                return Ok(());
+            }
+
+            // Quota check
+            if !sub.can_use_ai(duration_secs) {
+                let _ = api
+                    .send_text_message(
+                        chat_id,
+                        message_id,
+                        &format!(
+                            "You have {:.1} AI Minutes remaining. Need more? /subscribe to upgrade or buy a top-up.",
+                            sub.remaining_ai_minutes()
+                        ),
+                    )
+                    .await;
+                return Ok(());
+            }
+
+            api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
+                .await?;
+
+            // Transcribe
+            let transcript = match transcriber.transcribe(&audio_path).await {
+                Ok(t) => t,
+                Err(e) => {
+                    log::error!("Transcription failed: {}", e);
+                    let _ = api
+                        .send_text_message(
+                            chat_id,
+                            message_id,
+                            "Sorry, transcription failed. Please try again later.",
+                        )
+                        .await;
+                    return Ok(()); // no quota deduction
+                }
+            };
+
+            if action == "txn" {
+                // Send transcript (split if needed)
+                send_long_text(chat_id, message_id, &transcript, &*api).await;
+                // Deduct quota only on success
+                storage.consume_ai_seconds(chat_id.0, duration_secs).await;
+                storage
+                    .record_premium_usage(
+                        chat_id.0,
+                        "transcribe",
+                        &ctx.source_url,
+                        duration_secs,
+                        duration_secs as f64 * DEEPGRAM_COST_PER_SECOND,
+                    )
+                    .await;
+            } else {
+                // Summarize
+                let summary = match summarizer.summarize(&transcript).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::error!("Summarization failed: {}", e);
+                        let _ = api
+                            .send_text_message(
+                                chat_id,
+                                message_id,
+                                "Sorry, summarization failed. Please try again later.",
+                            )
+                            .await;
+                        return Ok(()); // no quota deduction
+                    }
+                };
+                send_long_text(chat_id, message_id, &summary, &*api).await;
+                // Deduct quota only on success
+                storage.consume_ai_seconds(chat_id.0, duration_secs).await;
+                storage
+                    .record_premium_usage(
+                        chat_id.0,
+                        "summarize",
+                        &ctx.source_url,
+                        duration_secs,
+                        duration_secs as f64 * (DEEPGRAM_COST_PER_SECOND + GEMINI_COST_PER_SECOND),
+                    )
+                    .await;
+            }
+        }
+        _ => {}
+    }
+
     Ok(())
 }
+
+async fn handle_pre_checkout_query(
+    _bot: Bot,
+    api: Arc<dyn TelegramApi>,
+    query: PreCheckoutQuery,
+) -> ResponseResult<()> {
+    let payload = &query.invoice_payload;
+    let ok = payload.starts_with("sub_") || payload.starts_with("topup_");
+    let error_msg: Option<String> = if ok {
+        None
+    } else {
+        Some("Unknown product".to_string())
+    };
+    api.answer_pre_checkout_query(&query.id.0, ok, error_msg)
+        .await?;
+    Ok(())
+}
+
+async fn handle_successful_payment(
+    api: Arc<dyn TelegramApi>,
+    storage: Arc<dyn Storage>,
+    message: Message,
+) -> ResponseResult<()> {
+    let payment = match message.successful_payment() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    let chat_id = message.chat.id;
+    let product = &payment.invoice_payload;
+    let amount = payment.total_amount;
+
+    storage
+        .record_payment(
+            chat_id.0,
+            &payment.telegram_payment_charge_id.0,
+            &payment.provider_payment_charge_id,
+            product,
+            amount as i32,
+        )
+        .await;
+
+    match product.as_str() {
+        "sub_basic" => {
+            storage
+                .upsert_subscription(chat_id.0, SubscriptionTier::Basic, 30)
+                .await;
+            api.send_text_message(
+                chat_id,
+                message.id,
+                "Thank you! Your <b>Basic</b> subscription is now active.\n\
+                 You have <b>60 AI Minutes</b> this month. Enjoy unlimited audio extraction!",
+            )
+            .await?;
+        }
+        "sub_pro" => {
+            storage
+                .upsert_subscription(chat_id.0, SubscriptionTier::Pro, 30)
+                .await;
+            api.send_text_message(
+                chat_id,
+                message.id,
+                "Thank you! Your <b>Pro</b> subscription is now active.\n\
+                 You have <b>200 AI Minutes</b> this month. Enjoy unlimited audio extraction!",
+            )
+            .await?;
+        }
+        "topup_60" => {
+            storage.add_topup_seconds(chat_id.0, 3600).await;
+            api.send_text_message(
+                chat_id,
+                message.id,
+                "Thank you! <b>60 AI Minutes</b> have been added to your account. These never expire!",
+            )
+            .await?;
+        }
+        _ => {
+            log::warn!("Unknown payment product: {}", product);
+        }
+    }
+
+    Ok(())
+}
+
 
 // Required catch-all branch — silently ignore messages that are neither commands nor URLs.
 async fn handle_unhandled_message(
@@ -212,16 +687,18 @@ enum Command {
     Version,
     #[command(description = "show bot environment.")]
     Environment,
+    #[command(description = "subscribe or buy AI Minutes top-up.")]
+    Subscribe,
+    #[command(description = "grant subscription (owner only).")]
+    Grant(String),
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = pretty_env_logger::formatted_builder();
 
-    // Set a default log level if RUST_LOG is not set.
     builder.filter_level(LevelFilter::Info);
 
-    // Define and apply the custom format.
     builder.format(|buf, record| {
         writeln!(
             buf,
@@ -234,11 +711,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    // Initialize the logger.
     builder.init();
 
     let version = env!("CARGO_PACKAGE_VERSION");
     log::info!("Starting CrabberBot version {}", version);
+
+    // Ensure audio cache directory exists
+    std::fs::create_dir_all("/tmp/audio_cache").expect("Failed to create /tmp/audio_cache");
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = sqlx::PgPool::connect(&database_url)
@@ -251,20 +730,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage: Arc<dyn Storage> = Arc::new(PostgresStorage::new(pool.clone()));
 
     let cleanup_pool = pool.clone();
+    let cleanup_storage = storage.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3600));
         loop {
             interval.tick().await;
             PostgresStorage::cleanup_expired(&cleanup_pool, 7).await;
+            cleanup_storage.cleanup_expired_callback_contexts().await;
+            cleanup_audio_cache().await;
         }
     });
 
     let client = create_http_client().await?;
-    let bot = Bot::from_env_with_client(client);
+    let bot = Bot::from_env_with_client(client.clone());
+
+    let deepgram_api_key =
+        std::env::var("DEEPGRAM_API_KEY").unwrap_or_else(|_| String::new());
+    let gemini_api_key =
+        std::env::var("GEMINI_API_KEY").unwrap_or_else(|_| String::new());
+    let owner_chat_id: i64 = std::env::var("OWNER_CHAT_ID")
+        .unwrap_or_else(|_| "0".to_string())
+        .parse()
+        .unwrap_or(0);
 
     let downloader: Arc<dyn Downloader> = Arc::new(YtDlpDownloader::new().await);
     let api: Arc<dyn TelegramApi> = Arc::new(TeloxideApi::new(bot.clone()));
-    let limiter = Arc::new(ConcurrencyLimiter::new());
+    let download_limiter = Arc::new(ConcurrencyLimiter::new());
+    let premium_limiter = Arc::new(ConcurrencyLimiter::new());
+    let audio_extractor: Arc<dyn AudioExtractor> = Arc::new(FfmpegAudioExtractor::new(3));
+    let transcriber: Arc<dyn Transcriber> =
+        Arc::new(DeepgramTranscriber::new(client.clone(), deepgram_api_key));
+    let summarizer: Arc<dyn Summarizer> =
+        Arc::new(GeminiSummarizer::new(client.clone(), gemini_api_key));
 
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string())
@@ -303,24 +800,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     log::info!("Successfully set bot name. {}", bot_name);
 
-    let handler = Update::filter_message()
+    let successful_payment_filter = dptree::filter(|msg: Message| {
+        msg.successful_payment().is_some()
+    });
+
+    let commands = dptree::entry()
+        .filter_command::<Command>()
+        .endpoint(handle_command);
+    let urls = dptree::entry()
+        .filter_map(|msg: Message| msg.text().and_then(|text| Url::parse(text).ok()))
+        .endpoint(handle_url);
+
+    let handler = dptree::entry()
         .branch(
-            dptree::entry()
-                .filter_command::<Command>()
-                .endpoint(handle_command),
+            Update::filter_message()
+                .branch(
+                    successful_payment_filter
+                        .endpoint(|api: Arc<dyn TelegramApi>, storage: Arc<dyn Storage>, msg: Message| async move {
+                            handle_successful_payment(api, storage, msg).await
+                        }),
+                )
+                .branch(commands)
+                .branch(urls)
+                .branch(dptree::entry().endpoint(handle_unhandled_message)),
         )
         .branch(
-            dptree::entry()
-                // Get the text, then try to parse it as a URL.
-                // .filter_map returns Some(Url) if successful, None if not,
-                .filter_map(|msg: Message| msg.text().and_then(|text| Url::parse(text).ok()))
-                .endpoint(handle_url),
+            Update::filter_callback_query().endpoint(handle_callback_query),
         )
-        // Handler for any message type not caught by the above branches
-        .branch(dptree::entry().endpoint(handle_unhandled_message));
+        .branch(
+            Update::filter_pre_checkout_query().endpoint(handle_pre_checkout_query),
+        );
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![downloader, api, limiter, storage])
+        .dependencies(dptree::deps![
+            downloader,
+            api,
+            download_limiter,
+            premium_limiter,
+            storage,
+            audio_extractor,
+            transcriber,
+            summarizer,
+            owner_chat_id
+        ])
         .enable_ctrlc_handler()
         .build()
         .dispatch_with_listener(
@@ -330,4 +852,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     Ok(())
+}
+
+/// Delete audio cache files older than 2 hours.
+async fn cleanup_audio_cache() {
+    let audio_cache_dir = std::path::PathBuf::from("/tmp/audio_cache");
+    let entries = match std::fs::read_dir(&audio_cache_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("Failed to read audio cache dir: {}", e);
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        if let Ok(metadata) = entry.metadata() {
+            if let Ok(modified) = metadata.modified() {
+                if modified.elapsed().unwrap_or_default() > Duration::from_secs(7200) {
+                    let _ = std::fs::remove_file(entry.path());
+                    log::info!("Removed stale audio cache: {:?}", entry.path());
+                }
+            }
+        }
+    }
 }

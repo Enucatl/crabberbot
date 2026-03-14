@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
     prelude::*,
-    types::{ChatAction, ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, MessageId, ParseMode, ReactionType},
+    types::{ChatAction, ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, MessageId, ParseMode, ReactionType},
 };
 
 use crate::downloader::MediaType;
@@ -109,6 +109,44 @@ pub trait TelegramApi: Send + Sync {
         message_id: MessageId,
         files: &[CachedFile],
         caption: &str,
+    ) -> Result<(), teloxide::RequestError>;
+
+    async fn send_audio(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        file_path: &std::path::Path,
+        caption: &str,
+    ) -> Result<(), teloxide::RequestError>;
+
+    async fn send_invoice(
+        &self,
+        chat_id: ChatId,
+        title: &str,
+        description: &str,
+        payload: &str,
+        price_amount: u32,
+    ) -> Result<(), teloxide::RequestError>;
+
+    async fn answer_callback_query(
+        &self,
+        callback_query_id: &str,
+        text: Option<String>,
+    ) -> Result<(), teloxide::RequestError>;
+
+    async fn answer_pre_checkout_query(
+        &self,
+        pre_checkout_query_id: &str,
+        ok: bool,
+        error_message: Option<String>,
+    ) -> Result<(), teloxide::RequestError>;
+
+    async fn send_text_with_keyboard(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: &str,
+        keyboard: InlineKeyboardMarkup,
     ) -> Result<(), teloxide::RequestError>;
 }
 
@@ -369,6 +407,93 @@ impl TelegramApi for TeloxideApi {
         self.bot
             .send_media_group(chat_id, media)
             .reply_to(message_id)
+            .await?;
+        Ok(())
+    }
+
+    async fn send_audio(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        file_path: &std::path::Path,
+        caption: &str,
+    ) -> Result<(), teloxide::RequestError> {
+        log::info!("Sending audio {:?} to chat {}", file_path, chat_id);
+        self.send_chat_action(chat_id, ChatAction::UploadDocument)
+            .await?;
+        self.bot
+            .send_audio(chat_id, InputFile::file(file_path))
+            .caption(caption.to_owned())
+            .parse_mode(ParseMode::Html)
+            .reply_to(message_id)
+            .await?;
+        Ok(())
+    }
+
+    async fn send_invoice(
+        &self,
+        chat_id: ChatId,
+        title: &str,
+        description: &str,
+        payload: &str,
+        price_amount: u32,
+    ) -> Result<(), teloxide::RequestError> {
+        use teloxide::types::LabeledPrice;
+        self.bot
+            .send_invoice(
+                chat_id,
+                title,
+                description,
+                payload,
+                "XTR",
+                vec![LabeledPrice::new(title, price_amount)],
+            )
+            .provider_token("")
+            .await?;
+        Ok(())
+    }
+
+    async fn answer_callback_query(
+        &self,
+        callback_query_id: &str,
+        text: Option<String>,
+    ) -> Result<(), teloxide::RequestError> {
+        let mut req = self.bot.answer_callback_query(teloxide::types::CallbackQueryId(callback_query_id.to_string()));
+        if let Some(t) = text {
+            req = req.text(t);
+        }
+        req.await?;
+        Ok(())
+    }
+
+    async fn answer_pre_checkout_query(
+        &self,
+        pre_checkout_query_id: &str,
+        ok: bool,
+        error_message: Option<String>,
+    ) -> Result<(), teloxide::RequestError> {
+        let mut req = self
+            .bot
+            .answer_pre_checkout_query(teloxide::types::PreCheckoutQueryId(pre_checkout_query_id.to_string()), ok);
+        if let Some(msg) = error_message {
+            req = req.error_message(msg);
+        }
+        req.await?;
+        Ok(())
+    }
+
+    async fn send_text_with_keyboard(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: &str,
+        keyboard: InlineKeyboardMarkup,
+    ) -> Result<(), teloxide::RequestError> {
+        self.bot
+            .send_message(chat_id, text)
+            .parse_mode(ParseMode::Html)
+            .reply_to(message_id)
+            .reply_markup(keyboard)
             .await?;
         Ok(())
     }
