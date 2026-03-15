@@ -138,17 +138,24 @@ If you encounter any issues, please double-check the URL or try again later. Not
         Command::Paysupport(text) => {
             handle_support(api, storage, message, text, true, owner_chat_id).await?;
         }
-        Command::Grant(args) => {
-            handle_grant(api, message, storage, args, owner_chat_id).await?;
-        }
-        Command::Reply(args) => {
-            handle_reply(api, message, args, owner_chat_id).await?;
-        }
-        Command::Refund(args) => {
-            handle_refund(api, storage, message, args, owner_chat_id).await?;
-        }
     }
 
+    Ok(())
+}
+
+async fn handle_owner_command(
+    _bot: Bot,
+    api: Arc<dyn TelegramApi>,
+    storage: Arc<dyn Storage>,
+    message: Message,
+    command: OwnerCommand,
+    owner_chat_id: i64,
+) -> ResponseResult<()> {
+    match command {
+        OwnerCommand::Grant(args) => handle_grant(api, message, storage, args, owner_chat_id).await?,
+        OwnerCommand::Reply(args) => handle_reply(api, message, args, owner_chat_id).await?,
+        OwnerCommand::Refund(args) => handle_refund(api, storage, message, args, owner_chat_id).await?,
+    }
     Ok(())
 }
 
@@ -256,7 +263,13 @@ enum Command {
     Support(String),
     #[command(description = "get help with a payment issue.")]
     Paysupport(String),
-    // Hidden owner-only commands — no description so they are omitted from /help
+}
+
+/// Owner-only commands. Never registered with Telegram (no autocomplete),
+/// handled in a separate dptree branch that pre-filters on owner chat_id.
+#[derive(BotCommands, Clone)]
+#[command(rename_rule = "lowercase")]
+enum OwnerCommand {
     Grant(String),
     Reply(String),
     Refund(String),
@@ -383,6 +396,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         matches!(msg.kind, MessageKind::RefundedPayment(_))
     });
 
+    let owner_commands = dptree::entry()
+        .filter(|msg: Message, oid: i64| msg.chat.id.0 == oid)
+        .filter_command::<OwnerCommand>()
+        .endpoint(handle_owner_command);
     let commands = dptree::entry()
         .filter_command::<Command>()
         .endpoint(handle_command);
@@ -405,6 +422,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             handle_refunded_payment(api, storage, msg).await
                         }),
                 )
+                .branch(owner_commands)
                 .branch(commands)
                 .branch(urls)
                 .branch(dptree::entry().endpoint(handle_unhandled_message)),
