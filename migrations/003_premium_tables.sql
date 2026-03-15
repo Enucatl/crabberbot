@@ -22,6 +22,7 @@ CREATE TABLE payments (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Detailed log of premium actions (for analytics + cost monitoring)
 CREATE TABLE premium_usage (
     id SERIAL PRIMARY KEY,
     chat_id BIGINT NOT NULL,
@@ -32,6 +33,8 @@ CREATE TABLE premium_usage (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Maps callback_data (64-byte limit) back to source URLs + cached audio.
+-- chat_id here is the destination chat (where the bot should send replies).
 CREATE TABLE callback_contexts (
     id SERIAL PRIMARY KEY,
     source_url TEXT NOT NULL,
