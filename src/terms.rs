@@ -15,8 +15,8 @@ pub fn terms_text() -> String {
 <b>CrabberBot — Terms of Service</b>
 
 <b>What you get</b>
-• <b>Basic — 50 ⭐/month:</b> 60 AI Video Minutes (audio extraction, transcription + summarization all draw from this quota)
-• <b>Pro — 150 ⭐/month:</b> 200 AI Video Minutes for transcription + summarization, plus unlimited audio extraction that never consumes your minutes
+• <b>Basic — 50 ⭐ per month:</b> 60 AI Video Minutes (audio extraction, transcription + summarization all draw from this quota)
+• <b>Pro — 150 ⭐ per month:</b> 200 AI Video Minutes for transcription + summarization, plus unlimited audio extraction that never consumes your minutes
 • <b>Top-Up — 50 ⭐ (one-time):</b> 60 AI Video Minutes, no subscription required
 
 <b>What are AI Video Minutes?</b>
@@ -28,14 +28,17 @@ Subscriptions last 30 days from purchase. AI Video Minutes reset at the start of
 <b>Top-Up credits</b>
 Top-Up AI Video Minutes expire {expiry_days} days (1 year) after your most recent top-up purchase. Each new top-up purchase resets this {expiry_days}-day window for your entire top-up balance. Unused credits after expiry are forfeited with no compensation.
 
+<b>Video availability</b>
+Not all videos can be downloaded. Platforms such as Instagram, YouTube, and TikTok may block downloads that are private, require age-verification or login, or are simply throttled by the platform. CrabberBot cannot guarantee that any given link will be downloadable, and no refund is issued for failures caused by platform restrictions.
+
 <b>Payments</b>
 All purchases are made in Telegram Stars (⭐). 1 Star ≈ $0.02 USD. The exact price in your local currency is shown by Telegram before you confirm. Payment is processed by Telegram.
 
 <b>Refunds</b>
-If AI features (transcription or summarization) have already been used after a purchase, the service is considered delivered and the purchase is <b>non-refundable</b>. If your purchase was not delivered (subscription did not activate, features were broken), contact /paysupport within 72 hours and we will investigate. Confirmed delivery failures will be refunded in full.
+If you have not used any AI features (transcription or summarization) since your purchase, you can request an automatic refund at any time with /refundme. If AI features were already used after a purchase, the service is considered delivered and the purchase is <b>non-refundable</b>. If your purchase was not delivered (subscription did not activate, features were broken), contact /support within 72 hours and we will investigate. Confirmed delivery failures will be refunded in full.
 
 <b>Support</b>
-For help, use /support or /paysupport. <b>Telegram support and BotFather cannot assist with purchases made through CrabberBot</b> — all purchase support is handled directly by us.
+For help with anything — downloads, subscriptions, payments — use /support. <b>Telegram support and BotFather cannot assist with purchases made through CrabberBot</b> — all support is handled directly by us.
 
 By completing a purchase, you confirm that you have read and agree to these Terms of Service."},
         expiry_days = TOPUP_EXPIRY_DAYS,

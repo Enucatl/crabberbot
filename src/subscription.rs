@@ -17,14 +17,17 @@ pub enum SubscriptionTier {
     Free,
     Basic,
     Pro,
+    /// Invite-only power-user tier. Not listed in /subscribe.
+    Ultra,
 }
 
 impl SubscriptionTier {
     pub fn ai_seconds_limit(&self) -> i32 {
         match self {
             Self::Free => 0,
-            Self::Basic => 3600,   // 60 minutes
-            Self::Pro => 12000,    // 200 minutes
+            Self::Basic => 3_600,    // 60 minutes
+            Self::Pro => 12_000,     // 200 minutes
+            Self::Ultra => 600_000,  // 10 000 minutes
         }
     }
 
@@ -33,13 +36,14 @@ impl SubscriptionTier {
             Self::Free => 0,
             Self::Basic => 50,
             Self::Pro => 150,
+            Self::Ultra => 0, // invite-only, no public price yet
         }
     }
 
-    /// Audio extraction is unlimited for Pro subscribers (no API cost).
+    /// Audio extraction is unlimited for Pro and Ultra subscribers (no API cost).
     /// Basic subscribers and free users with a top-up balance also get it — checked via SubscriptionInfo.
     pub fn has_audio_extraction(&self) -> bool {
-        matches!(self, Self::Pro)
+        matches!(self, Self::Pro | Self::Ultra)
     }
 }
 
@@ -49,6 +53,7 @@ impl fmt::Display for SubscriptionTier {
             Self::Free => write!(f, "free"),
             Self::Basic => write!(f, "basic"),
             Self::Pro => write!(f, "pro"),
+            Self::Ultra => write!(f, "ultra"),
         }
     }
 }
@@ -60,6 +65,7 @@ impl FromStr for SubscriptionTier {
             "free" => Ok(Self::Free),
             "basic" => Ok(Self::Basic),
             "pro" => Ok(Self::Pro),
+            "ultra" => Ok(Self::Ultra),
             _ => Err(()),
         }
     }
@@ -131,7 +137,7 @@ impl SubscriptionInfo {
     /// Pro tier: unlimited, no cost (always true).
     /// Everyone else: requires enough seconds in their balance (monthly or top-up).
     pub fn can_extract_audio(&self, duration_secs: i32) -> bool {
-        if self.tier == SubscriptionTier::Pro {
+        if self.tier.has_audio_extraction() {
             true
         } else {
             self.total_available_seconds() >= duration_secs

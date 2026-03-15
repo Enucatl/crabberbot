@@ -1,4 +1,5 @@
 use log::LevelFilter;
+use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,8 +14,8 @@ use url::Url;
 // Use our library crate
 use crabberbot::commands::{
     handle_callback_query, handle_grant, handle_pre_checkout_query, handle_refund,
-    handle_refunded_payment, handle_reply, handle_subscribe, handle_successful_payment,
-    handle_support,
+    handle_refunded_payment, handle_refundme, handle_reply, handle_subscribe,
+    handle_successful_payment, handle_support,
 };
 use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
@@ -133,10 +134,10 @@ If you encounter any issues, please double-check the URL or try again later. Not
                 .await?;
         }
         Command::Support(text) => {
-            handle_support(api, storage, message, text, false, owner_chat_id).await?;
+            handle_support(api, storage, message, text, owner_chat_id).await?;
         }
-        Command::Paysupport(text) => {
-            handle_support(api, storage, message, text, true, owner_chat_id).await?;
+        Command::Refundme => {
+            handle_refundme(api, storage, message).await?;
         }
     }
 
@@ -259,10 +260,10 @@ enum Command {
     Subscribe,
     #[command(description = "view Terms of Service.")]
     Terms,
-    #[command(description = "contact customer support.")]
+    #[command(description = "contact customer support or get help with a payment issue.")]
     Support(String),
-    #[command(description = "get help with a payment issue.")]
-    Paysupport(String),
+    #[command(description = "request a refund for your most recent purchase.")]
+    Refundme,
 }
 
 /// Owner-only commands. Never registered with Telegram (no autocomplete),
@@ -321,7 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             PostgresStorage::cleanup_expired(&cleanup_pool, 7).await;
             cleanup_storage.cleanup_expired_callback_contexts().await;
             cleanup_storage.expire_stale_topups().await;
-            cleanup_audio_cache().await;
+            cleanup_audio_cache(&cleanup_pool).await;
         }
     });
 
@@ -332,6 +333,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("DEEPGRAM_API_KEY").unwrap_or_else(|_| String::new());
     let gemini_api_key =
         std::env::var("GEMINI_API_KEY").unwrap_or_else(|_| String::new());
+    let gemini_model =
+        std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.1-flash-lite-preview".to_string());
     if deepgram_api_key.is_empty() || gemini_api_key.is_empty() {
         log::warn!(
             "DEEPGRAM_API_KEY and/or GEMINI_API_KEY not set — transcription and summarization will be unavailable"
@@ -350,7 +353,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transcriber: Arc<dyn Transcriber> =
         Arc::new(DeepgramTranscriber::new(client.clone(), deepgram_api_key));
     let summarizer: Arc<dyn Summarizer> =
-        Arc::new(GeminiSummarizer::new(client.clone(), gemini_api_key));
+        Arc::new(GeminiSummarizer::new(client.clone(), gemini_api_key, gemini_model));
 
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string())
@@ -458,7 +461,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Delete audio cache files older than 2 hours.
-async fn cleanup_audio_cache() {
+async fn cleanup_audio_cache(pool: &sqlx::PgPool) {
+    // Fetch paths currently referenced by active (non-expired) cache entries so
+    // we don't delete audio files that are still needed for premium buttons.
+    let referenced: HashSet<String> = sqlx::query_as::<_, (String,)>(
+        "SELECT audio_cache_path FROM media_cache WHERE audio_cache_path IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(p,)| p)
+    .collect();
+
     let mut entries = match tokio::fs::read_dir(AUDIO_CACHE_DIR).await {
         Ok(e) => e,
         Err(e) => {
@@ -469,11 +484,16 @@ async fn cleanup_audio_cache() {
     loop {
         match entries.next_entry().await {
             Ok(Some(entry)) => {
+                let path = entry.path();
+                let path_str = path.to_string_lossy();
+                if referenced.contains(path_str.as_ref()) {
+                    continue; // live cache entry — leave it alone
+                }
                 if let Ok(metadata) = entry.metadata().await {
                     if let Ok(modified) = metadata.modified() {
                         if modified.elapsed().unwrap_or_default() > Duration::from_secs(7200) {
-                            let _ = tokio::fs::remove_file(entry.path()).await;
-                            log::info!("Removed stale audio cache: {:?}", entry.path());
+                            let _ = tokio::fs::remove_file(&path).await;
+                            log::info!("Removed orphaned audio cache: {:?}", path);
                         }
                     }
                 }

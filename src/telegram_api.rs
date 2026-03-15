@@ -101,7 +101,7 @@ pub trait TelegramApi: Send + Sync {
         message_id: MessageId,
         file_id: &str,
         caption: &str,
-    ) -> Result<(), teloxide::RequestError>;
+    ) -> Result<MessageId, teloxide::RequestError>;
     async fn send_cached_photo(
         &self,
         chat_id: ChatId,
@@ -363,17 +363,17 @@ impl TelegramApi for TeloxideApi {
         message_id: MessageId,
         file_id: &str,
         caption: &str,
-    ) -> Result<(), teloxide::RequestError> {
+    ) -> Result<MessageId, teloxide::RequestError> {
         log::info!("Sending cached video to chat {}", chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadVideo)
             .await?;
-        self.bot
+        let msg = self.bot
             .send_video(chat_id, InputFile::file_id(file_id.to_owned().into()))
             .caption(caption.to_owned())
             .parse_mode(ParseMode::Html)
             .reply_to(message_id)
             .await?;
-        Ok(())
+        Ok(msg.id)
     }
 
     async fn send_cached_photo(

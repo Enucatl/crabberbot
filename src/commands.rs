@@ -48,10 +48,10 @@ pub async fn handle_subscribe(
 
 <b>Monthly Plans</b> (AI Video Minutes reset each month):
 
-<b>Basic</b> — 50 ⭐/mo
+<b>Basic</b> — 50 ⭐ per month
   • 60 AI Video Minutes (audio extraction, transcription + summarization)
 
-<b>Pro</b> — 150 ⭐/mo
+<b>Pro</b> — 150 ⭐ per month
   • 200 AI Video Minutes (transcription + summarization)
   • Unlimited audio extraction (free — does not use your minutes)
 
@@ -67,8 +67,8 @@ Use /terms to read the full Terms of Service before purchasing.
 
     let keyboard = InlineKeyboardMarkup::new(vec![
         vec![
-            InlineKeyboardButton::callback("Basic — 50 ⭐/mo", "sub:basic"),
-            InlineKeyboardButton::callback("Pro — 150 ⭐/mo", "sub:pro"),
+            InlineKeyboardButton::callback("Basic — 50 ⭐ per month", "sub:basic"),
+            InlineKeyboardButton::callback("Pro — 150 ⭐ per month", "sub:pro"),
         ],
         vec![InlineKeyboardButton::callback(
             "Top-Up 60 min — 50 ⭐",
@@ -92,34 +92,87 @@ pub async fn handle_grant(
         return Ok(()); // silently ignore non-owner
     }
 
+    const USAGE: &str =
+        "Usage:\n/grant [user_id] &lt;tier&gt; [days]  (tier: basic, pro, ultra, free)\n/grant [user_id] topup &lt;minutes&gt;";
     let parts: Vec<&str> = args.trim().split_whitespace().collect();
-    let (target_user_id, tier_str) = match parts.as_slice() {
-        [user_id_str, tier] => {
-            let uid = match user_id_str.parse::<i64>() {
-                Ok(id) => id,
-                Err(_) => {
-                    api.send_text_message(
-                        message.chat.id,
-                        message.id,
-                        "Usage: /grant [user_id] &lt;tier&gt; (tier: basic, pro, free)",
-                    )
-                    .await?;
+    let self_uid = || message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(message.chat.id.0);
+
+    // Handle topup grants separately: [user_id] topup <minutes>
+    let topup_grant: Option<(i64, i32)> = match parts.as_slice() {
+        ["topup", minutes_str] => {
+            let m = minutes_str.parse::<i32>().ok().filter(|&m| m > 0);
+            match m {
+                Some(mins) => Some((self_uid(), mins)),
+                None => {
+                    api.send_text_message(message.chat.id, message.id, USAGE).await?;
+                    return Ok(());
+                }
+            }
+        }
+        [user_id_str, "topup", minutes_str] => {
+            let uid = user_id_str.parse::<i64>().ok();
+            let m = minutes_str.parse::<i32>().ok().filter(|&m| m > 0);
+            match (uid, m) {
+                (Some(uid), Some(mins)) => Some((uid, mins)),
+                _ => {
+                    api.send_text_message(message.chat.id, message.id, USAGE).await?;
+                    return Ok(());
+                }
+            }
+        }
+        _ => None,
+    };
+
+    if let Some((target_user_id, minutes)) = topup_grant {
+        let seconds = minutes * 60;
+        storage.add_topup_seconds(target_user_id, seconds).await;
+        api.send_text_message(
+            message.chat.id,
+            message.id,
+            &format!("Granted {} top-up minutes to user_id {}", minutes, target_user_id),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Parse: [user_id] <tier> [days]
+    // user_id and days are numeric; tier is not — so two-token ambiguity is unambiguous.
+    let (target_user_id, tier_str, days) = match parts.as_slice() {
+        [tier] => (self_uid(), *tier, 36500i64),
+        [a, b] if a.parse::<i64>().is_ok() => {
+            // user_id tier
+            (a.parse::<i64>().unwrap(), *b, 36500i64)
+        }
+        [tier, days_str] => {
+            // tier days
+            let d = match days_str.parse::<i64>() {
+                Ok(d) if d > 0 => d,
+                _ => {
+                    api.send_text_message(message.chat.id, message.id, USAGE).await?;
                     return Ok(());
                 }
             };
-            (uid, *tier)
+            (self_uid(), *tier, d)
         }
-        [tier] => {
-            let self_uid = message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(message.chat.id.0);
-            (self_uid, *tier)
+        [user_id_str, tier, days_str] => {
+            let uid = match user_id_str.parse::<i64>() {
+                Ok(id) => id,
+                Err(_) => {
+                    api.send_text_message(message.chat.id, message.id, USAGE).await?;
+                    return Ok(());
+                }
+            };
+            let d = match days_str.parse::<i64>() {
+                Ok(d) if d > 0 => d,
+                _ => {
+                    api.send_text_message(message.chat.id, message.id, USAGE).await?;
+                    return Ok(());
+                }
+            };
+            (uid, *tier, d)
         }
         _ => {
-            api.send_text_message(
-                message.chat.id,
-                message.id,
-                "Usage: /grant [user_id] &lt;tier&gt; (tier: basic, pro, free)",
-            )
-            .await?;
+            api.send_text_message(message.chat.id, message.id, USAGE).await?;
             return Ok(());
         }
     };
@@ -130,22 +183,26 @@ pub async fn handle_grant(
             api.send_text_message(
                 message.chat.id,
                 message.id,
-                "Unknown tier. Valid: free, basic, pro",
+                "Unknown tier. Valid: free, basic, pro, ultra",
             )
             .await?;
             return Ok(());
         }
     };
 
-    // ~100 years — effectively permanent
     storage
-        .upsert_subscription(target_user_id, tier.clone(), 36500)
+        .upsert_subscription(target_user_id, tier.clone(), days)
         .await;
 
+    let duration_label = if days >= 36500 {
+        "permanently".to_string()
+    } else {
+        format!("for {} days", days)
+    };
     api.send_text_message(
         message.chat.id,
         message.id,
-        &format!("Granted {} to user_id {}", tier, target_user_id),
+        &format!("Granted {} to user_id {} {}", tier, target_user_id, duration_label),
     )
     .await?;
     Ok(())
@@ -156,68 +213,72 @@ pub async fn handle_support(
     storage: Arc<dyn Storage>,
     message: Message,
     text: String,
-    is_payment: bool,
     owner_chat_id: i64,
 ) -> ResponseResult<()> {
     let chat_id = message.chat.id;
 
     if text.trim().is_empty() {
-        let prompt = if is_payment {
-            indoc::indoc! {"
-Please describe your payment issue after the command, for example:
-<code>/paysupport My subscription did not activate after payment</code>
-
-Note: <b>Telegram support and BotFather cannot help with purchases made through CrabberBot.</b> \
-All purchase support is handled directly by us."}
-        } else {
+        api.send_text_message(
+            chat_id,
+            message.id,
             indoc::indoc! {"
 Please describe your issue after the command, for example:
-<code>/support Transcription failed on my video</code>"}
-        };
-        api.send_text_message(chat_id, message.id, prompt).await?;
+<code>/support My subscription did not activate after payment</code>
+
+Note: <b>Telegram support and BotFather cannot help with purchases made through CrabberBot.</b> \
+All support is handled directly by us."},
+        )
+        .await?;
         return Ok(());
     }
 
-    // Instant acknowledgement to user
-    let ack = if is_payment {
-        indoc::indoc! {"
-Your payment support request has been received. We aim to respond within 24 hours.
+    api.send_text_message(
+        chat_id,
+        message.id,
+        "Your support request has been received. We aim to respond within 24 hours.\n\n\
+         <b>Note:</b> Telegram support and BotFather cannot assist with purchases made through \
+         CrabberBot — all support is handled directly by us.",
+    )
+    .await?;
 
-<b>Important:</b> Telegram support and BotFather cannot assist with purchases made through CrabberBot — all purchase support is handled directly by us."}
-    } else {
-        "Your support request has been received. We aim to respond within 24 hours."
-    };
-    api.send_text_message(chat_id, message.id, ack).await?;
-
-    // Relay to owner
     if owner_chat_id != 0 {
-        let tag = if is_payment { "[PaySupport]" } else { "[Support]" };
         let username = message
             .from
             .as_ref()
             .and_then(|u| u.username.as_deref())
             .map(|u| format!("@{u}"))
             .unwrap_or_else(|| "(no username)".to_string());
+        let from_user_id = message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(chat_id.0);
 
-        // For payment support, include subscription status so owner has context
-        let sub_info = if is_payment {
-            let user_id = message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(chat_id.0);
-            let sub = storage.get_subscription(user_id).await;
-            format!(
-                "\n\nSubscription: <b>{}</b> | AI Minutes remaining: <b>{:.1}</b> | Top-up: <b>{} sec</b>",
-                sub.tier,
-                sub.remaining_ai_minutes(),
-                sub.topup_seconds_available,
-            )
+        // Always include subscription status and recent charges
+        let sub = storage.get_subscription(from_user_id).await;
+        let sub_line = format!(
+            "Subscription: <b>{}</b> | AI Minutes remaining: <b>{:.1}</b> | Top-up: <b>{} sec</b>",
+            sub.tier,
+            sub.remaining_ai_minutes(),
+            sub.topup_seconds_available,
+        );
+        let payments = storage.get_recent_payments(from_user_id, 5).await;
+        let charge_lines = if payments.is_empty() {
+            "No charges on record.".to_string()
         } else {
-            String::new()
+            let mut s = String::new();
+            for p in &payments {
+                let date = p.created_at.format("%Y-%m-%d %H:%M UTC");
+                s.push_str(&format!(
+                    "\n<code>/refund {from_user_id} {} {}</code>  {}⭐ ({date})",
+                    p.telegram_charge_id, p.product, p.amount,
+                ));
+            }
+            s.trim_start_matches('\n').to_string()
         };
 
-        let from_user_id = message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(chat_id.0);
         let relay = format!(
-            "{tag} from {username} (user_id: <code>{from_user_id}</code>, chat_id: <code>{chat_id}</code>){sub_info}\n\n{text}\n\n\
-             Reply: <code>/reply {chat_id} your message here</code>\n\
-             Refund: <code>/refund {from_user_id} &lt;charge_id&gt; &lt;product&gt;</code>",
+            "[Support] from {username} (user_id: <code>{from_user_id}</code>, chat_id: <code>{chat_id}</code>)\n\
+             {sub_line}\n\
+             {charge_lines}\n\n\
+             {text}\n\n\
+             Reply: <code>/reply {chat_id} your message here</code>",
         );
         let _ = api.send_text_no_reply(ChatId(owner_chat_id), &relay).await;
     }
@@ -259,6 +320,77 @@ pub async fn handle_reply(
     Ok(())
 }
 
+pub async fn handle_refundme(
+    api: Arc<dyn TelegramApi>,
+    storage: Arc<dyn Storage>,
+    message: Message,
+) -> ResponseResult<()> {
+    let chat_id = message.chat.id;
+    let user_id = message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(chat_id.0);
+
+    let payment = match storage.get_latest_payment(user_id).await {
+        Some(p) => p,
+        None => {
+            api.send_text_message(
+                chat_id,
+                message.id,
+                "No purchases found on your account. If you believe this is an error, \
+                 please contact /support.",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    if storage.has_ai_usage_since(user_id, payment.created_at).await {
+        api.send_text_message(
+            chat_id,
+            message.id,
+            "AI features were used after your most recent purchase, so it is considered \
+             delivered and is <b>not eligible for an automatic refund</b>.\n\n\
+             If you believe this is wrong or experienced a technical failure, \
+             please contact /support within 72 hours of your purchase.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // No AI usage since purchase — auto-refund via Telegram Stars API
+    if let Err(e) = api.refund_star_payment(user_id, &payment.telegram_charge_id).await {
+        log::warn!("Telegram refund API error for user {}: {}", user_id, e);
+        api.send_text_message(
+            chat_id,
+            message.id,
+            "The refund could not be processed automatically. Please contact /support \
+             and we will handle it manually.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Revoke access
+    match payment.product.as_str() {
+        PRODUCT_SUB_BASIC | PRODUCT_SUB_PRO => {
+            storage.revoke_subscription(user_id).await;
+        }
+        PRODUCT_TOPUP_60 => {
+            storage.revoke_topup(user_id, TOPUP_SECONDS).await;
+        }
+        _ => {
+            log::warn!("Unknown product in /refundme for user {}: {}", user_id, payment.product);
+        }
+    }
+
+    api.send_text_message(
+        chat_id,
+        message.id,
+        "Your refund has been processed. The Stars have been returned to your Telegram account \
+         and your subscription/top-up has been deactivated.",
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn handle_refund(
     api: Arc<dyn TelegramApi>,
     storage: Arc<dyn Storage>,
@@ -269,16 +401,49 @@ pub async fn handle_refund(
     if message.chat.id.0 != owner_chat_id {
         return Ok(());
     }
-    // Usage: /refund <user_id> <telegram_charge_id> <product>
-    // product: sub_basic | sub_pro | topup_60
+    // Usage: /refund <user_id> [<telegram_charge_id> <product>]
+    // With just a user_id, shows the 5 most recent charges ready to copy-paste.
     let parts: Vec<&str> = args.trim().splitn(3, char::is_whitespace).collect();
+
+    // /refund <user_id> — list recent charges
+    if let [user_id_str] = parts.as_slice() {
+        let uid: i64 = match user_id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                api.send_text_message(message.chat.id, message.id, "Invalid user_id.").await?;
+                return Ok(());
+            }
+        };
+        let payments = storage.get_recent_payments(uid, 5).await;
+        if payments.is_empty() {
+            api.send_text_message(
+                message.chat.id,
+                message.id,
+                &format!("No payments found for user_id {uid}."),
+            )
+            .await?;
+        } else {
+            let mut lines = format!("Recent charges for user_id {uid} — tap to copy:\n");
+            for p in &payments {
+                let date = p.created_at.format("%Y-%m-%d %H:%M UTC");
+                lines.push_str(&format!(
+                    "\n<code>/refund {uid} {} {}</code>  — {}⭐ ({date})",
+                    p.telegram_charge_id, p.product, p.amount,
+                ));
+            }
+            api.send_text_message(message.chat.id, message.id, &lines).await?;
+        }
+        return Ok(());
+    }
+
     let (user_id_str, charge_id, product) = match parts.as_slice() {
         [u, ch, p] => (*u, *ch, *p),
         _ => {
             api.send_text_message(
                 message.chat.id,
                 message.id,
-                "Usage: /refund &lt;user_id&gt; &lt;charge_id&gt; &lt;product&gt;\n\
+                "Usage: /refund &lt;user_id&gt; [&lt;charge_id&gt; &lt;product&gt;]\n\
+                 /refund &lt;user_id&gt; alone shows recent charges.\n\
                  product: sub_basic | sub_pro | topup_60",
             )
             .await?;
@@ -569,7 +734,7 @@ pub async fn handle_callback_query(
 
     match action {
         "audio" => handle_audio_extraction(&ctx, user_id, chat_id, message_id, &*api, &*storage).await?,
-        "txn" => handle_transcription(&ctx, user_id, chat_id, message_id, &*api, &*storage, &*transcriber).await?,
+        "txn" => handle_transcription(&ctx, user_id, chat_id, message_id, &*api, &*storage, &*transcriber, &*summarizer).await?,
         "sum" => handle_summarization(&ctx, user_id, chat_id, message_id, &*api, &*storage, &*transcriber, &*summarizer).await?,
         _ => {}
     }
@@ -695,6 +860,7 @@ async fn handle_transcription(
     api: &dyn TelegramApi,
     storage: &dyn Storage,
     transcriber: &dyn Transcriber,
+    summarizer: &dyn Summarizer,
 ) -> ResponseResult<()> {
     let sub = storage.get_subscription(user_id).await;
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
@@ -730,7 +896,7 @@ async fn handle_transcription(
     api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
 
     let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
-    let transcript = match transcriber.transcribe(&audio_path).await {
+    let transcription = match transcriber.transcribe(&audio_path).await {
         Ok(t) => t,
         Err(e) => {
             log::error!("Transcription failed: {}", e);
@@ -742,6 +908,18 @@ async fn handle_transcription(
                 )
                 .await;
             return Ok(()); // no quota deduction
+        }
+    };
+
+    let transcript = match summarizer
+        .correct_transcript(&transcription.transcript, transcription.detected_language)
+        .await
+    {
+        Ok(corrected) => corrected,
+        Err(e) => {
+            log::error!("Transcript correction failed: {}", e);
+            // Fall back to raw transcript rather than failing entirely
+            transcription.transcript
         }
     };
 
@@ -804,7 +982,7 @@ async fn handle_summarization(
     api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
 
     let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
-    let transcript = match transcriber.transcribe(&audio_path).await {
+    let transcription = match transcriber.transcribe(&audio_path).await {
         Ok(t) => t,
         Err(e) => {
             log::error!("Transcription failed: {}", e);
@@ -819,7 +997,7 @@ async fn handle_summarization(
         }
     };
 
-    let summary = match summarizer.summarize(&transcript).await {
+    let summary = match summarizer.summarize(&transcription.transcript, transcription.detected_language).await {
         Ok(s) => s,
         Err(e) => {
             log::error!("Summarization failed: {}", e);
@@ -855,7 +1033,6 @@ mod tests {
     use crate::storage::MockStorage;
     use crate::subscription::{SubscriptionInfo, SubscriptionTier};
     use crate::telegram_api::MockTelegramApi;
-    use mockall::predicate::*;
     use teloxide::types::{ChatId, MessageId};
 
     // ---------------------------------------------------------------------------
@@ -873,17 +1050,6 @@ mod tests {
             "chat": {"id": chat_id, "type": "private"},
             "from": {"id": user_id, "is_bot": false, "first_name": "Test"}
         })
-    }
-
-    fn active_basic_sub() -> SubscriptionInfo {
-        SubscriptionInfo {
-            tier: SubscriptionTier::Basic,
-            ai_seconds_used: 0,
-            ai_seconds_limit: 3600,
-            topup_seconds_available: 0,
-            last_topup_at: None,
-            expires_at: Some(chrono::Utc::now() + chrono::TimeDelta::days(30)),
-        }
     }
 
     fn active_pro_sub() -> SubscriptionInfo {
@@ -1080,7 +1246,6 @@ mod tests {
             Arc::new(mock_storage),
             message,
             "".to_string(),
-            false,
             0,
         )
         .await
@@ -1090,7 +1255,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_support_relays_to_owner() {
         let mut mock_api = MockTelegramApi::new();
-        let mock_storage = MockStorage::new();
+        let mut mock_storage = MockStorage::new();
 
         // Sends ack to user
         mock_api
@@ -1103,6 +1268,14 @@ mod tests {
             .withf(|chat_id, _| chat_id.0 == 999)
             .times(1)
             .returning(|_, _| Ok(()));
+        mock_storage
+            .expect_get_subscription()
+            .times(1)
+            .returning(|_| crate::subscription::SubscriptionInfo::free_default());
+        mock_storage
+            .expect_get_recent_payments()
+            .times(1)
+            .returning(|_, _| vec![]);
 
         let message = make_message(base_message_json(100, 200));
 
@@ -1111,7 +1284,6 @@ mod tests {
             Arc::new(mock_storage),
             message,
             "Please help me".to_string(),
-            false,
             999, // owner_chat_id
         )
         .await

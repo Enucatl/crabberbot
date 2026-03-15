@@ -5,10 +5,23 @@ use crate::downloader::MediaType;
 use crate::handler::CallbackContext;
 use crate::subscription::{SubscriptionInfo, SubscriptionTier};
 
+/// A payment record returned for self-service refund eligibility checks and owner tooling.
+#[derive(Debug, Clone)]
+pub struct PaymentRecord {
+    pub telegram_charge_id: String,
+    pub product: String,
+    pub amount: i32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CachedMedia {
     pub caption: String,
     pub files: Vec<CachedFile>,
+    /// Path to the extracted audio file on disk, if it was extracted and still exists.
+    pub audio_cache_path: Option<String>,
+    /// Duration of the video in seconds, for AI quota accounting.
+    pub media_duration_secs: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +39,8 @@ pub trait Storage: Send + Sync {
         source_url: &str,
         caption: &str,
         files: &[(String, MediaType)],
+        audio_cache_path: Option<String>,
+        media_duration_secs: Option<i32>,
     );
     async fn log_request(
         &self,
@@ -74,6 +89,12 @@ pub trait Storage: Send + Sync {
     async fn revoke_subscription(&self, user_id: i64);
     /// Reduce top-up balance by `seconds` (clamped to 0). Used when a top-up purchase is refunded.
     async fn revoke_topup(&self, user_id: i64, seconds: i32);
+    /// Returns the most recent payment for a user, if any.
+    async fn get_latest_payment(&self, user_id: i64) -> Option<PaymentRecord>;
+    /// Returns the most recent `limit` payments for a user (for owner tooling).
+    async fn get_recent_payments(&self, user_id: i64, limit: i64) -> Vec<PaymentRecord>;
+    /// Returns true if the user has any premium_usage rows recorded after `since`.
+    async fn has_ai_usage_since(&self, user_id: i64, since: chrono::DateTime<chrono::Utc>) -> bool;
 
     // Cleanup
     async fn cleanup_expired_callback_contexts(&self);
@@ -95,6 +116,16 @@ impl PostgresStorage {
     }
 
     pub async fn cleanup_expired(pool: &PgPool, ttl_days: i64) {
+        // Collect audio file paths to delete before removing DB rows
+        let expired_audio: Vec<(Option<String>,)> = sqlx::query_as(
+            "SELECT audio_cache_path FROM media_cache \
+             WHERE last_used_at < NOW() - make_interval(days => $1::int)",
+        )
+        .bind(ttl_days)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
         let result = sqlx::query(
             "DELETE FROM media_cache WHERE last_used_at < NOW() - make_interval(days => $1::int)",
         )
@@ -103,7 +134,16 @@ impl PostgresStorage {
         .await;
 
         match result {
-            Ok(r) => log::info!("Cache cleanup: removed {} expired entries", r.rows_affected()),
+            Ok(r) => {
+                log::info!("Cache cleanup: removed {} expired entries", r.rows_affected());
+                for path in expired_audio.into_iter().filter_map(|(p,)| p) {
+                    if let Err(e) = tokio::fs::remove_file(&path).await {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            log::warn!("Failed to delete expired audio file {}: {}", path, e);
+                        }
+                    }
+                }
+            }
             Err(e) => log::error!("Cache cleanup failed: {}", e),
         }
     }
@@ -112,18 +152,21 @@ impl PostgresStorage {
 #[async_trait]
 impl Storage for PostgresStorage {
     async fn get_cached_media(&self, source_url: &str) -> Option<CachedMedia> {
-        let cache_row: Option<(i32, String)> =
-            sqlx::query_as("SELECT id, caption FROM media_cache WHERE source_url = $1")
-                .bind(source_url)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| {
-                    log::error!("Cache lookup failed: {}", e);
-                    e
-                })
-                .ok()?;
+        let cache_row: Option<(i32, String, Option<String>, Option<i32>)> =
+            sqlx::query_as(
+                "SELECT id, caption, audio_cache_path, media_duration_secs \
+                 FROM media_cache WHERE source_url = $1",
+            )
+            .bind(source_url)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| {
+                log::error!("Cache lookup failed: {}", e);
+                e
+            })
+            .ok()?;
 
-        let (cache_id, caption) = cache_row?;
+        let (cache_id, caption, audio_cache_path, media_duration_secs) = cache_row?;
 
         // Update last_used_at
         let _ = sqlx::query("UPDATE media_cache SET last_used_at = NOW() WHERE id = $1")
@@ -162,7 +205,7 @@ impl Storage for PostgresStorage {
             return None;
         }
 
-        Some(CachedMedia { caption, files })
+        Some(CachedMedia { caption, files, audio_cache_path, media_duration_secs })
     }
 
     async fn store_cached_media(
@@ -170,6 +213,8 @@ impl Storage for PostgresStorage {
         source_url: &str,
         caption: &str,
         files: &[(String, MediaType)],
+        audio_cache_path: Option<String>,
+        media_duration_secs: Option<i32>,
     ) {
         let mut tx = match self.pool.begin().await {
             Ok(tx) => tx,
@@ -180,12 +225,16 @@ impl Storage for PostgresStorage {
         };
 
         let result: Result<(i32,), _> = sqlx::query_as(
-            "INSERT INTO media_cache (source_url, caption) VALUES ($1, $2) \
-             ON CONFLICT (source_url) DO UPDATE SET caption = $2, last_used_at = NOW() \
+            "INSERT INTO media_cache (source_url, caption, audio_cache_path, media_duration_secs) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (source_url) DO UPDATE \
+             SET caption = $2, audio_cache_path = $3, media_duration_secs = $4, last_used_at = NOW() \
              RETURNING id",
         )
         .bind(source_url)
         .bind(caption)
+        .bind(audio_cache_path)
+        .bind(media_duration_secs)
         .fetch_one(&mut *tx)
         .await;
 
@@ -475,6 +524,76 @@ impl Storage for PostgresStorage {
         .await
         {
             log::error!("Failed to revoke topup for {}: {}", user_id, e);
+        }
+    }
+
+    async fn get_latest_payment(&self, user_id: i64) -> Option<PaymentRecord> {
+        let row: Option<(String, String, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT telegram_payment_charge_id, product, amount, created_at \
+             FROM payments WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            log::error!("Failed to get latest payment for {}: {}", user_id, e);
+            e
+        })
+        .ok()
+        .flatten();
+
+        row.map(|(telegram_charge_id, product, amount, created_at)| PaymentRecord {
+            telegram_charge_id,
+            product,
+            amount,
+            created_at,
+        })
+    }
+
+    async fn get_recent_payments(&self, user_id: i64, limit: i64) -> Vec<PaymentRecord> {
+        let rows: Result<Vec<(String, String, i32, chrono::DateTime<chrono::Utc>)>, _> =
+            sqlx::query_as(
+                "SELECT telegram_payment_charge_id, product, amount, created_at \
+                 FROM payments WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
+            )
+            .bind(user_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await;
+
+        match rows {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(telegram_charge_id, product, amount, created_at)| PaymentRecord {
+                    telegram_charge_id,
+                    product,
+                    amount,
+                    created_at,
+                })
+                .collect(),
+            Err(e) => {
+                log::error!("Failed to get recent payments for {}: {}", user_id, e);
+                vec![]
+            }
+        }
+    }
+
+    async fn has_ai_usage_since(&self, user_id: i64, since: chrono::DateTime<chrono::Utc>) -> bool {
+        let result: Result<(bool,), _> = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM premium_usage WHERE user_id = $1 AND created_at > $2)",
+        )
+        .bind(user_id)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await;
+
+        match result {
+            Ok((exists,)) => exists,
+            Err(e) => {
+                log::error!("Failed to check ai_usage_since for {}: {}", user_id, e);
+                // Fail safe: assume usage exists so we don't accidentally auto-refund
+                true
+            }
         }
     }
 
