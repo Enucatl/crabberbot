@@ -2,6 +2,9 @@ pub mod audio_extractor;
 pub mod summarizer;
 pub mod transcriber;
 
+/// Directory for extracted audio files awaiting transcription/sending.
+pub const AUDIO_CACHE_DIR: &str = "/tmp/audio_cache";
+
 /// Max per-file duration for AI features (transcription/summarization).
 /// Prevents webhook timeouts, Deepgram choking on huge files, and RAM hogging.
 pub const MAX_PREMIUM_FILE_DURATION_SECS: i32 = 1800; // 30 minutes

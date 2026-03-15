@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 
 use crate::downloader::MediaType;
-use crate::subscription::{CallbackContext, SubscriptionInfo, SubscriptionTier};
+use crate::handler::CallbackContext;
+use crate::subscription::{SubscriptionInfo, SubscriptionTier};
 
 #[derive(Debug, Clone)]
 pub struct CachedMedia {
@@ -35,10 +36,10 @@ pub trait Storage: Send + Sync {
     );
 
     // Subscription management
-    async fn get_subscription(&self, chat_id: i64) -> SubscriptionInfo;
+    async fn get_subscription(&self, user_id: i64) -> SubscriptionInfo;
     async fn upsert_subscription(
         &self,
-        chat_id: i64,
+        user_id: i64,
         tier: SubscriptionTier,
         duration_days: i64,
     );
@@ -46,7 +47,7 @@ pub trait Storage: Send + Sync {
     // Payment recording
     async fn record_payment(
         &self,
-        chat_id: i64,
+        user_id: i64,
         telegram_charge_id: &str,
         provider_charge_id: &str,
         product: &str,
@@ -54,11 +55,11 @@ pub trait Storage: Send + Sync {
     );
 
     // AI Seconds tracking
-    async fn consume_ai_seconds(&self, chat_id: i64, seconds: i32);
-    async fn add_topup_seconds(&self, chat_id: i64, seconds: i32);
+    async fn consume_ai_seconds(&self, user_id: i64, seconds: i32);
+    async fn add_topup_seconds(&self, user_id: i64, seconds: i32);
     async fn record_premium_usage(
         &self,
-        chat_id: i64,
+        user_id: i64,
         feature: &str,
         source_url: &str,
         duration_secs: i32,
@@ -70,10 +71,14 @@ pub trait Storage: Send + Sync {
     async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext>;
 
     // Subscription downgrade (for refunds)
-    async fn revoke_subscription(&self, chat_id: i64);
+    async fn revoke_subscription(&self, user_id: i64);
+    /// Reduce top-up balance by `seconds` (clamped to 0). Used when a top-up purchase is refunded.
+    async fn revoke_topup(&self, user_id: i64, seconds: i32);
 
     // Cleanup
     async fn cleanup_expired_callback_contexts(&self);
+    /// Zero out top-up balances whose last_topup_at exceeds TOPUP_EXPIRY_DAYS.
+    async fn expire_stale_topups(&self);
 }
 
 pub struct PostgresStorage {
@@ -253,17 +258,17 @@ impl Storage for PostgresStorage {
         }
     }
 
-    async fn get_subscription(&self, chat_id: i64) -> SubscriptionInfo {
+    async fn get_subscription(&self, user_id: i64) -> SubscriptionInfo {
         let row: Option<(String, i32, i32, i32, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> =
             sqlx::query_as(
                 "SELECT tier, ai_seconds_used, ai_seconds_limit, topup_seconds_available, \
-                 last_topup_at, expires_at FROM subscriptions WHERE chat_id = $1",
+                 last_topup_at, expires_at FROM subscriptions WHERE user_id = $1",
             )
-            .bind(chat_id)
+            .bind(user_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| {
-                log::error!("Failed to get subscription for {}: {}", chat_id, e);
+                log::error!("Failed to get subscription for {}: {}", user_id, e);
                 e
             })
             .ok()
@@ -287,43 +292,43 @@ impl Storage for PostgresStorage {
 
     async fn upsert_subscription(
         &self,
-        chat_id: i64,
+        user_id: i64,
         tier: SubscriptionTier,
         duration_days: i64,
     ) {
         let limit = tier.ai_seconds_limit();
         let tier_str = tier.to_string();
         if let Err(e) = sqlx::query(
-            "INSERT INTO subscriptions (chat_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, updated_at) \
+            "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, updated_at) \
              VALUES ($1, $2, 0, $3, NOW() + make_interval(days => $4), NOW()) \
-             ON CONFLICT (chat_id) DO UPDATE SET \
+             ON CONFLICT (user_id) DO UPDATE SET \
                tier = $2, ai_seconds_used = 0, ai_seconds_limit = $3, \
                expires_at = NOW() + make_interval(days => $4), updated_at = NOW()",
         )
-        .bind(chat_id)
+        .bind(user_id)
         .bind(&tier_str)
         .bind(limit)
         .bind(duration_days)
         .execute(&self.pool)
         .await
         {
-            log::error!("Failed to upsert subscription for {}: {}", chat_id, e);
+            log::error!("Failed to upsert subscription for {}: {}", user_id, e);
         }
     }
 
     async fn record_payment(
         &self,
-        chat_id: i64,
+        user_id: i64,
         telegram_charge_id: &str,
         provider_charge_id: &str,
         product: &str,
         amount: i32,
     ) {
         if let Err(e) = sqlx::query(
-            "INSERT INTO payments (chat_id, telegram_payment_charge_id, provider_payment_charge_id, product, amount) \
+            "INSERT INTO payments (user_id, telegram_payment_charge_id, provider_payment_charge_id, product, amount) \
              VALUES ($1, $2, $3, $4, $5) ON CONFLICT (telegram_payment_charge_id) DO NOTHING",
         )
-        .bind(chat_id)
+        .bind(user_id)
         .bind(telegram_charge_id)
         .bind(provider_charge_id)
         .bind(product)
@@ -331,66 +336,68 @@ impl Storage for PostgresStorage {
         .execute(&self.pool)
         .await
         {
-            log::error!("Failed to record payment for {}: {}", chat_id, e);
+            log::error!("Failed to record payment for {}: {}", user_id, e);
         }
     }
 
-    async fn consume_ai_seconds(&self, chat_id: i64, seconds: i32) {
+    async fn consume_ai_seconds(&self, user_id: i64, seconds: i32) {
         if let Err(e) = sqlx::query(
             "UPDATE subscriptions SET \
                ai_seconds_used = LEAST(ai_seconds_used + $2, ai_seconds_limit), \
-               topup_seconds_available = topup_seconds_available \
-                   - GREATEST($2 - (ai_seconds_limit - ai_seconds_used), 0), \
+               topup_seconds_available = GREATEST( \
+                   topup_seconds_available - GREATEST($2 - (ai_seconds_limit - ai_seconds_used), 0), \
+                   0 \
+               ), \
                updated_at = NOW() \
-             WHERE chat_id = $1",
+             WHERE user_id = $1",
         )
-        .bind(chat_id)
+        .bind(user_id)
         .bind(seconds)
         .execute(&self.pool)
         .await
         {
-            log::error!("Failed to consume ai_seconds for {}: {}", chat_id, e);
+            log::error!("Failed to consume ai_seconds for {}: {}", user_id, e);
         }
     }
 
-    async fn add_topup_seconds(&self, chat_id: i64, seconds: i32) {
+    async fn add_topup_seconds(&self, user_id: i64, seconds: i32) {
         if let Err(e) = sqlx::query(
-            "INSERT INTO subscriptions (chat_id, tier, topup_seconds_available, last_topup_at, updated_at) \
+            "INSERT INTO subscriptions (user_id, tier, topup_seconds_available, last_topup_at, updated_at) \
              VALUES ($1, 'free', $2, NOW(), NOW()) \
-             ON CONFLICT (chat_id) DO UPDATE SET \
+             ON CONFLICT (user_id) DO UPDATE SET \
                topup_seconds_available = subscriptions.topup_seconds_available + $2, \
                last_topup_at = NOW(), updated_at = NOW()",
         )
-        .bind(chat_id)
+        .bind(user_id)
         .bind(seconds)
         .execute(&self.pool)
         .await
         {
-            log::error!("Failed to add topup_seconds for {}: {}", chat_id, e);
+            log::error!("Failed to add topup_seconds for {}: {}", user_id, e);
         }
     }
 
     async fn record_premium_usage(
         &self,
-        chat_id: i64,
+        user_id: i64,
         feature: &str,
         source_url: &str,
         duration_secs: i32,
         cost_usd: f64,
     ) {
         if let Err(e) = sqlx::query(
-            "INSERT INTO premium_usage (chat_id, feature, source_url, duration_secs, estimated_cost_usd) \
+            "INSERT INTO premium_usage (user_id, feature, source_url, duration_secs, estimated_cost_usd) \
              VALUES ($1, $2, $3, $4, $5)",
         )
-        .bind(chat_id)
+        .bind(user_id)
         .bind(feature)
         .bind(source_url)
         .bind(duration_secs)
-        .bind(cost_usd as f32)
+        .bind(cost_usd as f32) // DB column is REAL (f32); precision loss is acceptable for cost tracking
         .execute(&self.pool)
         .await
         {
-            log::error!("Failed to record premium usage for {}: {}", chat_id, e);
+            log::error!("Failed to record premium usage for {}: {}", user_id, e);
         }
     }
 
@@ -442,16 +449,32 @@ impl Storage for PostgresStorage {
         })
     }
 
-    async fn revoke_subscription(&self, chat_id: i64) {
+    async fn revoke_subscription(&self, user_id: i64) {
         if let Err(e) = sqlx::query(
             "UPDATE subscriptions SET tier = 'free', ai_seconds_limit = 0, \
-             expires_at = NULL, updated_at = NOW() WHERE chat_id = $1",
+             expires_at = NULL, updated_at = NOW() WHERE user_id = $1",
         )
-        .bind(chat_id)
+        .bind(user_id)
         .execute(&self.pool)
         .await
         {
-            log::error!("Failed to revoke subscription for {}: {}", chat_id, e);
+            log::error!("Failed to revoke subscription for {}: {}", user_id, e);
+        }
+    }
+
+    async fn revoke_topup(&self, user_id: i64, seconds: i32) {
+        if let Err(e) = sqlx::query(
+            "UPDATE subscriptions SET \
+               topup_seconds_available = GREATEST(topup_seconds_available - $2, 0), \
+               updated_at = NOW() \
+             WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(seconds)
+        .execute(&self.pool)
+        .await
+        {
+            log::error!("Failed to revoke topup for {}: {}", user_id, e);
         }
     }
 
@@ -467,6 +490,21 @@ impl Storage for PostgresStorage {
                 r.rows_affected()
             ),
             Err(e) => log::error!("Callback context cleanup failed: {}", e),
+        }
+    }
+
+    async fn expire_stale_topups(&self) {
+        let result = sqlx::query(
+            "UPDATE subscriptions SET topup_seconds_available = 0, updated_at = NOW() \
+             WHERE last_topup_at < NOW() - make_interval(days => $1) \
+               AND topup_seconds_available > 0",
+        )
+        .bind(crate::terms::TOPUP_EXPIRY_DAYS)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(r) => log::info!("Expired {} stale top-up balances", r.rows_affected()),
+            Err(e) => log::error!("Failed to expire stale top-ups: {}", e),
         }
     }
 }

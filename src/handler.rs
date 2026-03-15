@@ -12,9 +12,20 @@ use crate::downloader::{
 };
 use crate::premium::audio_extractor::AudioExtractor;
 use crate::storage::{CachedMedia, Storage};
-use crate::subscription::CallbackContext;
 use crate::telegram_api::{resize_photo_if_needed, SentMedia, TelegramApi};
 use crate::validator::validate_media_metadata;
+
+/// Persisted context for a premium action callback button, stored in the DB.
+/// Decoupled from subscriptions — tracks the download destination and media info
+/// needed to serve the audio/transcribe/summarize callback when the user taps the button.
+#[derive(Debug, Clone)]
+pub struct CallbackContext {
+    pub source_url: String,
+    pub chat_id: i64,
+    pub has_video: bool,
+    pub media_duration_secs: Option<i32>,
+    pub audio_cache_path: Option<String>,
+}
 
 /// Context returned after a successful download, containing info needed for premium buttons.
 pub struct DownloadContext {
@@ -22,6 +33,8 @@ pub struct DownloadContext {
     pub has_video: bool,
     pub media_duration_secs: Option<i32>,
     pub audio_cache_path: Option<PathBuf>,
+    /// Message ID of the sent video, used to attach premium buttons to it.
+    pub sent_message_id: Option<MessageId>,
 }
 
 /// An RAII guard to ensure downloaded files are cleaned up.
@@ -192,14 +205,14 @@ async fn download_step(
     }
 }
 
-/// Step 3 (Branch A): Handle sending a single media item. Returns file_id on success.
+/// Step 3 (Branch A): Handle sending a single media item. Returns (file_id, media_type, sent_message_id) on success.
 async fn send_single_item(
     item: &DownloadedItem,
     caption: &str,
     chat_id: ChatId,
     message_id: MessageId,
     telegram_api: &dyn TelegramApi,
-) -> Option<(String, MediaType)> {
+) -> Option<(String, MediaType, MessageId)> {
     let result = match item.media_type {
         MediaType::Video => telegram_api
             .send_video(
@@ -210,7 +223,7 @@ async fn send_single_item(
                 item.thumbnail_filepath.clone(),
             )
             .await
-            .map(|file_id| (file_id, MediaType::Video)),
+            .map(|(file_id, sent_id)| (file_id, MediaType::Video, sent_id)),
         MediaType::Photo => {
             // Resize happens at the handler layer for both single and group photos.
             let resized = resize_photo_if_needed(&item.filepath);
@@ -218,7 +231,7 @@ async fn send_single_item(
             let send_result = telegram_api
                 .send_photo(chat_id, message_id, effective_path, caption)
                 .await
-                .map(|file_id| (file_id, MediaType::Photo));
+                .map(|(file_id, sent_id)| (file_id, MediaType::Photo, sent_id));
             if let Some(p) = resized {
                 let _ = std::fs::remove_file(&p);
             }
@@ -445,13 +458,16 @@ pub async fn process_download_request(
 
     // For a single video item, run upload and audio extraction concurrently.
     // For groups or photos, just upload normally (no audio extraction).
-    let (file_ids, audio_cache_path, media_duration_secs, has_video) = match &downloaded {
+    let (file_ids, audio_cache_path, media_duration_secs, has_video, sent_message_id) = match &downloaded {
         DownloadedMedia::Single(item) if item.media_type == MediaType::Video => {
             let (send_result, audio_result) = tokio::join!(
                 send_single_item(item, &caption, chat_id, message_id, telegram_api),
                 audio_extractor.extract_audio(&item.filepath)
             );
-            let file_ids = send_result.map(|sent| vec![sent]);
+            let (file_ids, sent_msg_id) = match send_result {
+                Some((file_id, media_type, msg_id)) => (Some(vec![(file_id, media_type)]), Some(msg_id)),
+                None => (None, None),
+            };
             let (audio_cache_path, media_duration_secs) = match audio_result {
                 Ok(result) => (
                     Some(result.audio_path),
@@ -462,13 +478,14 @@ pub async fn process_download_request(
                     (None, None)
                 }
             };
-            (file_ids, audio_cache_path, media_duration_secs, true)
+            (file_ids, audio_cache_path, media_duration_secs, true, sent_msg_id)
         }
         DownloadedMedia::Single(item) => {
-            let file_ids = send_single_item(item, &caption, chat_id, message_id, telegram_api)
-                .await
-                .map(|sent| vec![sent]);
-            (file_ids, None, None, false)
+            let (file_ids, sent_msg_id) = match send_single_item(item, &caption, chat_id, message_id, telegram_api).await {
+                Some((file_id, media_type, msg_id)) => (Some(vec![(file_id, media_type)]), Some(msg_id)),
+                None => (None, None),
+            };
+            (file_ids, None, None, false, sent_msg_id)
         }
         DownloadedMedia::Group(items) => {
             let file_ids = send_media_group_step(items, &caption, chat_id, message_id, telegram_api)
@@ -478,7 +495,7 @@ pub async fn process_download_request(
                         .map(|s| (s.file_id, s.media_type))
                         .collect()
                 });
-            (file_ids, None, None, false)
+            (file_ids, None, None, false, None)
         }
     };
 
@@ -496,6 +513,7 @@ pub async fn process_download_request(
             has_video,
             media_duration_secs,
             audio_cache_path,
+            sent_message_id,
         })
     } else {
         storage
@@ -519,18 +537,16 @@ pub async fn send_long_text(
     }
     let mut start = 0;
     while start < text.len() {
-        let end = (start + MAX_LEN).min(text.len());
+        let end = text.floor_char_boundary((start + MAX_LEN).min(text.len()));
         let chunk = &text[start..end];
         let _ = api.send_text_message(chat_id, message_id, chunk).await;
         start = end;
     }
 }
 
-/// Store a callback context and send premium action buttons if the download has
-/// a video with a cached audio file.
+/// Store a callback context and attach premium action buttons to the sent video message.
 pub async fn maybe_send_premium_buttons(
     chat_id: ChatId,
-    message_id: MessageId,
     ctx: DownloadContext,
     api: &dyn TelegramApi,
     storage: &dyn Storage,
@@ -538,6 +554,14 @@ pub async fn maybe_send_premium_buttons(
     if !ctx.has_video || ctx.audio_cache_path.is_none() {
         return;
     }
+
+    let sent_msg_id = match ctx.sent_message_id {
+        Some(id) => id,
+        None => {
+            log::warn!("No sent_message_id for premium buttons, skipping");
+            return;
+        }
+    };
 
     let callback_ctx = CallbackContext {
         source_url: ctx.source_url.to_string(),
@@ -569,10 +593,10 @@ pub async fn maybe_send_premium_buttons(
     ]]);
 
     if let Err(e) = api
-        .send_text_with_keyboard(chat_id, message_id, "Premium actions available:", keyboard)
+        .edit_message_reply_markup(chat_id, sent_msg_id, keyboard)
         .await
     {
-        log::warn!("Failed to send premium buttons: {}", e);
+        log::warn!("Failed to attach premium buttons to video: {}", e);
     }
 }
 
@@ -617,7 +641,7 @@ mod tests {
         mock
     }
 
-#[tokio::test]
+    #[tokio::test]
     async fn test_process_download_request_sends_video_on_success() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
@@ -654,7 +678,7 @@ mod tests {
                 eq(Some(PathBuf::from("thumb.jpg"))),
             )
             .times(1)
-            .returning(|_, _, _, _, _| Ok("file_id_video_123".to_string()));
+            .returning(|_, _, _, _, _| Ok(("file_id_video_123".to_string(), MessageId(0))));
 
         process_download_request(
             &test_url,
@@ -703,7 +727,7 @@ mod tests {
                 eq(None::<PathBuf>),
             )
             .times(1)
-            .returning(|_, _, _, _, _| Ok("file_id_video_456".to_string()));
+            .returning(|_, _, _, _, _| Ok(("file_id_video_456".to_string(), MessageId(0))));
 
         process_download_request(
             &test_url,
@@ -751,7 +775,7 @@ mod tests {
                 always(),
             )
             .times(1)
-            .returning(|_, _, _, _| Ok("file_id_photo_123".to_string()));
+            .returning(|_, _, _, _| Ok(("file_id_photo_123".to_string(), MessageId(0))));
 
         process_download_request(
             &test_url,
@@ -1083,7 +1107,7 @@ mod tests {
         mock_telegram_api
             .expect_send_video()
             .times(1)
-            .returning(|_, _, _, _, _| Ok("fresh_file_id".to_string()));
+            .returning(|_, _, _, _, _| Ok(("fresh_file_id".to_string(), MessageId(0))));
 
         mock_storage
             .expect_store_cached_media()
@@ -1341,7 +1365,7 @@ mod tests {
         mock_telegram_api
             .expect_send_video()
             .times(1)
-            .returning(|_, _, _, _, _| Ok("new_file_id".to_string()));
+            .returning(|_, _, _, _, _| Ok(("new_file_id".to_string(), MessageId(0))));
 
         mock_storage
             .expect_store_cached_media()
@@ -1398,7 +1422,7 @@ mod tests {
         mock_telegram_api
             .expect_send_video()
             .times(1)
-            .returning(|_, _, _, _, _| Ok("file_id_123".to_string()));
+            .returning(|_, _, _, _, _| Ok(("file_id_123".to_string(), MessageId(0))));
 
         let mut mock_audio = MockAudioExtractor::new();
         mock_audio
@@ -1454,7 +1478,7 @@ mod tests {
         mock_telegram_api
             .expect_send_photo()
             .times(1)
-            .returning(|_, _, _, _| Ok("photo_file_id".to_string()));
+            .returning(|_, _, _, _| Ok(("photo_file_id".to_string(), MessageId(0))));
 
         let ctx = process_download_request(
             &test_url,
@@ -1530,6 +1554,7 @@ mod tests {
             source_url: "https://example.com/video".parse().unwrap(),
             has_video,
             media_duration_secs: audio_cache_path.as_ref().map(|_| 60),
+            sent_message_id: if has_video { Some(MessageId(99)) } else { None },
             audio_cache_path,
         }
     }
@@ -1540,7 +1565,7 @@ mod tests {
         let storage = MockStorage::new();
         let ctx = make_download_ctx(false, Some(PathBuf::from("/tmp/audio.mp3")));
 
-        maybe_send_premium_buttons(ChatId(1), MessageId(1), ctx, &api, &storage).await;
+        maybe_send_premium_buttons(ChatId(1), ctx, &api, &storage).await;
     }
 
     #[tokio::test]
@@ -1549,7 +1574,7 @@ mod tests {
         let storage = MockStorage::new();
         let ctx = make_download_ctx(true, None);
 
-        maybe_send_premium_buttons(ChatId(1), MessageId(1), ctx, &api, &storage).await;
+        maybe_send_premium_buttons(ChatId(1), ctx, &api, &storage).await;
     }
 
     #[tokio::test]
@@ -1562,7 +1587,7 @@ mod tests {
             .returning(|_| 0);
 
         let ctx = make_download_ctx(true, Some(PathBuf::from("/tmp/audio.mp3")));
-        maybe_send_premium_buttons(ChatId(1), MessageId(1), ctx, &api, &storage).await;
+        maybe_send_premium_buttons(ChatId(1), ctx, &api, &storage).await;
     }
 
     #[tokio::test]
@@ -1574,18 +1599,18 @@ mod tests {
             .returning(|_| 42);
 
         let mut api = MockTelegramApi::new();
-        api.expect_send_text_with_keyboard()
-            .withf(|chat_id, _, text: &str, keyboard| {
+        api.expect_edit_message_reply_markup()
+            .withf(|chat_id, msg_id, keyboard| {
                 chat_id.0 == 1
-                    && text.contains("Premium actions")
+                    && msg_id.0 == 99
                     && keyboard.inline_keyboard.iter().flatten().any(|b| b.text == "Extract Audio")
                     && keyboard.inline_keyboard.iter().flatten().any(|b| b.text == "Transcribe")
                     && keyboard.inline_keyboard.iter().flatten().any(|b| b.text == "Summarize")
             })
             .times(1)
-            .returning(|_, _, _, _| Ok(()));
+            .returning(|_, _, _| Ok(()));
 
         let ctx = make_download_ctx(true, Some(PathBuf::from("/tmp/audio.mp3")));
-        maybe_send_premium_buttons(ChatId(1), MessageId(1), ctx, &api, &storage).await;
+        maybe_send_premium_buttons(ChatId(1), ctx, &api, &storage).await;
     }
 }

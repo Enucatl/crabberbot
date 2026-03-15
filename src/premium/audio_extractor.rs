@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::premium::AUDIO_CACHE_DIR;
+
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::Semaphore;
@@ -80,7 +82,7 @@ impl AudioExtractor for FfmpegAudioExtractor {
 
         // Step 2: ffmpeg to extract audio
         let audio_filename = format!("{}.mp3", uuid::Uuid::new_v4());
-        let audio_path = PathBuf::from("/tmp/audio_cache").join(&audio_filename);
+        let audio_path = PathBuf::from(AUDIO_CACHE_DIR).join(&audio_filename);
 
         let ffmpeg_output = tokio::process::Command::new("ffmpeg")
             .args(["-i"])

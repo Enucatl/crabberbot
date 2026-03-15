@@ -1,6 +1,17 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::terms;
+
+/// Invoice payload / product identifier strings used in payments.
+pub const PRODUCT_SUB_BASIC: &str = "sub_basic";
+pub const PRODUCT_SUB_PRO: &str = "sub_pro";
+pub const PRODUCT_TOPUP_60: &str = "topup_60";
+/// Price in Telegram Stars for the one-time top-up product.
+pub const TOPUP_PRICE_STARS: u32 = 50;
+/// AI seconds granted by one top-up purchase (60 minutes).
+pub const TOPUP_SECONDS: i32 = 3600;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SubscriptionTier {
     Free,
@@ -25,10 +36,10 @@ impl SubscriptionTier {
         }
     }
 
-    /// Audio extraction is unlimited for all paid tiers (no API cost).
-    /// Free users with top-up balance also get it — checked via SubscriptionInfo.
+    /// Audio extraction is unlimited for Pro subscribers (no API cost).
+    /// Basic subscribers and free users with a top-up balance also get it — checked via SubscriptionInfo.
     pub fn has_audio_extraction(&self) -> bool {
-        !matches!(self, Self::Free)
+        matches!(self, Self::Pro)
     }
 }
 
@@ -88,9 +99,24 @@ impl SubscriptionInfo {
         }
     }
 
-    /// Total available seconds (monthly + top-up). Free users with top-ups can still use AI.
+    /// Top-up seconds that are still within the expiry window.
+    /// Returns 0 if last_topup_at is over TOPUP_EXPIRY_DAYS ago.
+    /// If no purchase date is recorded, the balance is honoured (e.g. owner grants).
+    fn active_topup_seconds(&self) -> i32 {
+        match self.last_topup_at {
+            Some(t) if chrono::Utc::now() - t
+                < chrono::TimeDelta::days(terms::TOPUP_EXPIRY_DAYS) =>
+            {
+                self.topup_seconds_available
+            }
+            None => self.topup_seconds_available,
+            _ => 0,
+        }
+    }
+
+    /// Total available seconds (monthly + active top-up). Free users with unexpired top-ups can use AI.
     pub fn total_available_seconds(&self) -> i32 {
-        self.monthly_remaining() + self.topup_seconds_available
+        self.monthly_remaining() + self.active_topup_seconds()
     }
 
     pub fn can_use_ai(&self, duration_secs: i32) -> bool {
@@ -101,9 +127,15 @@ impl SubscriptionInfo {
         self.total_available_seconds() as f64 / 60.0
     }
 
-    /// Returns true if this user can use audio extraction (paid tier or any top-up balance).
-    pub fn can_extract_audio(&self) -> bool {
-        self.tier.has_audio_extraction() || self.topup_seconds_available > 0
+    /// Returns true if this user can extract audio for a video of the given duration.
+    /// Pro tier: unlimited, no cost (always true).
+    /// Everyone else: requires enough seconds in their balance (monthly or top-up).
+    pub fn can_extract_audio(&self, duration_secs: i32) -> bool {
+        if self.tier == SubscriptionTier::Pro {
+            true
+        } else {
+            self.total_available_seconds() >= duration_secs
+        }
     }
 }
 
@@ -162,7 +194,7 @@ mod tests {
     #[test]
     fn test_tier_audio_extraction() {
         assert!(!SubscriptionTier::Free.has_audio_extraction());
-        assert!(SubscriptionTier::Basic.has_audio_extraction());
+        assert!(!SubscriptionTier::Basic.has_audio_extraction());
         assert!(SubscriptionTier::Pro.has_audio_extraction());
     }
 
@@ -252,25 +284,60 @@ mod tests {
     #[test]
     fn test_can_extract_audio_free_no_topup() {
         let sub = SubscriptionInfo::free_default();
-        assert!(!sub.can_extract_audio());
+        assert!(!sub.can_extract_audio(60));
     }
 
     #[test]
-    fn test_can_extract_audio_free_with_any_topup() {
+    fn test_can_extract_audio_free_with_enough_topup() {
         let mut sub = SubscriptionInfo::free_default();
-        sub.topup_seconds_available = 1;
-        assert!(sub.can_extract_audio());
+        sub.topup_seconds_available = 3600;
+        sub.last_topup_at = Some(chrono::Utc::now());
+        assert!(sub.can_extract_audio(60));
+        assert!(!sub.can_extract_audio(3601)); // not enough
     }
 
     #[test]
-    fn test_can_extract_audio_basic_active() {
-        assert!(active_basic().can_extract_audio());
+    fn test_can_extract_audio_basic_active_has_minutes() {
+        // Basic gets audio extraction as long as they have minutes remaining
+        assert!(active_basic().can_extract_audio(60));
+        assert!(active_basic().can_extract_audio(3600));
+        assert!(!active_basic().can_extract_audio(3601)); // over quota
     }
 
     #[test]
-    fn test_can_extract_audio_basic_expired_still_true() {
-        // Tier field remains "basic" even when expired; audio is unlimited for paid tiers
-        assert!(expired_basic().can_extract_audio());
+    fn test_can_extract_audio_basic_exhausted_denied() {
+        let mut sub = active_basic();
+        sub.ai_seconds_used = 3600; // all used up
+        assert!(!sub.can_extract_audio(1));
+    }
+
+    #[test]
+    fn test_can_extract_audio_basic_expired_no_topup() {
+        assert!(!expired_basic().can_extract_audio(1));
+    }
+
+    #[test]
+    fn test_can_extract_audio_pro_unlimited() {
+        let sub = SubscriptionInfo {
+            tier: SubscriptionTier::Pro,
+            ai_seconds_used: 12000, // fully exhausted
+            ai_seconds_limit: 12000,
+            topup_seconds_available: 0,
+            last_topup_at: None,
+            expires_at: Some(chrono::Utc::now() + chrono::TimeDelta::days(30)),
+        };
+        // Pro always gets audio extraction regardless of remaining minutes
+        assert!(sub.can_extract_audio(99999));
+    }
+
+    #[test]
+    fn test_expired_topup_returns_zero() {
+        let mut sub = SubscriptionInfo::free_default();
+        sub.topup_seconds_available = 3600;
+        sub.last_topup_at = Some(chrono::Utc::now() - chrono::TimeDelta::days(366));
+        assert_eq!(sub.active_topup_seconds(), 0);
+        assert_eq!(sub.total_available_seconds(), 0);
+        assert!(!sub.can_extract_audio(1));
     }
 
     #[test]
@@ -291,7 +358,7 @@ mod tests {
             expires_at: Some(chrono::Utc::now() + chrono::TimeDelta::days(30)),
         };
         assert_eq!(sub.total_available_seconds(), 12000);
-        assert_eq!((sub.remaining_ai_minutes() - 200.0).abs() < 0.001, true);
+        assert!((sub.remaining_ai_minutes() - 200.0).abs() < 0.001);
     }
 
     #[test]
@@ -309,11 +376,3 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CallbackContext {
-    pub source_url: String,
-    pub chat_id: i64,
-    pub has_video: bool,
-    pub media_duration_secs: Option<i32>,
-    pub audio_cache_path: Option<String>,
-}

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
     prelude::*,
-    types::{ChatAction, ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, MessageId, ParseMode, ReactionType},
+    types::{ChatAction, ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, MessageId, ParseMode, ReactionType, TelegramTransactionId, UserId},
 };
 
 use crate::downloader::MediaType;
@@ -58,14 +58,20 @@ pub trait TelegramApi: Send + Sync {
         file_path: &Path,
         caption: &str,
         thumbnail_filepath: Option<PathBuf>,
-    ) -> Result<String, teloxide::RequestError>;
+    ) -> Result<(String, MessageId), teloxide::RequestError>;
     async fn send_photo(
         &self,
         chat_id: ChatId,
         message_id: MessageId,
         file_path: &Path,
         caption: &str,
-    ) -> Result<String, teloxide::RequestError>;
+    ) -> Result<(String, MessageId), teloxide::RequestError>;
+    async fn edit_message_reply_markup(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        keyboard: InlineKeyboardMarkup,
+    ) -> Result<(), teloxide::RequestError>;
     async fn send_text_message(
         &self,
         chat_id: ChatId,
@@ -148,6 +154,21 @@ pub trait TelegramApi: Send + Sync {
         text: &str,
         keyboard: InlineKeyboardMarkup,
     ) -> Result<(), teloxide::RequestError>;
+
+    /// Send a text message without replying to any specific message.
+    /// Used for outbound relay messages to the owner's chat.
+    async fn send_text_no_reply(
+        &self,
+        chat_id: ChatId,
+        text: &str,
+    ) -> Result<(), teloxide::RequestError>;
+
+    /// Refund a Telegram Stars payment. user_id is the payer's Telegram user ID.
+    async fn refund_star_payment(
+        &self,
+        user_id: i64,
+        telegram_payment_charge_id: &str,
+    ) -> Result<(), teloxide::RequestError>;
 }
 
 #[derive(Clone)]
@@ -183,7 +204,7 @@ impl TelegramApi for TeloxideApi {
         file_path: &Path,
         caption: &str,
         thumbnail_filepath: Option<PathBuf>,
-    ) -> Result<String, teloxide::RequestError> {
+    ) -> Result<(String, MessageId), teloxide::RequestError> {
         log::info!("Sending video {:?} to chat {}", file_path, chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadVideo)
             .await?;
@@ -207,7 +228,7 @@ impl TelegramApi for TeloxideApi {
                     "Missing file_id in Telegram response".to_owned(),
                 ))
             })?;
-        Ok(file_id)
+        Ok((file_id, message.id))
     }
 
     async fn send_photo(
@@ -216,7 +237,7 @@ impl TelegramApi for TeloxideApi {
         message_id: MessageId,
         file_path: &Path,
         caption: &str,
-    ) -> Result<String, teloxide::RequestError> {
+    ) -> Result<(String, MessageId), teloxide::RequestError> {
         log::info!("Sending photo {:?} to chat {}", file_path, chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadPhoto)
             .await?;
@@ -237,7 +258,20 @@ impl TelegramApi for TeloxideApi {
                     "Missing file_id in Telegram response".to_owned(),
                 ))
             })?;
-        Ok(file_id)
+        Ok((file_id, message.id))
+    }
+
+    async fn edit_message_reply_markup(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        keyboard: InlineKeyboardMarkup,
+    ) -> Result<(), teloxide::RequestError> {
+        self.bot
+            .edit_message_reply_markup(chat_id, message_id)
+            .reply_markup(keyboard)
+            .await?;
+        Ok(())
     }
 
     async fn send_text_message(
@@ -494,6 +528,34 @@ impl TelegramApi for TeloxideApi {
             .parse_mode(ParseMode::Html)
             .reply_to(message_id)
             .reply_markup(keyboard)
+            .await?;
+        Ok(())
+    }
+
+    async fn send_text_no_reply(
+        &self,
+        chat_id: ChatId,
+        text: &str,
+    ) -> Result<(), teloxide::RequestError> {
+        log::info!("Sending text (no reply) to chat {}", chat_id);
+        self.bot
+            .send_message(chat_id, text)
+            .parse_mode(ParseMode::Html)
+            .await?;
+        Ok(())
+    }
+
+    async fn refund_star_payment(
+        &self,
+        user_id: i64,
+        telegram_payment_charge_id: &str,
+    ) -> Result<(), teloxide::RequestError> {
+        debug_assert!(user_id >= 0, "user_id must be non-negative");
+        self.bot
+            .refund_star_payment(
+                UserId(user_id as u64),
+                TelegramTransactionId(telegram_payment_charge_id.to_string()),
+            )
             .await?;
         Ok(())
     }
