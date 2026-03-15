@@ -54,23 +54,25 @@ User taps a button
 |---|---|---|
 | Price | 50 Stars/month (~$1.00) | 150 Stars/month (~$3.00) |
 | Net revenue (after Telegram ~35% cut) | ~$0.65 | ~$1.95 |
-| Monthly AI Minutes quota | 60 min | 200 min |
-| Audio extraction | Unlimited | Unlimited |
+| Monthly AI Video Minutes quota | 60 min | 200 min |
+| Audio extraction | Uses AI Video Minutes quota | Unlimited, free (does not use minutes) |
 | Max API cost (Deepgram @ $0.0078/min) | $0.47 | $1.56 |
 | Worst-case margin | 28% | 20% |
 | Realistic margin (~60% breakage) | ~60% | ~65% |
 
-Monthly AI Minutes reset to zero on each subscription renewal. Top-up balance is unaffected by renewals.
+Monthly AI Video Minutes reset to zero on each subscription renewal. Top-up balance is unaffected by renewals.
+
+**AI Video Minutes** are counted from the *duration of the video being processed*, not from processing time. A 10-minute video costs 10 AI Video Minutes for transcription or summarization, regardless of how long processing takes. Audio extraction never consumes AI Video Minutes.
 
 ### One-Time Top-Ups
 
-| Product | Price | AI Minutes | Expiry |
+| Product | Price | AI Video Minutes | Expiry |
 |---|---|---|---|
-| Top-Up | 50 Stars (~$1.00) | 60 min | Never |
+| Top-Up | 50 Stars (~$1.00) | 60 min | 365 days from last purchase |
 
-Top-ups are available to **all tiers including Free**. A free-tier user who buys a top-up gets audio extraction and 60 AI Minutes without committing to a subscription. Top-up credits are lifetime and survive subscription changes, renewals, and downgrades.
+Top-ups are available to **all tiers including Free**. A free-tier user who buys a top-up gets audio extraction and 60 AI Video Minutes without committing to a subscription.
 
-The `last_topup_at` timestamp is recorded for each purchase. No expiry logic exists today, but the data is captured in case a 1-year expiry policy is added later.
+**Top-up expiry:** Credits expire 365 days after the most recent top-up purchase. Each new purchase resets this window for the entire balance. The expiry is enforced in both the application layer (`SubscriptionInfo::active_topup_seconds()`) and as a nightly database cleanup (`expire_stale_topups()`). The constant `terms::TOPUP_EXPIRY_DAYS = 365` is the single source of truth — the terms text, the application check, and the SQL cleanup all reference it.
 
 ### Cost Structure
 
@@ -128,9 +130,9 @@ WHERE chat_id = $1;
 
 All quotas are stored as `INTEGER` seconds, not `REAL` minutes. IEEE 754 floating-point math introduces rounding errors: `30.1 + 29.9` might equal `59.9999999998`. With integers, `1806 + 1794 == 3600` exactly. Values are displayed to users as minutes (divide by 60) at the presentation layer only.
 
-### Why Top-Ups Never Expire
+### Top-Up Expiry (365 Days)
 
-The maximum API cost for a 60-minute top-up is ~$0.47. If a user buys a top-up, uses 10 minutes, and forgets about the remaining 50 minutes for two years, the "liability" on the database costs nothing. Expiring credits requires extra code to solve a problem that has zero financial impact.
+Top-up credits expire 365 days after the last top-up purchase. Each new purchase resets the window for the whole balance. The rationale: a 60-minute top-up costs at most ~$0.47 in API fees, so there is minimal financial pressure to expire credits. The 365-day policy exists for terms-of-service clarity and to comply with Telegram's requirement that expiry terms be clearly disclosed to users before purchase.
 
 ### Why Free Users Can Use Top-Ups
 
@@ -305,7 +307,8 @@ src/
 
 ```
 src/
-  subscription.rs     - SubscriptionTier enum, SubscriptionInfo struct
+  terms.rs            - TOPUP_EXPIRY_DAYS constant + terms_text() + terms_pre_purchase_prompt()
+  subscription.rs     - SubscriptionTier enum, SubscriptionInfo struct (uses terms::TOPUP_EXPIRY_DAYS)
   premium/
     mod.rs            - PremiumError, cost constants, MAX_PREMIUM_FILE_DURATION_SECS
     audio_extractor.rs - AudioExtractor trait + FfmpegAudioExtractor
@@ -342,12 +345,17 @@ Premium actions do not block downloads and vice versa.
 
 ### Telegram Stars Integration
 
-Telegram Stars is Telegram's built-in payment system. No external payment provider is needed. The flow:
+Telegram Stars is Telegram's built-in payment system. No external payment provider is needed.
+
+**Pre-purchase T&C confirmation flow** (required by Telegram Stars ToS):
 
 ```
 User taps [Basic - 50 Stars/mo]
     |
     v
+Bot shows terms summary + [ I Agree & Buy — 50 ⭐ ] [ Cancel ]
+    |
+    v (user taps I Agree & Buy)
 Bot calls send_invoice(provider_token="", currency="XTR", amount=50)
     |
     v
@@ -364,12 +372,30 @@ Payment succeeds
     --> Bot sends confirmation with quota info
 ```
 
-### Refund Handling
+### Compliance Commands
 
-Telegram allows users to dispute Star payments. On refund:
-- Subscription is immediately revoked (downgraded to Free)
-- Top-up balance is **not** automatically refunded (manual process)
-- User is notified
+Per Telegram Stars terms, the bot must implement:
+
+| Command | Handler | Purpose |
+|---|---|---|
+| `/terms` | `handle_command` → `terms::terms_text()` | Display full Terms of Service |
+| `/support <text>` | `handle_support` | General support; relays to owner via `send_text_no_reply` |
+| `/paysupport <text>` | `handle_support` | Payment support; same relay + includes subscription status |
+| `/reply <chat_id> <msg>` | `handle_reply` (owner-only, hidden) | Owner replies to support request through bot |
+| `/refund <chat_id> <charge_id> <product>` | `handle_refund` (owner-only, hidden) | Issues Telegram refund + revokes access |
+
+The `/reply` and `/refund` commands are hidden (no `description` attribute) and silently ignored for non-owners.
+
+### Refund Policy
+
+**No refund once AI features have been used.** This is stated in the Terms of Service displayed before every purchase. Refunds are only processed for delivery failures (subscription didn't activate, features broken).
+
+When a refund is issued:
+- `sub_basic`/`sub_pro`: `revoke_subscription()` — tier set to Free, `expires_at` cleared
+- `topup_60`: `revoke_topup(chat_id, 3600)` — reduces `topup_seconds_available` by 3600 (clamped to 0)
+- Telegram `refund_star_payment` API is called to return Stars to the user
+
+The `handle_refunded_payment` handler fires if Telegram sends a `RefundedPayment` message (e.g. via a dispute), performing the same revocation.
 
 ### Dispatch Tree
 
@@ -378,11 +404,12 @@ dptree::entry()
     .branch(Update::filter_message()
         .branch(successful_payment_filter)   // MUST be before commands
         .branch(refunded_payment_filter)
-        .branch(commands)                     // /start, /version, /subscribe, /grant
+        .branch(commands)                     // /start, /version, /subscribe, /terms,
+                                             //  /support, /paysupport, /grant, /reply, /refund
         .branch(urls)                         // URL download handler
         .branch(unhandled))
     .branch(Update::filter_callback_query()
-        .endpoint(handle_callback_query))    // inline button presses
+        .endpoint(handle_callback_query))    // inline buttons + T&C agree/cancel
     .branch(Update::filter_pre_checkout_query()
         .endpoint(handle_pre_checkout_query))
 ```
@@ -440,7 +467,7 @@ Revenue is derived from the `payments` table:
 | `DATABASE_URL` | Yes | PostgreSQL connection string (existing) |
 | `DEEPGRAM_API_KEY` | For transcription | Deepgram Nova-3 API key |
 | `GEMINI_API_KEY` | For summarization | Google Gemini API key |
-| `OWNER_CHAT_ID` | For `/grant` | Bot owner's Telegram user ID |
+| `OWNER_CHAT_ID` | For `/grant`, `/reply`, `/refund` | Bot owner's Telegram user ID. Also receives support relay messages. |
 
 ---
 
@@ -453,6 +480,7 @@ The existing hourly cleanup task is expanded:
 | `media_cache` rows (existing) | 7 days | SQL `DELETE` |
 | `/tmp/audio_cache/*.mp3` | 2 hours | Filesystem `modified()` check |
 | `callback_contexts` rows | 24 hours | SQL `DELETE` |
+| `topup_seconds_available` balances | 365 days from `last_topup_at` | `expire_stale_topups()` SQL `UPDATE` |
 
 ---
 
@@ -462,7 +490,7 @@ The existing hourly cleanup task is expanded:
 |---|---|---|
 | 1 | Two-bucket billing (monthly + lifetime top-up) | Prevents "telecom trap" of credits vanishing at renewal. Zero financial liability from non-expiring top-ups. |
 | 2 | Integer seconds, not float minutes | Eliminates IEEE 754 rounding errors in billing arithmetic. |
-| 3 | Unlimited audio extraction | ffmpeg is free (no API cost). Selling point for all premium tiers. |
+| 3 | Unlimited audio extraction (Pro only) | ffmpeg is free (no API cost). Exclusive Pro feature; Basic users and top-up holders can also get it via top-up balance. |
 | 4 | Concurrent extraction + upload | `tokio::join!` hides ffmpeg latency behind the Telegram upload. Zero perceived delay. |
 | 5 | Semaphore (3) + `-threads 1` | Predictable CPU: 1 permit = 1 core. Prevents ffmpeg's default multi-threaded thrashing. |
 | 6 | Duration from ffprobe | Ground truth from the file itself. yt-dlp metadata is unreliable (often `None`). |
