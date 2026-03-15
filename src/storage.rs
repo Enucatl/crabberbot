@@ -96,7 +96,7 @@ impl PostgresStorage {
 
     pub async fn cleanup_expired(pool: &PgPool, ttl_days: i64) {
         let result = sqlx::query(
-            "DELETE FROM media_cache WHERE last_used_at < NOW() - make_interval(days => $1)",
+            "DELETE FROM media_cache WHERE last_used_at < NOW() - make_interval(days => $1::int)",
         )
         .bind(ttl_days)
         .execute(pool)
@@ -300,10 +300,10 @@ impl Storage for PostgresStorage {
         let tier_str = tier.to_string();
         if let Err(e) = sqlx::query(
             "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, updated_at) \
-             VALUES ($1, $2, 0, $3, NOW() + make_interval(days => $4), NOW()) \
+             VALUES ($1, $2, 0, $3, NOW() + make_interval(days => $4::int), NOW()) \
              ON CONFLICT (user_id) DO UPDATE SET \
                tier = $2, ai_seconds_used = 0, ai_seconds_limit = $3, \
-               expires_at = NOW() + make_interval(days => $4), updated_at = NOW()",
+               expires_at = NOW() + make_interval(days => $4::int), updated_at = NOW()",
         )
         .bind(user_id)
         .bind(&tier_str)
@@ -496,7 +496,7 @@ impl Storage for PostgresStorage {
     async fn expire_stale_topups(&self) {
         let result = sqlx::query(
             "UPDATE subscriptions SET topup_seconds_available = 0, updated_at = NOW() \
-             WHERE last_topup_at < NOW() - make_interval(days => $1) \
+             WHERE last_topup_at < NOW() - make_interval(days => $1::int) \
                AND topup_seconds_available > 0",
         )
         .bind(crate::terms::TOPUP_EXPIRY_DAYS)
