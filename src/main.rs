@@ -5,22 +5,27 @@ use std::time::Duration;
 
 use reqwest::Client;
 use teloxide::prelude::*;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use teloxide::types::MessageKind;
 use teloxide::utils::command::BotCommands;
 use thiserror::Error;
 use url::Url;
 
 // Use our library crate
+use crabberbot::commands::{
+    handle_callback_query, handle_grant, handle_pre_checkout_query, handle_refund,
+    handle_refunded_payment, handle_reply, handle_subscribe, handle_successful_payment,
+    handle_support,
+};
 use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
-use crabberbot::handler::{maybe_send_premium_buttons, process_download_request, send_long_text};
+use crabberbot::handler::{maybe_send_premium_buttons, process_download_request};
 use crabberbot::premium::audio_extractor::{AudioExtractor, FfmpegAudioExtractor};
 use crabberbot::premium::summarizer::{GeminiSummarizer, Summarizer};
 use crabberbot::premium::transcriber::{DeepgramTranscriber, Transcriber};
-use crabberbot::premium::{DEEPGRAM_COST_PER_SECOND, GEMINI_COST_PER_SECOND, MAX_PREMIUM_FILE_DURATION_SECS};
+use crabberbot::premium::AUDIO_CACHE_DIR;
 use crabberbot::storage::{PostgresStorage, Storage};
-use crabberbot::subscription::SubscriptionTier;
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
+use crabberbot::terms;
 
 const OVERALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(360);
 
@@ -123,136 +128,27 @@ If you encounter any issues, please double-check the URL or try again later. Not
         Command::Subscribe => {
             handle_subscribe(api, message, storage).await?;
         }
+        Command::Terms => {
+            api.send_text_message(message.chat.id, message.id, &terms::terms_text())
+                .await?;
+        }
+        Command::Support(text) => {
+            handle_support(api, storage, message, text, false, owner_chat_id).await?;
+        }
+        Command::Paysupport(text) => {
+            handle_support(api, storage, message, text, true, owner_chat_id).await?;
+        }
         Command::Grant(args) => {
             handle_grant(api, message, storage, args, owner_chat_id).await?;
         }
+        Command::Reply(args) => {
+            handle_reply(api, message, args, owner_chat_id).await?;
+        }
+        Command::Refund(args) => {
+            handle_refund(api, storage, message, args, owner_chat_id).await?;
+        }
     }
 
-    Ok(())
-}
-
-async fn handle_subscribe(
-    api: Arc<dyn TelegramApi>,
-    message: Message,
-    storage: Arc<dyn Storage>,
-) -> ResponseResult<()> {
-    let sub = storage.get_subscription(message.chat.id.0).await;
-    let status_line = if sub.tier == SubscriptionTier::Free {
-        if sub.topup_seconds_available > 0 {
-            format!(
-                "You have <b>{:.1} AI Minutes</b> of top-up credits remaining.",
-                sub.topup_seconds_available as f64 / 60.0
-            )
-        } else {
-            "You are currently on the <b>Free</b> plan.".to_string()
-        }
-    } else {
-        format!(
-            "You are on the <b>{}</b> plan with <b>{:.1} AI Minutes</b> remaining.",
-            sub.tier,
-            sub.remaining_ai_minutes()
-        )
-    };
-
-    let text = indoc::formatdoc! { "
-{status}
-
-<b>Monthly Plans</b> (AI Minutes reset each month):
-
-<b>Basic</b> — 50 ⭐/mo
-  • Unlimited audio extraction
-  • 60 AI Minutes (transcription + summarization)
-
-<b>Pro</b> — 150 ⭐/mo
-  • Unlimited audio extraction
-  • 200 AI Minutes (transcription + summarization)
-
-<b>Top-Up</b> (never expires):
-  • 60 AI Minutes — 50 ⭐ (one-time, no subscription needed)
-",
-        status = status_line
-    };
-
-    let keyboard = InlineKeyboardMarkup::new(vec![
-        vec![
-            InlineKeyboardButton::callback("Basic — 50 ⭐/mo", "sub:basic"),
-            InlineKeyboardButton::callback("Pro — 150 ⭐/mo", "sub:pro"),
-        ],
-        vec![InlineKeyboardButton::callback(
-            "Top-Up 60 min — 50 ⭐",
-            "topup:60",
-        )],
-    ]);
-
-    api.send_text_with_keyboard(message.chat.id, message.id, &text, keyboard)
-        .await?;
-    Ok(())
-}
-
-async fn handle_grant(
-    api: Arc<dyn TelegramApi>,
-    message: Message,
-    storage: Arc<dyn Storage>,
-    args: String,
-    owner_chat_id: i64,
-) -> ResponseResult<()> {
-    if message.chat.id.0 != owner_chat_id {
-        return Ok(()); // silently ignore non-owner
-    }
-
-    let parts: Vec<&str> = args.trim().split_whitespace().collect();
-    let (target_chat_id, tier_str) = match parts.as_slice() {
-        [chat_id_str, tier] => {
-            let chat_id = match chat_id_str.parse::<i64>() {
-                Ok(id) => id,
-                Err(_) => {
-                    api.send_text_message(
-                        message.chat.id,
-                        message.id,
-                        "Usage: /grant [chat_id] &lt;tier&gt; (tier: basic, pro, free)",
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            };
-            (chat_id, *tier)
-        }
-        [tier] => (message.chat.id.0, *tier),
-        _ => {
-            api.send_text_message(
-                message.chat.id,
-                message.id,
-                "Usage: /grant [chat_id] &lt;tier&gt; (tier: basic, pro, free)",
-            )
-            .await?;
-            return Ok(());
-        }
-    };
-
-    let tier = match tier_str.parse::<SubscriptionTier>() {
-        Ok(t) => t,
-        Err(_) => {
-            api.send_text_message(
-                message.chat.id,
-                message.id,
-                "Unknown tier. Valid: free, basic, pro",
-            )
-            .await?;
-            return Ok(());
-        }
-    };
-
-    // 36500 days ≈ 100 years = effectively permanent
-    storage
-        .upsert_subscription(target_chat_id, tier.clone(), 36500)
-        .await;
-
-    api.send_text_message(
-        message.chat.id,
-        message.id,
-        &format!("Granted {} to chat_id {}", tier, target_chat_id),
-    )
-    .await?;
     Ok(())
 }
 
@@ -324,346 +220,11 @@ async fn handle_url(
 
     // Send premium buttons if we have a download context with video + cached audio
     if let Some(ctx) = download_ctx {
-        maybe_send_premium_buttons(chat_id, message.id, ctx, &*api, &*storage).await;
+        maybe_send_premium_buttons(chat_id, ctx, &*api, &*storage).await;
     }
 
     Ok(())
 }
-
-async fn handle_callback_query(
-    _bot: Bot,
-    api: Arc<dyn TelegramApi>,
-    storage: Arc<dyn Storage>,
-    premium_limiter: Arc<ConcurrencyLimiter>,
-    transcriber: Arc<dyn Transcriber>,
-    summarizer: Arc<dyn Summarizer>,
-    query: CallbackQuery,
-) -> ResponseResult<()> {
-    let data = match query.data.as_deref() {
-        Some(d) => d.to_string(),
-        None => return Ok(()),
-    };
-    let (chat_id, message_id) = match query.message.as_ref() {
-        Some(teloxide::types::MaybeInaccessibleMessage::Regular(msg)) => (msg.chat.id, msg.id),
-        Some(teloxide::types::MaybeInaccessibleMessage::Inaccessible(msg)) => (msg.chat.id, msg.message_id),
-        None => return Ok(()),
-    };
-
-    // Always dismiss spinner immediately
-    let _ = api.answer_callback_query(&query.id.0, None::<String>).await;
-
-    // Handle subscription/topup button presses — no DB lookup needed
-    if data == "sub:basic" || data == "sub:pro" || data == "topup:60" {
-        let (title, description, payload, amount) = match data.as_str() {
-            "sub:basic" => (
-                "Basic Subscription",
-                "60 AI Minutes/month + unlimited audio extraction",
-                "sub_basic",
-                SubscriptionTier::Basic.price_stars(),
-            ),
-            "sub:pro" => (
-                "Pro Subscription",
-                "200 AI Minutes/month + unlimited audio extraction",
-                "sub_pro",
-                SubscriptionTier::Pro.price_stars(),
-            ),
-            _ => (
-                "Top-Up 60 AI Minutes",
-                "Add 60 AI Minutes that never expire (no subscription required)",
-                "topup_60",
-                50u32,
-            ),
-        };
-        let _ = api
-            .send_invoice(chat_id, title, description, payload, amount)
-            .await;
-        return Ok(());
-    }
-
-    // Parse action:context_id
-    let (action, context_id_str) = match data.split_once(':') {
-        Some(pair) => pair,
-        None => return Ok(()),
-    };
-    let context_id: i32 = match context_id_str.parse() {
-        Ok(id) => id,
-        Err(_) => return Ok(()),
-    };
-
-    let ctx = match storage.get_callback_context(context_id).await {
-        Some(ctx) => ctx,
-        None => {
-            let _ = api
-                .send_text_message(
-                    chat_id,
-                    message_id,
-                    "This action has expired. Please download the video again.",
-                )
-                .await;
-            return Ok(());
-        }
-    };
-
-    // Check audio cache file exists
-    let audio_path = match &ctx.audio_cache_path {
-        Some(p) => std::path::PathBuf::from(p),
-        None => {
-            let _ = api
-                .send_text_message(
-                    chat_id,
-                    message_id,
-                    "This action has expired. Please download the video again.",
-                )
-                .await;
-            return Ok(());
-        }
-    };
-
-    if !audio_path.exists() {
-        let _ = api
-            .send_text_message(
-                chat_id,
-                message_id,
-                "This action has expired. Please download the video again.",
-            )
-            .await;
-        return Ok(());
-    }
-
-    // Per-chat premium concurrency lock
-    let _guard = match premium_limiter.try_lock(chat_id) {
-        Some(g) => g,
-        None => {
-            let _ = api
-                .send_text_message(
-                    chat_id,
-                    message_id,
-                    "I'm already processing a premium action for you. Please wait.",
-                )
-                .await;
-            return Ok(());
-        }
-    };
-
-    match action {
-        "audio" => {
-            let sub = storage.get_subscription(chat_id.0).await;
-            if !sub.can_extract_audio() {
-                let _ = api
-                    .send_text_message(
-                        chat_id,
-                        message_id,
-                        "Audio extraction requires a subscription or top-up credits. Use /subscribe to get started.",
-                    )
-                    .await;
-                return Ok(());
-            }
-            if let Err(e) = api
-                .send_audio(chat_id, message_id, &audio_path, "Extracted audio")
-                .await
-            {
-                log::error!("Failed to send audio: {}", e);
-                let _ = api
-                    .send_text_message(chat_id, message_id, "Sorry, failed to send the audio.")
-                    .await;
-                return Ok(());
-            }
-            storage
-                .record_premium_usage(
-                    chat_id.0,
-                    "audio_extract",
-                    &ctx.source_url,
-                    ctx.media_duration_secs.unwrap_or(0),
-                    0.0,
-                )
-                .await;
-        }
-        "txn" | "sum" => {
-            let sub = storage.get_subscription(chat_id.0).await;
-            let duration_secs = ctx.media_duration_secs.unwrap_or(0);
-
-            // Per-file duration gate
-            if duration_secs > MAX_PREMIUM_FILE_DURATION_SECS {
-                let _ = api
-                    .send_text_message(
-                        chat_id,
-                        message_id,
-                        &format!(
-                            "AI features are limited to videos under {} minutes.",
-                            MAX_PREMIUM_FILE_DURATION_SECS / 60
-                        ),
-                    )
-                    .await;
-                return Ok(());
-            }
-
-            // Quota check
-            if !sub.can_use_ai(duration_secs) {
-                let _ = api
-                    .send_text_message(
-                        chat_id,
-                        message_id,
-                        &format!(
-                            "You have {:.1} AI Minutes remaining. Need more? /subscribe to upgrade or buy a top-up.",
-                            sub.remaining_ai_minutes()
-                        ),
-                    )
-                    .await;
-                return Ok(());
-            }
-
-            api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
-                .await?;
-
-            // Transcribe
-            let transcript = match transcriber.transcribe(&audio_path).await {
-                Ok(t) => t,
-                Err(e) => {
-                    log::error!("Transcription failed: {}", e);
-                    let _ = api
-                        .send_text_message(
-                            chat_id,
-                            message_id,
-                            "Sorry, transcription failed. Please try again later.",
-                        )
-                        .await;
-                    return Ok(()); // no quota deduction
-                }
-            };
-
-            if action == "txn" {
-                // Send transcript (split if needed)
-                send_long_text(chat_id, message_id, &transcript, &*api).await;
-                // Deduct quota only on success
-                storage.consume_ai_seconds(chat_id.0, duration_secs).await;
-                storage
-                    .record_premium_usage(
-                        chat_id.0,
-                        "transcribe",
-                        &ctx.source_url,
-                        duration_secs,
-                        duration_secs as f64 * DEEPGRAM_COST_PER_SECOND,
-                    )
-                    .await;
-            } else {
-                // Summarize
-                let summary = match summarizer.summarize(&transcript).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::error!("Summarization failed: {}", e);
-                        let _ = api
-                            .send_text_message(
-                                chat_id,
-                                message_id,
-                                "Sorry, summarization failed. Please try again later.",
-                            )
-                            .await;
-                        return Ok(()); // no quota deduction
-                    }
-                };
-                send_long_text(chat_id, message_id, &summary, &*api).await;
-                // Deduct quota only on success
-                storage.consume_ai_seconds(chat_id.0, duration_secs).await;
-                storage
-                    .record_premium_usage(
-                        chat_id.0,
-                        "summarize",
-                        &ctx.source_url,
-                        duration_secs,
-                        duration_secs as f64 * (DEEPGRAM_COST_PER_SECOND + GEMINI_COST_PER_SECOND),
-                    )
-                    .await;
-            }
-        }
-        _ => {}
-    }
-
-    Ok(())
-}
-
-async fn handle_pre_checkout_query(
-    _bot: Bot,
-    api: Arc<dyn TelegramApi>,
-    query: PreCheckoutQuery,
-) -> ResponseResult<()> {
-    let payload = &query.invoice_payload;
-    let ok = payload.starts_with("sub_") || payload.starts_with("topup_");
-    let error_msg: Option<String> = if ok {
-        None
-    } else {
-        Some("Unknown product".to_string())
-    };
-    api.answer_pre_checkout_query(&query.id.0, ok, error_msg)
-        .await?;
-    Ok(())
-}
-
-async fn handle_successful_payment(
-    api: Arc<dyn TelegramApi>,
-    storage: Arc<dyn Storage>,
-    message: Message,
-) -> ResponseResult<()> {
-    let payment = match message.successful_payment() {
-        Some(p) => p,
-        None => return Ok(()),
-    };
-
-    let chat_id = message.chat.id;
-    let product = &payment.invoice_payload;
-    let amount = payment.total_amount;
-
-    storage
-        .record_payment(
-            chat_id.0,
-            &payment.telegram_payment_charge_id.0,
-            &payment.provider_payment_charge_id,
-            product,
-            amount as i32,
-        )
-        .await;
-
-    match product.as_str() {
-        "sub_basic" => {
-            storage
-                .upsert_subscription(chat_id.0, SubscriptionTier::Basic, 30)
-                .await;
-            api.send_text_message(
-                chat_id,
-                message.id,
-                "Thank you! Your <b>Basic</b> subscription is now active.\n\
-                 You have <b>60 AI Minutes</b> this month. Enjoy unlimited audio extraction!",
-            )
-            .await?;
-        }
-        "sub_pro" => {
-            storage
-                .upsert_subscription(chat_id.0, SubscriptionTier::Pro, 30)
-                .await;
-            api.send_text_message(
-                chat_id,
-                message.id,
-                "Thank you! Your <b>Pro</b> subscription is now active.\n\
-                 You have <b>200 AI Minutes</b> this month. Enjoy unlimited audio extraction!",
-            )
-            .await?;
-        }
-        "topup_60" => {
-            storage.add_topup_seconds(chat_id.0, 3600).await;
-            api.send_text_message(
-                chat_id,
-                message.id,
-                "Thank you! <b>60 AI Minutes</b> have been added to your account. These never expire!",
-            )
-            .await?;
-        }
-        _ => {
-            log::warn!("Unknown payment product: {}", product);
-        }
-    }
-
-    Ok(())
-}
-
 
 // Required catch-all branch — silently ignore messages that are neither commands nor URLs.
 async fn handle_unhandled_message(
@@ -687,10 +248,18 @@ enum Command {
     Version,
     #[command(description = "show bot environment.")]
     Environment,
-    #[command(description = "subscribe or buy AI Minutes top-up.")]
+    #[command(description = "subscribe or buy AI Video Minutes top-up.")]
     Subscribe,
-    #[command(description = "grant subscription (owner only).")]
+    #[command(description = "view Terms of Service.")]
+    Terms,
+    #[command(description = "contact customer support.")]
+    Support(String),
+    #[command(description = "get help with a payment issue.")]
+    Paysupport(String),
+    // Hidden owner-only commands — no description so they are omitted from /help
     Grant(String),
+    Reply(String),
+    Refund(String),
 }
 
 #[tokio::main]
@@ -717,7 +286,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Starting CrabberBot version {}", version);
 
     // Ensure audio cache directory exists
-    std::fs::create_dir_all("/tmp/audio_cache").expect("Failed to create /tmp/audio_cache");
+    std::fs::create_dir_all(AUDIO_CACHE_DIR)
+        .expect("Failed to create audio cache directory");
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = sqlx::PgPool::connect(&database_url)
@@ -737,6 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             interval.tick().await;
             PostgresStorage::cleanup_expired(&cleanup_pool, 7).await;
             cleanup_storage.cleanup_expired_callback_contexts().await;
+            cleanup_storage.expire_stale_topups().await;
             cleanup_audio_cache().await;
         }
     });
@@ -748,6 +319,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("DEEPGRAM_API_KEY").unwrap_or_else(|_| String::new());
     let gemini_api_key =
         std::env::var("GEMINI_API_KEY").unwrap_or_else(|_| String::new());
+    if deepgram_api_key.is_empty() || gemini_api_key.is_empty() {
+        log::warn!(
+            "DEEPGRAM_API_KEY and/or GEMINI_API_KEY not set — transcription and summarization will be unavailable"
+        );
+    }
     let owner_chat_id: i64 = std::env::var("OWNER_CHAT_ID")
         .unwrap_or_else(|_| "0".to_string())
         .parse()
@@ -803,6 +379,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let successful_payment_filter = dptree::filter(|msg: Message| {
         msg.successful_payment().is_some()
     });
+    let refunded_payment_filter = dptree::filter(|msg: Message| {
+        matches!(msg.kind, MessageKind::RefundedPayment(_))
+    });
 
     let commands = dptree::entry()
         .filter_command::<Command>()
@@ -818,6 +397,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     successful_payment_filter
                         .endpoint(|api: Arc<dyn TelegramApi>, storage: Arc<dyn Storage>, msg: Message| async move {
                             handle_successful_payment(api, storage, msg).await
+                        }),
+                )
+                .branch(
+                    refunded_payment_filter
+                        .endpoint(|api: Arc<dyn TelegramApi>, storage: Arc<dyn Storage>, msg: Message| async move {
+                            handle_refunded_payment(api, storage, msg).await
                         }),
                 )
                 .branch(commands)
@@ -856,21 +441,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Delete audio cache files older than 2 hours.
 async fn cleanup_audio_cache() {
-    let audio_cache_dir = std::path::PathBuf::from("/tmp/audio_cache");
-    let entries = match std::fs::read_dir(&audio_cache_dir) {
+    let mut entries = match tokio::fs::read_dir(AUDIO_CACHE_DIR).await {
         Ok(e) => e,
         Err(e) => {
             log::warn!("Failed to read audio cache dir: {}", e);
             return;
         }
     };
-    for entry in entries.flatten() {
-        if let Ok(metadata) = entry.metadata() {
-            if let Ok(modified) = metadata.modified() {
-                if modified.elapsed().unwrap_or_default() > Duration::from_secs(7200) {
-                    let _ = std::fs::remove_file(entry.path());
-                    log::info!("Removed stale audio cache: {:?}", entry.path());
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                if let Ok(metadata) = entry.metadata().await {
+                    if let Ok(modified) = metadata.modified() {
+                        if modified.elapsed().unwrap_or_default() > Duration::from_secs(7200) {
+                            let _ = tokio::fs::remove_file(entry.path()).await;
+                            log::info!("Removed stale audio cache: {:?}", entry.path());
+                        }
+                    }
                 }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                log::warn!("Error reading audio cache entry: {}", e);
+                break;
             }
         }
     }

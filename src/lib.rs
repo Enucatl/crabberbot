@@ -1,4 +1,6 @@
+pub mod commands;
 pub mod concurrency;
+pub mod terms;
 pub mod downloader;
 pub mod handler;
 pub mod premium;

@@ -30,3 +30,4 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 mockall = "0.13"
+tempfile = "3"
