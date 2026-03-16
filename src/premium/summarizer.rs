@@ -11,13 +11,17 @@ pub enum SummarizationError {
     ApiError(String),
 }
 
+pub struct GeminiResult {
+    pub text: String,
+    pub prompt_tokens: u64,
+    pub output_tokens: u64,
+}
+
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait Summarizer: Send + Sync {
-    /// Returns `(summary_text, prompt_tokens, output_tokens)`.
-    async fn summarize(&self, transcript: &str, language: Option<String>) -> Result<(String, u64, u64), SummarizationError>;
-    /// Returns `(corrected_text, prompt_tokens, output_tokens)`.
-    async fn correct_transcript(&self, transcript: &str, language: Option<String>) -> Result<(String, u64, u64), SummarizationError>;
+    async fn summarize(&self, transcript: &str, language: Option<String>) -> Result<GeminiResult, SummarizationError>;
+    async fn correct_transcript(&self, transcript: &str, language: Option<String>) -> Result<GeminiResult, SummarizationError>;
 }
 
 pub struct GeminiSummarizer {
@@ -93,7 +97,7 @@ impl GeminiSummarizer {
 
 #[async_trait]
 impl Summarizer for GeminiSummarizer {
-    async fn summarize(&self, transcript: &str, language: Option<String>) -> Result<String, SummarizationError> {
+    async fn summarize(&self, transcript: &str, language: Option<String>) -> Result<GeminiResult, SummarizationError> {
         let language_hint = match &language {
             Some(lang) => format!("The two-letter code for the language is: {}. Answer only in that language.\n\n", lang),
             None => String::new(),
@@ -113,10 +117,10 @@ impl Summarizer for GeminiSummarizer {
         let cost = prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS
             + output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
         log::info!("Gemini summarize: tokens in={} out={} cost=${:.6}", prompt_tokens, output_tokens, cost);
-        Ok((text, prompt_tokens, output_tokens))
+        Ok(GeminiResult { text, prompt_tokens, output_tokens })
     }
 
-    async fn correct_transcript(&self, transcript: &str, language: Option<String>) -> Result<String, SummarizationError> {
+    async fn correct_transcript(&self, transcript: &str, language: Option<String>) -> Result<GeminiResult, SummarizationError> {
         let language_hint = match &language {
             Some(lang) => format!("The two-letter code for the language is: {}.\nKeep this in mind and answer only in the same language.\n\n", lang),
             None => String::new(),
@@ -143,6 +147,6 @@ impl Summarizer for GeminiSummarizer {
         let cost = prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS
             + output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
         log::info!("Gemini correction: tokens in={} out={} cost=${:.6}", prompt_tokens, output_tokens, cost);
-        Ok((text.trim().to_string(), prompt_tokens, output_tokens))
+        Ok(GeminiResult { text: text.trim().to_string(), prompt_tokens, output_tokens })
     }
 }

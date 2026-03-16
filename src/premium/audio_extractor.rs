@@ -28,8 +28,8 @@ pub trait AudioExtractor: Send + Sync {
     async fn extract_audio(
         &self,
         video_path: &Path,
-        title: Option<&str>,
-        author: Option<&str>,
+        title: Option<String>,
+        author: Option<String>,
     ) -> Result<AudioExtractionResult, AudioExtractionError>;
 }
 
@@ -50,8 +50,8 @@ impl AudioExtractor for FfmpegAudioExtractor {
     async fn extract_audio(
         &self,
         video_path: &Path,
-        title: Option<&str>,
-        author: Option<&str>,
+        title: Option<String>,
+        author: Option<String>,
     ) -> Result<AudioExtractionResult, AudioExtractionError> {
         let _permit = self.semaphore.acquire().await.expect("semaphore closed");
 
@@ -98,11 +98,11 @@ impl AudioExtractor for FfmpegAudioExtractor {
         ]);
         if let Some(t) = title {
             let truncated: String = t.chars().take(MAX_TAG_LEN).collect();
-            cmd.args(["-metadata", &format!("title={}", truncated)]);
+            cmd.args(["-metadata", &format!("title={truncated}")]);
         }
         if let Some(a) = author {
             let truncated: String = a.chars().take(MAX_TAG_LEN).collect();
-            cmd.args(["-metadata", &format!("artist={}", truncated)]);
+            cmd.args(["-metadata", &format!("artist={truncated}")]);
         }
         cmd.args(["-y"]).arg(&audio_path);
 

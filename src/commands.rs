@@ -9,7 +9,7 @@ use teloxide::types::{
 use crate::concurrency::ConcurrencyLimiter;
 use crate::handler::{send_long_text, CallbackContext};
 use crate::premium::summarizer::Summarizer;
-use crate::premium::transcriber::Transcriber;
+use crate::premium::transcriber::{DeepgramUsage, Transcriber};
 use crate::premium::{
     GEMINI_INPUT_COST_PER_MILLION_TOKENS, GEMINI_OUTPUT_COST_PER_MILLION_TOKENS,
     MAX_PREMIUM_FILE_DURATION_SECS,
@@ -894,18 +894,19 @@ async fn handle_transcription(
     api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
 
     // Use cached transcript if available; otherwise call Deepgram and persist.
-    // deepgram_usage = Some((billed_duration_secs, cost_usd)) when Deepgram was called.
+    // deepgram_usage = Some(DeepgramUsage { ... }) when Deepgram was actually called.
     let (raw_transcript, detected_language, deepgram_usage) =
         if let Some(cached) = &ctx.transcript {
-            (cached.clone(), ctx.transcript_language.clone(), None)
+            (cached.clone(), ctx.transcript_language.clone(), None::<DeepgramUsage>)
         } else {
             let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
             match transcriber.transcribe(&audio_path).await {
                 Ok(t) => {
                     storage
-                        .cache_transcript(context_id, &t.transcript, t.detected_language.as_deref())
+                        .cache_transcript(context_id, &t.transcript, t.detected_language.clone())
                         .await;
-                    (t.transcript, t.detected_language, Some((t.billed_duration_secs, t.cost_usd)))
+                    let usage = DeepgramUsage { billed_duration_secs: t.billed_duration_secs, cost_usd: t.cost_usd };
+                    (t.transcript, t.detected_language, Some(usage))
                 }
                 Err(e) => {
                     log::error!("Transcription failed: {}", e);
@@ -921,37 +922,37 @@ async fn handle_transcription(
             }
         };
 
-    let (transcript, correction_prompt_tokens, correction_output_tokens) = match summarizer
+    let correction = match summarizer
         .correct_transcript(&raw_transcript, detected_language)
         .await
     {
         Ok(result) => result,
         Err(e) => {
             log::error!("Transcript correction failed: {}", e);
-            (raw_transcript, 0, 0)
+            crate::premium::summarizer::GeminiResult { text: raw_transcript, prompt_tokens: 0, output_tokens: 0 }
         }
     };
 
-    send_long_text(chat_id, message_id, &transcript, api).await;
+    send_long_text(chat_id, message_id, &correction.text, api).await;
 
     // Only deduct quota and record Deepgram cost when it was actually called.
-    if let Some((billed_secs, cost)) = deepgram_usage {
+    if let Some(dg) = deepgram_usage {
         storage.consume_ai_seconds(user_id, duration_secs).await;
         storage
-            .record_premium_usage(user_id, "transcribe", &ctx.source_url, duration_secs, billed_secs, cost)
+            .record_premium_usage(user_id, "transcribe", &ctx.source_url, duration_secs, dg.billed_duration_secs, dg.cost_usd)
             .await;
     }
     // Always record Gemini token usage for analytics (does not affect user quota).
-    if correction_prompt_tokens > 0 {
-        let input_cost = correction_prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
+    if correction.prompt_tokens > 0 {
+        let input_cost = correction.prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
         storage
-            .record_premium_usage(user_id, "gemini_correction_input", &ctx.source_url, 0, correction_prompt_tokens as f64, input_cost)
+            .record_premium_usage(user_id, "gemini_correction_input", &ctx.source_url, 0, correction.prompt_tokens as f64, input_cost)
             .await;
     }
-    if correction_output_tokens > 0 {
-        let output_cost = correction_output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+    if correction.output_tokens > 0 {
+        let output_cost = correction.output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
         storage
-            .record_premium_usage(user_id, "gemini_correction_output", &ctx.source_url, 0, correction_output_tokens as f64, output_cost)
+            .record_premium_usage(user_id, "gemini_correction_output", &ctx.source_url, 0, correction.output_tokens as f64, output_cost)
             .await;
     }
     Ok(())
@@ -1002,18 +1003,19 @@ async fn handle_summarization(
     api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
 
     // Use cached transcript if available; otherwise call Deepgram and persist.
-    // deepgram_usage = Some((billed_duration_secs, cost_usd)) when Deepgram was called.
+    // deepgram_usage = Some(DeepgramUsage { ... }) when Deepgram was actually called.
     let (raw_transcript, detected_language, deepgram_usage) =
         if let Some(cached) = &ctx.transcript {
-            (cached.clone(), ctx.transcript_language.clone(), None)
+            (cached.clone(), ctx.transcript_language.clone(), None::<DeepgramUsage>)
         } else {
             let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
             match transcriber.transcribe(&audio_path).await {
                 Ok(t) => {
                     storage
-                        .cache_transcript(context_id, &t.transcript, t.detected_language.as_deref())
+                        .cache_transcript(context_id, &t.transcript, t.detected_language.clone())
                         .await;
-                    (t.transcript, t.detected_language, Some((t.billed_duration_secs, t.cost_usd)))
+                    let usage = DeepgramUsage { billed_duration_secs: t.billed_duration_secs, cost_usd: t.cost_usd };
+                    (t.transcript, t.detected_language, Some(usage))
                 }
                 Err(e) => {
                     log::error!("Transcription failed: {}", e);
@@ -1029,7 +1031,7 @@ async fn handle_summarization(
             }
         };
 
-    let (summary, summarize_prompt_tokens, summarize_output_tokens) = match summarizer.summarize(&raw_transcript, detected_language).await {
+    let summary = match summarizer.summarize(&raw_transcript, detected_language).await {
         Ok(result) => result,
         Err(e) => {
             log::error!("Summarization failed: {}", e);
@@ -1044,26 +1046,26 @@ async fn handle_summarization(
         }
     };
 
-    send_long_text(chat_id, message_id, &summary, api).await;
+    send_long_text(chat_id, message_id, &summary.text, api).await;
 
     // Only deduct quota and record Deepgram cost when it was actually called.
-    if let Some((billed_secs, cost)) = deepgram_usage {
+    if let Some(dg) = deepgram_usage {
         storage.consume_ai_seconds(user_id, duration_secs).await;
         storage
-            .record_premium_usage(user_id, "summarize", &ctx.source_url, duration_secs, billed_secs, cost)
+            .record_premium_usage(user_id, "summarize", &ctx.source_url, duration_secs, dg.billed_duration_secs, dg.cost_usd)
             .await;
     }
     // Always record Gemini token usage for analytics (does not affect user quota).
-    if summarize_prompt_tokens > 0 {
-        let input_cost = summarize_prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
+    if summary.prompt_tokens > 0 {
+        let input_cost = summary.prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
         storage
-            .record_premium_usage(user_id, "gemini_summarize_input", &ctx.source_url, 0, summarize_prompt_tokens as f64, input_cost)
+            .record_premium_usage(user_id, "gemini_summarize_input", &ctx.source_url, 0, summary.prompt_tokens as f64, input_cost)
             .await;
     }
-    if summarize_output_tokens > 0 {
-        let output_cost = summarize_output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+    if summary.output_tokens > 0 {
+        let output_cost = summary.output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
         storage
-            .record_premium_usage(user_id, "gemini_summarize_output", &ctx.source_url, 0, summarize_output_tokens as f64, output_cost)
+            .record_premium_usage(user_id, "gemini_summarize_output", &ctx.source_url, 0, summary.output_tokens as f64, output_cost)
             .await;
     }
     Ok(())
@@ -1478,7 +1480,7 @@ mod tests {
         mock_summarizer
             .expect_correct_transcript()
             .times(1)
-            .returning(|_, _| Ok(("Corrected transcript.".to_string(), 1000u64, 500u64)));
+            .returning(|_, _| Ok(crate::premium::summarizer::GeminiResult { text: "Corrected transcript.".to_string(), prompt_tokens: 1000, output_tokens: 500 }));
 
         mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
 
@@ -1530,7 +1532,7 @@ mod tests {
         mock_summarizer
             .expect_correct_transcript()
             .times(1)
-            .returning(|_, _| Ok(("Corrected.".to_string(), 800u64, 400u64)));
+            .returning(|_, _| Ok(crate::premium::summarizer::GeminiResult { text: "Corrected.".to_string(), prompt_tokens: 800, output_tokens: 400 }));
 
         mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
 
@@ -1593,10 +1595,11 @@ mod tests {
     async fn test_transcription_over_duration_limit() {
         // Video exceeds 30-minute cap → error message, nothing else called.
         let mut mock_api = MockTelegramApi::new();
-        let mock_storage = MockStorage::new();
+        let mut mock_storage = MockStorage::new();
         let mock_transcriber = MockTranscriber::new();
         let mock_summarizer = MockSummarizer::new();
 
+        mock_storage.expect_get_subscription().returning(|_| active_basic_with_quota());
         mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
 
         let ctx = CallbackContext {
@@ -1640,7 +1643,7 @@ mod tests {
         mock_summarizer
             .expect_summarize()
             .times(1)
-            .returning(|_, _| Ok(("• Point one\n\n• Point two".to_string(), 1200u64, 60u64)));
+            .returning(|_, _| Ok(crate::premium::summarizer::GeminiResult { text: "• Point one\n\n• Point two".to_string(), prompt_tokens: 1200, output_tokens: 60 }));
 
         mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
 
@@ -1691,7 +1694,7 @@ mod tests {
         mock_summarizer
             .expect_summarize()
             .times(1)
-            .returning(|_, _| Ok(("• Point one".to_string(), 900u64, 30u64)));
+            .returning(|_, _| Ok(crate::premium::summarizer::GeminiResult { text: "• Point one".to_string(), prompt_tokens: 900, output_tokens: 30 }));
 
         mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
 

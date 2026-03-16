@@ -25,6 +25,12 @@ pub struct TranscriptionResult {
     pub cost_usd: f64,
 }
 
+/// Billing information from a Deepgram call, used to record usage and deduct quota.
+pub struct DeepgramUsage {
+    pub billed_duration_secs: f64,
+    pub cost_usd: f64,
+}
+
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait Transcriber: Send + Sync {

@@ -517,7 +517,7 @@ pub async fn process_download_request(
         DownloadedMedia::Single(item) if item.media_type == MediaType::Video => {
             let (send_result, audio_result) = tokio::join!(
                 send_single_item(item, &caption, chat_id, message_id, telegram_api),
-                audio_extractor.extract_audio(&item.filepath, info.title.as_deref(), info.uploader.as_deref())
+                audio_extractor.extract_audio(&item.filepath, info.title.clone(), info.uploader.clone())
             );
             let (file_ids, sent_msg_id) = match send_result {
                 Some((file_id, media_type, msg_id)) => (Some(vec![(file_id, media_type)]), Some(msg_id)),

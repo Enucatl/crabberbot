@@ -85,7 +85,7 @@ pub trait Storage: Send + Sync {
     // Callback context
     async fn store_callback_context(&self, ctx: &CallbackContext) -> i32;
     async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext>;
-    async fn cache_transcript(&self, context_id: i32, transcript: &str, language: Option<&str>);
+    async fn cache_transcript(&self, context_id: i32, transcript: &str, language: Option<String>);
 
     // Subscription downgrade (for refunds)
     async fn revoke_subscription(&self, user_id: i64);
@@ -505,7 +505,7 @@ impl Storage for PostgresStorage {
         })
     }
 
-    async fn cache_transcript(&self, context_id: i32, transcript: &str, language: Option<&str>) {
+    async fn cache_transcript(&self, context_id: i32, transcript: &str, language: Option<String>) {
         if let Err(e) = sqlx::query(
             "UPDATE callback_contexts SET transcript = $1, transcript_language = $2 WHERE id = $3",
         )

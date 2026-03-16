@@ -79,10 +79,12 @@ Top-ups are available to **all tiers including Free**. A free-tier user who buys
 | Service | Cost | Billing model |
 |---|---|---|
 | ffmpeg audio extraction | $0.00 | Free (local CPU) |
-| Deepgram Nova-3 transcription | $0.0078/min ($0.00013/sec) | Per audio second processed |
-| Google Gemini summarization | ~$0.004/hr ($0.0000011/sec) | Per audio second (bundled with transcription) |
+| Deepgram Nova-3 transcription | $0.0078/min ($0.00013/sec) | Per audio second, billed duration from `metadata.duration` in API response |
+| Google Gemini summarization | $0.25/M input tokens, $1.50/M output tokens | Per token, token counts from `usageMetadata` in API response |
 
-Gemini's cost is negligible (~0.5% of Deepgram), so summarization is bundled free with transcription from a billing perspective.
+Gemini's cost is negligible compared to Deepgram, so from a **user quota perspective** Gemini is free. AI Seconds are only deducted when Deepgram is actually called. Gemini costs are recorded for analytics only.
+
+The billed Deepgram duration is taken from `json["metadata"]["duration"]` in the API response, not estimated from video duration. This is the authoritative value Deepgram uses for billing.
 
 ### Owner Grants
 
@@ -201,12 +203,16 @@ CREATE TABLE premium_usage (
     source_url TEXT NOT NULL,
     duration_secs INTEGER NOT NULL DEFAULT 0,
     estimated_cost_usd REAL NOT NULL DEFAULT 0.0,
+    units REAL NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
-- `feature`: `'transcribe'`, `'summarize'`, or `'audio_extract'`.
-- `estimated_cost_usd`: calculated at write time as `duration_secs * COST_PER_SECOND`. Audio extraction records $0.00.
+- `feature`: one of `'transcribe'`, `'summarize'`, `'audio_extract'`, `'gemini_correction_input'`, `'gemini_correction_output'`, `'gemini_summarize_input'`, `'gemini_summarize_output'`.
+- `estimated_cost_usd`: calculated at write time from API-reported quantities.
+- `units`: raw quantity as reported by the API — audio seconds (Deepgram `metadata.duration`) for `'transcribe'`/`'summarize'` rows; token count for Gemini rows. Audio extraction records 0.
+- Gemini rows (`gemini_*`) record token costs for analytics only; they do not trigger quota deduction.
+- `duration_secs`: video duration from ffprobe, used for quota deduction (Deepgram rows only).
 
 ### `callback_contexts`
 
@@ -220,12 +226,16 @@ CREATE TABLE callback_contexts (
     has_video BOOLEAN NOT NULL DEFAULT TRUE,
     media_duration_secs INTEGER,
     audio_cache_path TEXT,
+    transcript TEXT,
+    transcript_language TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
 - `media_duration_secs`: from ffprobe (ground truth), not yt-dlp metadata.
 - `audio_cache_path`: path to cached `.mp3` in `/tmp/audio_cache/`.
+- `transcript`: populated after the first Deepgram call; subsequent Transcribe or Summarize button clicks read from here, skipping Deepgram entirely.
+- `transcript_language`: BCP-47 language code (`"it"`, `"en"`, …) detected by Deepgram and cached alongside the transcript.
 - Rows older than 24 hours are cleaned up by the hourly task.
 
 ### Entity Relationship
@@ -422,13 +432,18 @@ All monitoring data lives in the bot's PostgreSQL database. No external billing 
 
 ### Cost Tracking
 
-Every `record_premium_usage` call calculates cost at write time using hardcoded per-second rates:
+Every `record_premium_usage` call records cost calculated from API-reported quantities:
 
-| Feature | Rate | Source |
+| Feature row | Rate | Source of `units` |
 |---|---|---|
-| Transcription | $0.00013/sec | Deepgram Nova-3 |
-| Summarization | $0.0000011/sec | Google Gemini |
-| Audio extraction | $0.00 | ffmpeg (local) |
+| `transcribe` / `summarize` | $0.00013/sec | Deepgram `metadata.duration` (billed audio seconds) |
+| `gemini_correction_input` | $0.25 / 1M tokens | Gemini `usageMetadata.promptTokenCount` |
+| `gemini_correction_output` | $1.50 / 1M tokens | Gemini `usageMetadata.candidatesTokenCount` |
+| `gemini_summarize_input` | $0.25 / 1M tokens | Gemini `usageMetadata.promptTokenCount` |
+| `gemini_summarize_output` | $1.50 / 1M tokens | Gemini `usageMetadata.candidatesTokenCount` |
+| `audio_extract` | $0.00 | ffmpeg (local CPU) |
+
+Deepgram rows also carry `duration_secs` (video duration from ffprobe) for quota deduction purposes. Gemini rows set `duration_secs = 0` — they are analytics-only.
 
 ### Revenue Tracking
 
@@ -501,3 +516,7 @@ The existing hourly cleanup task is expanded:
 | 11 | Failed actions are free | AI Seconds deducted only after successful API response. |
 | 12 | Consolidated cost monitoring | All costs and revenue in PostgreSQL, queryable from Grafana. No external billing scraping. |
 | 13 | Free users can use top-ups | No subscription lock-in. Low-commitment entry point to premium features. |
+| 14 | Transcript cached in `callback_contexts` | Deepgram is the most expensive API call (~$0.00013/sec). A second click on Transcribe or Summarize reads `transcript` from the DB, skipping Deepgram entirely. No duplicate billing; AI Seconds deducted only when Deepgram is actually called. |
+| 15 | Gemini cost is free to users | Gemini token cost is negligible vs Deepgram. Only Deepgram calls consume AI Seconds quota. Gemini usage is still recorded in `premium_usage` (with separate input/output rows) for cost analytics, but does not deduct from any user balance. |
+| 16 | Actual API quantities in `units` column | Both Deepgram (`metadata.duration`) and Gemini (`usageMetadata` token counts) report what they actually billed. Storing these raw numbers in `premium_usage.units` gives undisputable audit data, independent of any application-side estimates. |
+| 17 | ID3 tags in MP3 files | ffmpeg `-metadata title=` / `-metadata artist=` embed video title and uploader into the extracted MP3. Tags are truncated to 255 Unicode codepoints (`.chars().take(255)`) — this is safe for multi-byte UTF-8 because `.chars()` iterates over codepoints, not bytes. |
