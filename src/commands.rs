@@ -10,7 +10,10 @@ use crate::concurrency::ConcurrencyLimiter;
 use crate::handler::{send_long_text, CallbackContext};
 use crate::premium::summarizer::Summarizer;
 use crate::premium::transcriber::Transcriber;
-use crate::premium::{DEEPGRAM_COST_PER_SECOND, GEMINI_COST_PER_SECOND, MAX_PREMIUM_FILE_DURATION_SECS};
+use crate::premium::{
+    GEMINI_INPUT_COST_PER_MILLION_TOKENS, GEMINI_OUTPUT_COST_PER_MILLION_TOKENS,
+    MAX_PREMIUM_FILE_DURATION_SECS,
+};
 use crate::storage::Storage;
 use crate::subscription::{
     SubscriptionTier, PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, TOPUP_PRICE_STARS,
@@ -734,8 +737,8 @@ pub async fn handle_callback_query(
 
     match action {
         "audio" => handle_audio_extraction(&ctx, user_id, chat_id, message_id, &*api, &*storage).await?,
-        "txn" => handle_transcription(&ctx, user_id, chat_id, message_id, &*api, &*storage, &*transcriber, &*summarizer).await?,
-        "sum" => handle_summarization(&ctx, user_id, chat_id, message_id, &*api, &*storage, &*transcriber, &*summarizer).await?,
+        "txn" => handle_transcription(context_id, &ctx, user_id, chat_id, message_id, &*api, &*storage, &*transcriber, &*summarizer).await?,
+        "sum" => handle_summarization(context_id, &ctx, user_id, chat_id, message_id, &*api, &*storage, &*transcriber, &*summarizer).await?,
         _ => {}
     }
 
@@ -841,18 +844,13 @@ async fn handle_audio_extraction(
         storage.consume_ai_seconds(user_id, duration_secs).await;
     }
     storage
-        .record_premium_usage(
-            user_id,
-            "audio_extract",
-            &ctx.source_url,
-            duration_secs,
-            0.0, // ffmpeg has no API cost regardless of tier
-        )
+        .record_premium_usage(user_id, "audio_extract", &ctx.source_url, duration_secs, 0.0, 0.0)
         .await;
     Ok(())
 }
 
 async fn handle_transcription(
+    context_id: i32,
     ctx: &CallbackContext,
     user_id: i64,
     chat_id: ChatId,
@@ -895,50 +893,72 @@ async fn handle_transcription(
 
     api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
 
-    let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
-    let transcription = match transcriber.transcribe(&audio_path).await {
-        Ok(t) => t,
-        Err(e) => {
-            log::error!("Transcription failed: {}", e);
-            let _ = api
-                .send_text_message(
-                    chat_id,
-                    message_id,
-                    "Sorry, transcription failed. Please try again later.",
-                )
-                .await;
-            return Ok(()); // no quota deduction
-        }
-    };
+    // Use cached transcript if available; otherwise call Deepgram and persist.
+    // deepgram_usage = Some((billed_duration_secs, cost_usd)) when Deepgram was called.
+    let (raw_transcript, detected_language, deepgram_usage) =
+        if let Some(cached) = &ctx.transcript {
+            (cached.clone(), ctx.transcript_language.clone(), None)
+        } else {
+            let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
+            match transcriber.transcribe(&audio_path).await {
+                Ok(t) => {
+                    storage
+                        .cache_transcript(context_id, &t.transcript, t.detected_language.as_deref())
+                        .await;
+                    (t.transcript, t.detected_language, Some((t.billed_duration_secs, t.cost_usd)))
+                }
+                Err(e) => {
+                    log::error!("Transcription failed: {}", e);
+                    let _ = api
+                        .send_text_message(
+                            chat_id,
+                            message_id,
+                            "Sorry, transcription failed. Please try again later.",
+                        )
+                        .await;
+                    return Ok(()); // no quota deduction
+                }
+            }
+        };
 
-    let transcript = match summarizer
-        .correct_transcript(&transcription.transcript, transcription.detected_language)
+    let (transcript, correction_prompt_tokens, correction_output_tokens) = match summarizer
+        .correct_transcript(&raw_transcript, detected_language)
         .await
     {
-        Ok(corrected) => corrected,
+        Ok(result) => result,
         Err(e) => {
             log::error!("Transcript correction failed: {}", e);
-            // Fall back to raw transcript rather than failing entirely
-            transcription.transcript
+            (raw_transcript, 0, 0)
         }
     };
 
     send_long_text(chat_id, message_id, &transcript, api).await;
-    // Deduct quota only on success
-    storage.consume_ai_seconds(user_id, duration_secs).await;
-    storage
-        .record_premium_usage(
-            user_id,
-            "transcribe",
-            &ctx.source_url,
-            duration_secs,
-            duration_secs as f64 * DEEPGRAM_COST_PER_SECOND,
-        )
-        .await;
+
+    // Only deduct quota and record Deepgram cost when it was actually called.
+    if let Some((billed_secs, cost)) = deepgram_usage {
+        storage.consume_ai_seconds(user_id, duration_secs).await;
+        storage
+            .record_premium_usage(user_id, "transcribe", &ctx.source_url, duration_secs, billed_secs, cost)
+            .await;
+    }
+    // Always record Gemini token usage for analytics (does not affect user quota).
+    if correction_prompt_tokens > 0 {
+        let input_cost = correction_prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
+        storage
+            .record_premium_usage(user_id, "gemini_correction_input", &ctx.source_url, 0, correction_prompt_tokens as f64, input_cost)
+            .await;
+    }
+    if correction_output_tokens > 0 {
+        let output_cost = correction_output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+        storage
+            .record_premium_usage(user_id, "gemini_correction_output", &ctx.source_url, 0, correction_output_tokens as f64, output_cost)
+            .await;
+    }
     Ok(())
 }
 
 async fn handle_summarization(
+    context_id: i32,
     ctx: &CallbackContext,
     user_id: i64,
     chat_id: ChatId,
@@ -981,24 +1001,36 @@ async fn handle_summarization(
 
     api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
 
-    let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
-    let transcription = match transcriber.transcribe(&audio_path).await {
-        Ok(t) => t,
-        Err(e) => {
-            log::error!("Transcription failed: {}", e);
-            let _ = api
-                .send_text_message(
-                    chat_id,
-                    message_id,
-                    "Sorry, transcription failed. Please try again later.",
-                )
-                .await;
-            return Ok(()); // no quota deduction
-        }
-    };
+    // Use cached transcript if available; otherwise call Deepgram and persist.
+    // deepgram_usage = Some((billed_duration_secs, cost_usd)) when Deepgram was called.
+    let (raw_transcript, detected_language, deepgram_usage) =
+        if let Some(cached) = &ctx.transcript {
+            (cached.clone(), ctx.transcript_language.clone(), None)
+        } else {
+            let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
+            match transcriber.transcribe(&audio_path).await {
+                Ok(t) => {
+                    storage
+                        .cache_transcript(context_id, &t.transcript, t.detected_language.as_deref())
+                        .await;
+                    (t.transcript, t.detected_language, Some((t.billed_duration_secs, t.cost_usd)))
+                }
+                Err(e) => {
+                    log::error!("Transcription failed: {}", e);
+                    let _ = api
+                        .send_text_message(
+                            chat_id,
+                            message_id,
+                            "Sorry, transcription failed. Please try again later.",
+                        )
+                        .await;
+                    return Ok(()); // no quota deduction
+                }
+            }
+        };
 
-    let summary = match summarizer.summarize(&transcription.transcript, transcription.detected_language).await {
-        Ok(s) => s,
+    let (summary, summarize_prompt_tokens, summarize_output_tokens) = match summarizer.summarize(&raw_transcript, detected_language).await {
+        Ok(result) => result,
         Err(e) => {
             log::error!("Summarization failed: {}", e);
             let _ = api
@@ -1013,23 +1045,35 @@ async fn handle_summarization(
     };
 
     send_long_text(chat_id, message_id, &summary, api).await;
-    // Deduct quota only on success
-    storage.consume_ai_seconds(user_id, duration_secs).await;
-    storage
-        .record_premium_usage(
-            user_id,
-            "summarize",
-            &ctx.source_url,
-            duration_secs,
-            duration_secs as f64 * (DEEPGRAM_COST_PER_SECOND + GEMINI_COST_PER_SECOND),
-        )
-        .await;
+
+    // Only deduct quota and record Deepgram cost when it was actually called.
+    if let Some((billed_secs, cost)) = deepgram_usage {
+        storage.consume_ai_seconds(user_id, duration_secs).await;
+        storage
+            .record_premium_usage(user_id, "summarize", &ctx.source_url, duration_secs, billed_secs, cost)
+            .await;
+    }
+    // Always record Gemini token usage for analytics (does not affect user quota).
+    if summarize_prompt_tokens > 0 {
+        let input_cost = summarize_prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
+        storage
+            .record_premium_usage(user_id, "gemini_summarize_input", &ctx.source_url, 0, summarize_prompt_tokens as f64, input_cost)
+            .await;
+    }
+    if summarize_output_tokens > 0 {
+        let output_cost = summarize_output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+        storage
+            .record_premium_usage(user_id, "gemini_summarize_output", &ctx.source_url, 0, summarize_output_tokens as f64, output_cost)
+            .await;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::premium::summarizer::MockSummarizer;
+    use crate::premium::transcriber::{MockTranscriber, TranscriptionResult};
     use crate::storage::MockStorage;
     use crate::subscription::{SubscriptionInfo, SubscriptionTier};
     use crate::telegram_api::MockTelegramApi;
@@ -1336,6 +1380,8 @@ mod tests {
             has_video: true,
             media_duration_secs: Some(300), // 5 minutes, no quota
             audio_cache_path: Some("/tmp/fake_audio.mp3".to_string()),
+            transcript: None,
+            transcript_language: None,
         };
 
         handle_audio_extraction(&ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage)
@@ -1356,7 +1402,7 @@ mod tests {
         mock_storage
             .expect_record_premium_usage()
             .times(1)
-            .returning(|_, _, _, _, _| ());
+            .returning(|_, _, _, _, _, _| ());
         mock_api
             .expect_send_audio()
             .times(1)
@@ -1373,9 +1419,305 @@ mod tests {
             has_video: true,
             media_duration_secs: Some(600), // 10 minutes — over monthly quota
             audio_cache_path: Some(path),
+            transcript: None,
+            transcript_language: None,
         };
 
         handle_audio_extraction(&ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage)
+            .await
+            .unwrap();
+    }
+
+    // ---------------------------------------------------------------------------
+    // Shared helpers for transcription / summarization tests
+    // ---------------------------------------------------------------------------
+
+    fn active_basic_with_quota() -> SubscriptionInfo {
+        SubscriptionInfo {
+            tier: SubscriptionTier::Basic,
+            ai_seconds_used: 0,
+            ai_seconds_limit: 7200, // 2 hours — well above the 600s test video
+            topup_seconds_available: 0,
+            last_topup_at: None,
+            expires_at: Some(chrono::Utc::now() + chrono::TimeDelta::days(30)),
+        }
+    }
+
+    fn make_transcription_result(transcript: &str) -> TranscriptionResult {
+        TranscriptionResult {
+            transcript: transcript.to_string(),
+            detected_language: Some("en".to_string()),
+            billed_duration_secs: 60.0,
+            cost_usd: 60.0 * crate::premium::DEEPGRAM_COST_PER_SECOND,
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // handle_transcription
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_transcription_fresh_calls_deepgram_and_caches() {
+        // No cached transcript → Deepgram called, transcript written to DB,
+        // quota deducted, and three usage rows recorded.
+        let mut mock_api = MockTelegramApi::new();
+        let mut mock_storage = MockStorage::new();
+        let mut mock_transcriber = MockTranscriber::new();
+        let mut mock_summarizer = MockSummarizer::new();
+
+        mock_storage.expect_get_subscription().returning(|_| active_basic_with_quota());
+        mock_api.expect_send_chat_action().returning(|_, _| Ok(()));
+
+        mock_transcriber
+            .expect_transcribe()
+            .times(1)
+            .returning(|_| Ok(make_transcription_result("raw transcript")));
+
+        mock_storage.expect_cache_transcript().times(1).returning(|_, _, _| ());
+
+        mock_summarizer
+            .expect_correct_transcript()
+            .times(1)
+            .returning(|_, _| Ok(("Corrected transcript.".to_string(), 1000u64, 500u64)));
+
+        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+
+        mock_storage.expect_consume_ai_seconds().times(1).returning(|_, _| ());
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|_, feature, _, _, _, _| feature == "transcribe")
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|_, feature, _, _, _, _| feature == "gemini_correction_input")
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|_, feature, _, _, _, _| feature == "gemini_correction_output")
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
+
+        let ctx = CallbackContext {
+            source_url: "https://example.com/video".to_string(),
+            chat_id: 100,
+            has_video: true,
+            media_duration_secs: Some(600),
+            audio_cache_path: Some("/tmp/audio.mp3".to_string()),
+            transcript: None,
+            transcript_language: None,
+        };
+
+        handle_transcription(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_transcription_cached_skips_deepgram_no_quota() {
+        // Cached transcript → Deepgram NOT called, quota NOT deducted,
+        // only Gemini correction rows recorded.
+        let mut mock_api = MockTelegramApi::new();
+        let mut mock_storage = MockStorage::new();
+        let mock_transcriber = MockTranscriber::new(); // no expectations — panics if called
+        let mut mock_summarizer = MockSummarizer::new();
+
+        mock_storage.expect_get_subscription().returning(|_| active_basic_with_quota());
+        mock_api.expect_send_chat_action().returning(|_, _| Ok(()));
+
+        // cache_transcript must NOT be called since transcript already exists
+        mock_summarizer
+            .expect_correct_transcript()
+            .times(1)
+            .returning(|_, _| Ok(("Corrected.".to_string(), 800u64, 400u64)));
+
+        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+
+        // consume_ai_seconds must NOT be called — no expectations set, panics if invoked
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|_, feature, _, _, _, _| feature == "gemini_correction_input")
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|_, feature, _, _, _, _| feature == "gemini_correction_output")
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
+
+        let ctx = CallbackContext {
+            source_url: "https://example.com/video".to_string(),
+            chat_id: 100,
+            has_video: true,
+            media_duration_secs: Some(600),
+            audio_cache_path: Some("/tmp/audio.mp3".to_string()),
+            transcript: Some("cached transcript".to_string()),
+            transcript_language: Some("en".to_string()),
+        };
+
+        handle_transcription(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_transcription_insufficient_quota() {
+        // User has no AI seconds → error message sent, nothing else called.
+        let mut mock_api = MockTelegramApi::new();
+        let mut mock_storage = MockStorage::new();
+        let mock_transcriber = MockTranscriber::new();
+        let mock_summarizer = MockSummarizer::new();
+
+        mock_storage
+            .expect_get_subscription()
+            .returning(|_| SubscriptionInfo::free_default()); // 0 seconds
+        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+
+        let ctx = CallbackContext {
+            source_url: "https://example.com/video".to_string(),
+            chat_id: 100,
+            has_video: true,
+            media_duration_secs: Some(600),
+            audio_cache_path: Some("/tmp/audio.mp3".to_string()),
+            transcript: None,
+            transcript_language: None,
+        };
+
+        handle_transcription(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_transcription_over_duration_limit() {
+        // Video exceeds 30-minute cap → error message, nothing else called.
+        let mut mock_api = MockTelegramApi::new();
+        let mock_storage = MockStorage::new();
+        let mock_transcriber = MockTranscriber::new();
+        let mock_summarizer = MockSummarizer::new();
+
+        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+
+        let ctx = CallbackContext {
+            source_url: "https://example.com/video".to_string(),
+            chat_id: 100,
+            has_video: true,
+            media_duration_secs: Some(MAX_PREMIUM_FILE_DURATION_SECS + 1),
+            audio_cache_path: Some("/tmp/audio.mp3".to_string()),
+            transcript: None,
+            transcript_language: None,
+        };
+
+        handle_transcription(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
+            .await
+            .unwrap();
+    }
+
+    // ---------------------------------------------------------------------------
+    // handle_summarization
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_summarization_fresh_calls_deepgram_and_caches() {
+        // No cached transcript → Deepgram called, quota deducted,
+        // three usage rows recorded (summarize + two Gemini rows).
+        let mut mock_api = MockTelegramApi::new();
+        let mut mock_storage = MockStorage::new();
+        let mut mock_transcriber = MockTranscriber::new();
+        let mut mock_summarizer = MockSummarizer::new();
+
+        mock_storage.expect_get_subscription().returning(|_| active_basic_with_quota());
+        mock_api.expect_send_chat_action().returning(|_, _| Ok(()));
+
+        mock_transcriber
+            .expect_transcribe()
+            .times(1)
+            .returning(|_| Ok(make_transcription_result("raw transcript")));
+
+        mock_storage.expect_cache_transcript().times(1).returning(|_, _, _| ());
+
+        mock_summarizer
+            .expect_summarize()
+            .times(1)
+            .returning(|_, _| Ok(("• Point one\n\n• Point two".to_string(), 1200u64, 60u64)));
+
+        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+
+        mock_storage.expect_consume_ai_seconds().times(1).returning(|_, _| ());
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|_, feature, _, _, _, _| feature == "summarize")
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|_, feature, _, _, _, _| feature == "gemini_summarize_input")
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|_, feature, _, _, _, _| feature == "gemini_summarize_output")
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
+
+        let ctx = CallbackContext {
+            source_url: "https://example.com/video".to_string(),
+            chat_id: 100,
+            has_video: true,
+            media_duration_secs: Some(600),
+            audio_cache_path: Some("/tmp/audio.mp3".to_string()),
+            transcript: None,
+            transcript_language: None,
+        };
+
+        handle_summarization(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_summarization_cached_skips_deepgram_no_quota() {
+        // Cached transcript → Deepgram NOT called, quota NOT deducted,
+        // only Gemini summarize rows recorded.
+        let mut mock_api = MockTelegramApi::new();
+        let mut mock_storage = MockStorage::new();
+        let mock_transcriber = MockTranscriber::new(); // no expectations — panics if called
+        let mut mock_summarizer = MockSummarizer::new();
+
+        mock_storage.expect_get_subscription().returning(|_| active_basic_with_quota());
+        mock_api.expect_send_chat_action().returning(|_, _| Ok(()));
+
+        mock_summarizer
+            .expect_summarize()
+            .times(1)
+            .returning(|_, _| Ok(("• Point one".to_string(), 900u64, 30u64)));
+
+        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+
+        // consume_ai_seconds must NOT be called
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|_, feature, _, _, _, _| feature == "gemini_summarize_input")
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|_, feature, _, _, _, _| feature == "gemini_summarize_output")
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
+
+        let ctx = CallbackContext {
+            source_url: "https://example.com/video".to_string(),
+            chat_id: 100,
+            has_video: true,
+            media_duration_secs: Some(600),
+            audio_cache_path: Some("/tmp/audio.mp3".to_string()),
+            transcript: Some("cached transcript".to_string()),
+            transcript_language: Some("it".to_string()),
+        };
+
+        handle_summarization(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
             .await
             .unwrap();
     }

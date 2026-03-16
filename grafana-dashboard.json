@@ -13,6 +13,7 @@
   "__requires": [
     {"type": "grafana", "id": "grafana", "name": "Grafana", "version": "9.0.0"},
     {"type": "datasource", "id": "postgres", "name": "PostgreSQL", "version": "1.0.0"},
+    {"type": "panel", "id": "row", "name": "Row", "version": ""},
     {"type": "panel", "id": "stat", "name": "Stat", "version": ""},
     {"type": "panel", "id": "timeseries", "name": "Time series", "version": ""},
     {"type": "panel", "id": "piechart", "name": "Pie chart", "version": ""},
@@ -350,6 +351,363 @@
       ],
       "title": "Top Requested Domains",
       "type": "table"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 28},
+      "id": 9,
+      "title": "Premium AI Features",
+      "type": "row"
+    },
+
+    {
+      "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 29},
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["sum"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT SUM(estimated_cost_usd) AS value\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nAND estimated_cost_usd > 0",
+          "refId": "A"
+        }
+      ],
+      "title": "Total AI Cost",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]},
+          "unit": "short",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 29},
+      "id": 11,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["sum"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT ROUND(SUM(units) / 60.0, 1) AS value\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nAND feature IN ('transcribe', 'summarize')",
+          "refId": "A"
+        }
+      ],
+      "title": "Deepgram Minutes Billed",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 5},
+              {"color": "red", "value": 20}
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 29},
+      "id": 12,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS value\nFROM subscriptions\nWHERE tier != 'free'\nAND (expires_at IS NULL OR expires_at > NOW())",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Subscribers",
+      "type": "stat"
+    },
+
+    {
+      "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "USD",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "currencyUSD",
+          "decimals": 5
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 33},
+      "id": 13,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  date_trunc('day', created_at) AS time,\n  SUM(estimated_cost_usd) FILTER (WHERE feature IN ('transcribe', 'summarize')) AS \"Deepgram\",\n  SUM(estimated_cost_usd) FILTER (WHERE feature LIKE 'gemini_%_input') AS \"Gemini Input\",\n  SUM(estimated_cost_usd) FILTER (WHERE feature LIKE 'gemini_%_output') AS \"Gemini Output\"\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nGROUP BY 1\nORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "AI Cost per Day",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 33},
+      "id": 14,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  date_trunc('day', created_at) AS time,\n  COUNT(*) FILTER (WHERE feature = 'audio_extract') AS \"Audio Extract\",\n  COUNT(*) FILTER (WHERE feature = 'transcribe') AS \"Transcribe\",\n  COUNT(*) FILTER (WHERE feature = 'summarize') AS \"Summarize\"\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nGROUP BY 1\nORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Premium Actions per Day",
+      "type": "timeseries"
+    },
+
+    {
+      "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "tokens",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 41},
+      "id": 15,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  date_trunc('day', created_at) AS time,\n  SUM(units) FILTER (WHERE feature LIKE '%_input') AS \"Input Tokens\",\n  SUM(units) FILTER (WHERE feature LIKE '%_output') AS \"Output Tokens\"\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nGROUP BY 1\nORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Gemini Tokens per Day",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "mappings": [], "unit": "currencyUSD", "decimals": 5},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 41},
+      "id": 16,
+      "options": {
+        "displayLabels": ["name", "percent"],
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "pieType": "donut",
+        "tooltip": {"mode": "single", "sort": "none"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT feature, SUM(estimated_cost_usd) AS cost\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nAND estimated_cost_usd > 0\nGROUP BY feature\nORDER BY cost DESC",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {"nameField": "feature", "valueField": "cost"}
+        }
+      ],
+      "title": "Cost by Feature",
+      "type": "piechart"
+    },
+
+    {
+      "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "user_id"},
+            "properties": [{"id": "custom.width", "value": 120}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "transcriptions"},
+            "properties": [{"id": "custom.width", "value": 110}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "summaries"},
+            "properties": [{"id": "custom.width", "value": 90}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "audio_extractions"},
+            "properties": [{"id": "custom.width", "value": 130}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "deepgram_mins"},
+            "properties": [
+              {"id": "custom.width", "value": 120},
+              {"id": "displayName", "value": "Deepgram mins"},
+              {"id": "decimals", "value": 1}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "total_cost_usd"},
+            "properties": [
+              {"id": "unit", "value": "currencyUSD"},
+              {"id": "decimals", "value": 5},
+              {"id": "displayName", "value": "total cost"}
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 49},
+      "id": 17,
+      "options": {
+        "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false},
+        "showHeader": true,
+        "sortBy": [{"desc": true, "displayName": "total cost"}]
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  chat_id AS user_id,\n  COUNT(*) FILTER (WHERE feature = 'transcribe') AS transcriptions,\n  COUNT(*) FILTER (WHERE feature = 'summarize') AS summaries,\n  COUNT(*) FILTER (WHERE feature = 'audio_extract') AS audio_extractions,\n  ROUND(SUM(units) FILTER (WHERE feature IN ('transcribe', 'summarize')) / 60.0, 1) AS deepgram_mins,\n  ROUND(SUM(estimated_cost_usd)::numeric, 5) AS total_cost_usd\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nGROUP BY chat_id\nORDER BY total_cost_usd DESC\nLIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Top AI Users",
+      "type": "table"
     }
   ],
   "refresh": "5m",
@@ -361,5 +719,5 @@
   "timezone": "browser",
   "title": "CrabberBot",
   "uid": "crabberbot-analytics",
-  "version": 1
+  "version": 2
 }

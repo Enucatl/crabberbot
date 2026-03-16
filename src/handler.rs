@@ -25,6 +25,10 @@ pub struct CallbackContext {
     pub has_video: bool,
     pub media_duration_secs: Option<i32>,
     pub audio_cache_path: Option<String>,
+    /// Cached raw Deepgram transcript (set after first transcription call).
+    pub transcript: Option<String>,
+    /// BCP-47 language code detected by Deepgram, e.g. "en", "it".
+    pub transcript_language: Option<String>,
 }
 
 /// Context returned after a successful download, containing info needed for premium buttons.
@@ -513,7 +517,7 @@ pub async fn process_download_request(
         DownloadedMedia::Single(item) if item.media_type == MediaType::Video => {
             let (send_result, audio_result) = tokio::join!(
                 send_single_item(item, &caption, chat_id, message_id, telegram_api),
-                audio_extractor.extract_audio(&item.filepath)
+                audio_extractor.extract_audio(&item.filepath, info.title.as_deref(), info.uploader.as_deref())
             );
             let (file_ids, sent_msg_id) = match send_result {
                 Some((file_id, media_type, msg_id)) => (Some(vec![(file_id, media_type)]), Some(msg_id)),
@@ -632,6 +636,8 @@ pub async fn maybe_send_premium_buttons(
         has_video: ctx.has_video,
         media_duration_secs: ctx.media_duration_secs,
         audio_cache_path: ctx.audio_cache_path.map(|p| p.to_string_lossy().to_string()),
+        transcript: None,
+        transcript_language: None,
     };
 
     let context_id = storage.store_callback_context(&callback_ctx).await;
@@ -696,7 +702,7 @@ mod tests {
     fn create_failing_audio_extractor() -> MockAudioExtractor {
         let mut mock = MockAudioExtractor::new();
         mock.expect_extract_audio()
-            .returning(|_| {
+            .returning(|_, _, _| {
                 Err(crate::premium::audio_extractor::AudioExtractionError::FfmpegError(
                     "not available in test".to_string(),
                 ))
@@ -1650,7 +1656,7 @@ mod tests {
         let mut mock_audio = MockAudioExtractor::new();
         mock_audio
             .expect_extract_audio()
-            .returning(|_| {
+            .returning(|_, _, _| {
                 Ok(AudioExtractionResult {
                     audio_path: PathBuf::from("/tmp/audio_cache/test.mp3"),
                     duration_secs: 42,

@@ -3,6 +3,8 @@ use std::path::Path;
 use async_trait::async_trait;
 use thiserror::Error;
 
+use crate::premium::DEEPGRAM_COST_PER_SECOND;
+
 #[derive(Debug, Error)]
 pub enum TranscriptionError {
     #[error("HTTP request failed: {0}")]
@@ -17,6 +19,10 @@ pub struct TranscriptionResult {
     pub transcript: String,
     /// BCP-47 language code detected by Deepgram (e.g. "it", "en"), if available.
     pub detected_language: Option<String>,
+    /// Audio duration as reported by Deepgram (what they bill on).
+    pub billed_duration_secs: f64,
+    /// Estimated USD cost based on billed duration.
+    pub cost_usd: f64,
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -74,10 +80,15 @@ impl Transcriber for DeepgramTranscriber {
             .as_str()
             .map(String::from);
 
+        let billed_duration_secs = json["metadata"]["duration"].as_f64().unwrap_or(0.0);
+        let cost_usd = billed_duration_secs * DEEPGRAM_COST_PER_SECOND;
+
         log::info!(
-            "Deepgram: transcript {} chars, detected_language={:?}",
+            "Deepgram: transcript {} chars, detected_language={:?}, duration={:.2}s, cost=${:.6}",
             transcript.len(),
-            detected_language
+            detected_language,
+            billed_duration_secs,
+            cost_usd,
         );
 
         if transcript.is_empty() {
@@ -86,6 +97,6 @@ impl Transcriber for DeepgramTranscriber {
             ));
         }
 
-        Ok(TranscriptionResult { transcript, detected_language })
+        Ok(TranscriptionResult { transcript, detected_language, billed_duration_secs, cost_usd })
     }
 }

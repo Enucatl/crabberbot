@@ -78,12 +78,14 @@ pub trait Storage: Send + Sync {
         feature: &str,
         source_url: &str,
         duration_secs: i32,
+        units: f64,
         cost_usd: f64,
     );
 
     // Callback context
     async fn store_callback_context(&self, ctx: &CallbackContext) -> i32;
     async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext>;
+    async fn cache_transcript(&self, context_id: i32, transcript: &str, language: Option<&str>);
 
     // Subscription downgrade (for refunds)
     async fn revoke_subscription(&self, user_id: i64);
@@ -432,16 +434,18 @@ impl Storage for PostgresStorage {
         feature: &str,
         source_url: &str,
         duration_secs: i32,
+        units: f64,
         cost_usd: f64,
     ) {
         if let Err(e) = sqlx::query(
-            "INSERT INTO premium_usage (user_id, feature, source_url, duration_secs, estimated_cost_usd) \
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO premium_usage (user_id, feature, source_url, duration_secs, units, estimated_cost_usd) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(user_id)
         .bind(feature)
         .bind(source_url)
         .bind(duration_secs)
+        .bind(units as f32)
         .bind(cost_usd as f32) // DB column is REAL (f32); precision loss is acceptable for cost tracking
         .execute(&self.pool)
         .await
@@ -473,8 +477,9 @@ impl Storage for PostgresStorage {
     }
 
     async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext> {
-        let row: Option<(String, i64, bool, Option<i32>, Option<String>)> = sqlx::query_as(
-            "SELECT source_url, chat_id, has_video, media_duration_secs, audio_cache_path \
+        let row: Option<(String, i64, bool, Option<i32>, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT source_url, chat_id, has_video, media_duration_secs, audio_cache_path, \
+             transcript, transcript_language \
              FROM callback_contexts WHERE id = $1",
         )
         .bind(context_id)
@@ -487,15 +492,31 @@ impl Storage for PostgresStorage {
         .ok()
         .flatten();
 
-        row.map(|(source_url, chat_id, has_video, media_duration_secs, audio_cache_path)| {
+        row.map(|(source_url, chat_id, has_video, media_duration_secs, audio_cache_path, transcript, transcript_language)| {
             CallbackContext {
                 source_url,
                 chat_id,
                 has_video,
                 media_duration_secs,
                 audio_cache_path,
+                transcript,
+                transcript_language,
             }
         })
+    }
+
+    async fn cache_transcript(&self, context_id: i32, transcript: &str, language: Option<&str>) {
+        if let Err(e) = sqlx::query(
+            "UPDATE callback_contexts SET transcript = $1, transcript_language = $2 WHERE id = $3",
+        )
+        .bind(transcript)
+        .bind(language)
+        .bind(context_id)
+        .execute(&self.pool)
+        .await
+        {
+            log::error!("Failed to cache transcript for context {}: {}", context_id, e);
+        }
     }
 
     async fn revoke_subscription(&self, user_id: i64) {

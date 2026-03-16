@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
+use crate::premium::{GEMINI_INPUT_COST_PER_MILLION_TOKENS, GEMINI_OUTPUT_COST_PER_MILLION_TOKENS};
+
 #[derive(Debug, Error)]
 pub enum SummarizationError {
     #[error("HTTP request failed: {0}")]
@@ -12,8 +14,10 @@ pub enum SummarizationError {
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait Summarizer: Send + Sync {
-    async fn summarize(&self, transcript: &str, language: Option<String>) -> Result<String, SummarizationError>;
-    async fn correct_transcript(&self, transcript: &str, language: Option<String>) -> Result<String, SummarizationError>;
+    /// Returns `(summary_text, prompt_tokens, output_tokens)`.
+    async fn summarize(&self, transcript: &str, language: Option<String>) -> Result<(String, u64, u64), SummarizationError>;
+    /// Returns `(corrected_text, prompt_tokens, output_tokens)`.
+    async fn correct_transcript(&self, transcript: &str, language: Option<String>) -> Result<(String, u64, u64), SummarizationError>;
 }
 
 pub struct GeminiSummarizer {
@@ -27,7 +31,8 @@ impl GeminiSummarizer {
         Self { client, api_key, model }
     }
 
-    async fn call_gemini(&self, prompt: &str) -> Result<String, SummarizationError> {
+    /// Returns `(text, prompt_tokens, output_tokens)`.
+    async fn call_gemini(&self, prompt: &str) -> Result<(String, u64, u64), SummarizationError> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.model, self.api_key
@@ -79,7 +84,10 @@ impl GeminiSummarizer {
             ));
         }
 
-        Ok(result)
+        let prompt_tokens = json["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(0);
+        let output_tokens = json["usageMetadata"]["candidatesTokenCount"].as_u64().unwrap_or(0);
+
+        Ok((result, prompt_tokens, output_tokens))
     }
 }
 
@@ -101,7 +109,11 @@ impl Summarizer for GeminiSummarizer {
             language_hint, transcript
         );
         log::info!("Gemini summarize: transcript {} chars, language={:?}", transcript.len(), language);
-        self.call_gemini(&prompt).await
+        let (text, prompt_tokens, output_tokens) = self.call_gemini(&prompt).await?;
+        let cost = prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS
+            + output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+        log::info!("Gemini summarize: tokens in={} out={} cost=${:.6}", prompt_tokens, output_tokens, cost);
+        Ok((text, prompt_tokens, output_tokens))
     }
 
     async fn correct_transcript(&self, transcript: &str, language: Option<String>) -> Result<String, SummarizationError> {
@@ -112,7 +124,8 @@ impl Summarizer for GeminiSummarizer {
         let prompt = format!(
             "I will copy the raw transcription of an audio, transcribed by AI.\n\
              Please review it for errors in spelling, punctuation, possibly mistranscribed words.\n\n\
-             Add paragraphs by separating with an empty line to facilitate reading and comprehension.\n\n\
+             Add paragraphs by separating with an empty line to facilitate reading and comprehension. \n\
+             Avoid the block of text feeling that you get from an overly long text with no breaks.\n\n\
              {}\
              Correct any mistakes you find, by staying as close as possible to the original phrasing.\n\
              Provide only the corrected version of the transcript, without any additional commentary, \
@@ -126,6 +139,10 @@ impl Summarizer for GeminiSummarizer {
             transcript
         );
         log::info!("Gemini correction: transcript {} chars, language={:?}", transcript.len(), language);
-        self.call_gemini(&prompt).await.map(|s| s.trim().to_string())
+        let (text, prompt_tokens, output_tokens) = self.call_gemini(&prompt).await?;
+        let cost = prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS
+            + output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+        log::info!("Gemini correction: tokens in={} out={} cost=${:.6}", prompt_tokens, output_tokens, cost);
+        Ok((text.trim().to_string(), prompt_tokens, output_tokens))
     }
 }
