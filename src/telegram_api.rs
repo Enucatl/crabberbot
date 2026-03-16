@@ -122,7 +122,6 @@ pub trait TelegramApi: Send + Sync {
         chat_id: ChatId,
         message_id: MessageId,
         file_path: &std::path::Path,
-        caption: &str,
     ) -> Result<(), teloxide::RequestError>;
 
     async fn send_invoice(
@@ -450,15 +449,12 @@ impl TelegramApi for TeloxideApi {
         chat_id: ChatId,
         message_id: MessageId,
         file_path: &std::path::Path,
-        caption: &str,
     ) -> Result<(), teloxide::RequestError> {
         log::info!("Sending audio {:?} to chat {}", file_path, chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadDocument)
             .await?;
         self.bot
             .send_audio(chat_id, InputFile::file(file_path))
-            .caption(caption.to_owned())
-            .parse_mode(ParseMode::Html)
             .reply_to(message_id)
             .await?;
         Ok(())

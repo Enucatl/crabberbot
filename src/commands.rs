@@ -832,7 +832,7 @@ async fn handle_audio_extraction(
     }
 
     let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
-    if let Err(e) = api.send_audio(chat_id, message_id, &audio_path, "Extracted audio").await {
+    if let Err(e) = api.send_audio(chat_id, message_id, &audio_path).await {
         log::error!("Failed to send audio: {}", e);
         let _ = api
             .send_text_message(chat_id, message_id, "Sorry, failed to send the audio.")
@@ -1408,7 +1408,7 @@ mod tests {
         mock_api
             .expect_send_audio()
             .times(1)
-            .returning(|_, _, _, _| Ok(()));
+            .returning(|_, _, _| Ok(()));
 
         // Create a real temp file so audio_path.exists() is true in the parent,
         // but handle_audio_extraction itself receives the path via ctx.
