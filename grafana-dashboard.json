@@ -424,7 +424,7 @@
           "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT ROUND(SUM(units) / 60.0, 1) AS value\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nAND feature IN ('transcribe', 'summarize')",
+          "rawSql": "SELECT ROUND((SUM(units) / 60.0)::numeric, 1) AS value\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nAND feature IN ('transcribe', 'summarize')",
           "refId": "A"
         }
       ],
@@ -702,7 +702,7 @@
           "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  chat_id AS user_id,\n  COUNT(*) FILTER (WHERE feature = 'transcribe') AS transcriptions,\n  COUNT(*) FILTER (WHERE feature = 'summarize') AS summaries,\n  COUNT(*) FILTER (WHERE feature = 'audio_extract') AS audio_extractions,\n  ROUND(SUM(units) FILTER (WHERE feature IN ('transcribe', 'summarize')) / 60.0, 1) AS deepgram_mins,\n  ROUND(SUM(estimated_cost_usd)::numeric, 5) AS total_cost_usd\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nGROUP BY chat_id\nORDER BY total_cost_usd DESC\nLIMIT 20",
+          "rawSql": "SELECT\n  user_id,\n  COUNT(*) FILTER (WHERE feature = 'transcribe') AS transcriptions,\n  COUNT(*) FILTER (WHERE feature = 'summarize') AS summaries,\n  COUNT(*) FILTER (WHERE feature = 'audio_extract') AS audio_extractions,\n  ROUND((SUM(units) FILTER (WHERE feature IN ('transcribe', 'summarize')) / 60.0)::numeric, 1) AS deepgram_mins,\n  ROUND(SUM(estimated_cost_usd)::numeric, 5) AS total_cost_usd\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nGROUP BY user_id\nORDER BY total_cost_usd DESC\nLIMIT 20",
           "refId": "A"
         }
       ],
