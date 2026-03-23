@@ -44,7 +44,7 @@ impl GeminiSummarizer {
 
         let body = serde_json::json!({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 8192},
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 8192, "thinkingConfig": {"thinkingLevel": "minimal"}},
             "safetySettings": [
                 {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
@@ -128,12 +128,12 @@ impl Summarizer for GeminiSummarizer {
         let prompt = format!(
             "I will copy the raw transcription of an audio, transcribed by AI.\n\
              Please review it for errors in spelling, punctuation, possibly mistranscribed words.\n\n\
-             Add paragraphs by separating with an empty line to facilitate reading and comprehension. \n\
-             Avoid the block of text feeling that you get from an overly long text with no breaks.\n\n\
              {}\
              Correct any mistakes you find, by staying as close as possible to the original phrasing.\n\
              Provide only the corrected version of the transcript, without any additional commentary, \
              preamble, or conversational phrases.\n\n\
+             Add paragraphs by separating with an empty line to facilitate reading and comprehension.\n\
+             Avoid the block of text feeling that you get from an overly long text with no breaks.\n\n\
              Original Transcript:\n\
              ---\n\
              {}\n\
