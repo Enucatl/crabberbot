@@ -1,5 +1,6 @@
 .claude
 .env*
+secrets/
 # Local .terraform directories
 .terraform/
 

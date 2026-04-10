@@ -36,7 +36,9 @@ services:
     networks:
       - crabberbot
     environment:
-      - TUNNEL_TOKEN
+      - TUNNEL_TOKEN_FILE=/run/secrets/tunnel_token
+    secrets:
+      - tunnel_token
     command: tunnel run
 
   telegram-bot-api:
@@ -83,3 +85,7 @@ networks:
 
 volumes:
   pgdata:
+
+secrets:
+  tunnel_token:
+    file: ./secrets/tunnel_token
