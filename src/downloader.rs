@@ -268,7 +268,6 @@ impl YtDlpDownloader {
     }
 }
 
-
 #[async_trait]
 impl Downloader for YtDlpDownloader {
     async fn get_media_metadata(&self, url: &Url) -> Result<MediaInfo, DownloadError> {

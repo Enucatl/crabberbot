@@ -34,7 +34,10 @@ pub struct DeepgramUsage {
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait Transcriber: Send + Sync {
-    async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult, TranscriptionError>;
+    async fn transcribe(
+        &self,
+        audio_path: &Path,
+    ) -> Result<TranscriptionResult, TranscriptionError>;
 }
 
 pub struct DeepgramTranscriber {
@@ -50,9 +53,16 @@ impl DeepgramTranscriber {
 
 #[async_trait]
 impl Transcriber for DeepgramTranscriber {
-    async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult, TranscriptionError> {
+    async fn transcribe(
+        &self,
+        audio_path: &Path,
+    ) -> Result<TranscriptionResult, TranscriptionError> {
         let audio_bytes = tokio::fs::read(audio_path).await?;
-        log::debug!("Deepgram: sending {} bytes from {:?}", audio_bytes.len(), audio_path);
+        log::debug!(
+            "Deepgram: sending {} bytes from {:?}",
+            audio_bytes.len(),
+            audio_path
+        );
 
         let response = self
             .client
@@ -103,6 +113,11 @@ impl Transcriber for DeepgramTranscriber {
             ));
         }
 
-        Ok(TranscriptionResult { transcript, detected_language, billed_duration_secs, cost_usd })
+        Ok(TranscriptionResult {
+            transcript,
+            detected_language,
+            billed_duration_secs,
+            cost_usd,
+        })
     }
 }

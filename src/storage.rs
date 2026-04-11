@@ -52,12 +52,7 @@ pub trait Storage: Send + Sync {
 
     // Subscription management
     async fn get_subscription(&self, user_id: i64) -> SubscriptionInfo;
-    async fn upsert_subscription(
-        &self,
-        user_id: i64,
-        tier: SubscriptionTier,
-        duration_days: i64,
-    );
+    async fn upsert_subscription(&self, user_id: i64, tier: SubscriptionTier, duration_days: i64);
 
     // Payment recording
     async fn record_payment(
@@ -137,7 +132,10 @@ impl PostgresStorage {
 
         match result {
             Ok(r) => {
-                log::info!("Cache cleanup: removed {} expired entries", r.rows_affected());
+                log::info!(
+                    "Cache cleanup: removed {} expired entries",
+                    r.rows_affected()
+                );
                 for path in expired_audio.into_iter().filter_map(|(p,)| p) {
                     if let Err(e) = tokio::fs::remove_file(&path).await {
                         if e.kind() != std::io::ErrorKind::NotFound {
@@ -154,19 +152,18 @@ impl PostgresStorage {
 #[async_trait]
 impl Storage for PostgresStorage {
     async fn get_cached_media(&self, source_url: &str) -> Option<CachedMedia> {
-        let cache_row: Option<(i32, String, Option<String>, Option<i32>)> =
-            sqlx::query_as(
-                "SELECT id, caption, audio_cache_path, media_duration_secs \
+        let cache_row: Option<(i32, String, Option<String>, Option<i32>)> = sqlx::query_as(
+            "SELECT id, caption, audio_cache_path, media_duration_secs \
                  FROM media_cache WHERE source_url = $1",
-            )
-            .bind(source_url)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| {
-                log::error!("Cache lookup failed: {}", e);
-                e
-            })
-            .ok()?;
+        )
+        .bind(source_url)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            log::error!("Cache lookup failed: {}", e);
+            e
+        })
+        .ok()?;
 
         let (cache_id, caption, audio_cache_path, media_duration_secs) = cache_row?;
 
@@ -207,7 +204,12 @@ impl Storage for PostgresStorage {
             return None;
         }
 
-        Some(CachedMedia { caption, files, audio_cache_path, media_duration_secs })
+        Some(CachedMedia {
+            caption,
+            files,
+            audio_cache_path,
+            media_duration_secs,
+        })
     }
 
     async fn store_cached_media(
@@ -254,7 +256,11 @@ impl Storage for PostgresStorage {
             .execute(&mut *tx)
             .await
         {
-            log::error!("Failed to delete old cached files for {}: {}", source_url, e);
+            log::error!(
+                "Failed to delete old cached files for {}: {}",
+                source_url,
+                e
+            );
             return;
         }
 
@@ -310,20 +316,26 @@ impl Storage for PostgresStorage {
     }
 
     async fn get_subscription(&self, user_id: i64) -> SubscriptionInfo {
-        let row: Option<(String, i32, i32, i32, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> =
-            sqlx::query_as(
-                "SELECT tier, ai_seconds_used, ai_seconds_limit, topup_seconds_available, \
+        let row: Option<(
+            String,
+            i32,
+            i32,
+            i32,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        )> = sqlx::query_as(
+            "SELECT tier, ai_seconds_used, ai_seconds_limit, topup_seconds_available, \
                  last_topup_at, expires_at FROM subscriptions WHERE user_id = $1",
-            )
-            .bind(user_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| {
-                log::error!("Failed to get subscription for {}: {}", user_id, e);
-                e
-            })
-            .ok()
-            .flatten();
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            log::error!("Failed to get subscription for {}: {}", user_id, e);
+            e
+        })
+        .ok()
+        .flatten();
 
         match row {
             Some((tier_str, used, limit, topup, last_topup_at, expires_at)) => {
@@ -341,12 +353,7 @@ impl Storage for PostgresStorage {
         }
     }
 
-    async fn upsert_subscription(
-        &self,
-        user_id: i64,
-        tier: SubscriptionTier,
-        duration_days: i64,
-    ) {
+    async fn upsert_subscription(&self, user_id: i64, tier: SubscriptionTier, duration_days: i64) {
         let limit = tier.ai_seconds_limit();
         let tier_str = tier.to_string();
         if let Err(e) = sqlx::query(
@@ -477,7 +484,15 @@ impl Storage for PostgresStorage {
     }
 
     async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext> {
-        let row: Option<(String, i64, bool, Option<i32>, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        let row: Option<(
+            String,
+            i64,
+            bool,
+            Option<i32>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
             "SELECT source_url, chat_id, has_video, media_duration_secs, audio_cache_path, \
              transcript, transcript_language \
              FROM callback_contexts WHERE id = $1",
@@ -492,8 +507,8 @@ impl Storage for PostgresStorage {
         .ok()
         .flatten();
 
-        row.map(|(source_url, chat_id, has_video, media_duration_secs, audio_cache_path, transcript, transcript_language)| {
-            CallbackContext {
+        row.map(
+            |(
                 source_url,
                 chat_id,
                 has_video,
@@ -501,8 +516,18 @@ impl Storage for PostgresStorage {
                 audio_cache_path,
                 transcript,
                 transcript_language,
-            }
-        })
+            )| {
+                CallbackContext {
+                    source_url,
+                    chat_id,
+                    has_video,
+                    media_duration_secs,
+                    audio_cache_path,
+                    transcript,
+                    transcript_language,
+                }
+            },
+        )
     }
 
     async fn cache_transcript(&self, context_id: i32, transcript: &str, language: Option<String>) {
@@ -515,7 +540,11 @@ impl Storage for PostgresStorage {
         .execute(&self.pool)
         .await
         {
-            log::error!("Failed to cache transcript for context {}: {}", context_id, e);
+            log::error!(
+                "Failed to cache transcript for context {}: {}",
+                context_id,
+                e
+            );
         }
     }
 
@@ -563,12 +592,14 @@ impl Storage for PostgresStorage {
         .ok()
         .flatten();
 
-        row.map(|(telegram_charge_id, product, amount, created_at)| PaymentRecord {
-            telegram_charge_id,
-            product,
-            amount,
-            created_at,
-        })
+        row.map(
+            |(telegram_charge_id, product, amount, created_at)| PaymentRecord {
+                telegram_charge_id,
+                product,
+                amount,
+                created_at,
+            },
+        )
     }
 
     async fn get_recent_payments(&self, user_id: i64, limit: i64) -> Vec<PaymentRecord> {
@@ -585,12 +616,14 @@ impl Storage for PostgresStorage {
         match rows {
             Ok(rows) => rows
                 .into_iter()
-                .map(|(telegram_charge_id, product, amount, created_at)| PaymentRecord {
-                    telegram_charge_id,
-                    product,
-                    amount,
-                    created_at,
-                })
+                .map(
+                    |(telegram_charge_id, product, amount, created_at)| PaymentRecord {
+                        telegram_charge_id,
+                        product,
+                        amount,
+                        created_at,
+                    },
+                )
                 .collect(),
             Err(e) => {
                 log::error!("Failed to get recent payments for {}: {}", user_id, e);

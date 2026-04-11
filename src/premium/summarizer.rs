@@ -20,8 +20,16 @@ pub struct GeminiResult {
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait Summarizer: Send + Sync {
-    async fn summarize(&self, transcript: &str, language: Option<String>) -> Result<GeminiResult, SummarizationError>;
-    async fn correct_transcript(&self, transcript: &str, language: Option<String>) -> Result<GeminiResult, SummarizationError>;
+    async fn summarize(
+        &self,
+        transcript: &str,
+        language: Option<String>,
+    ) -> Result<GeminiResult, SummarizationError>;
+    async fn correct_transcript(
+        &self,
+        transcript: &str,
+        language: Option<String>,
+    ) -> Result<GeminiResult, SummarizationError>;
 }
 
 pub struct GeminiSummarizer {
@@ -32,7 +40,11 @@ pub struct GeminiSummarizer {
 
 impl GeminiSummarizer {
     pub fn new(client: reqwest::Client, api_key: String, model: String) -> Self {
-        Self { client, api_key, model }
+        Self {
+            client,
+            api_key,
+            model,
+        }
     }
 
     /// Returns `(text, prompt_tokens, output_tokens)`.
@@ -88,8 +100,12 @@ impl GeminiSummarizer {
             ));
         }
 
-        let prompt_tokens = json["usageMetadata"]["promptTokenCount"].as_u64().unwrap_or(0);
-        let output_tokens = json["usageMetadata"]["candidatesTokenCount"].as_u64().unwrap_or(0);
+        let prompt_tokens = json["usageMetadata"]["promptTokenCount"]
+            .as_u64()
+            .unwrap_or(0);
+        let output_tokens = json["usageMetadata"]["candidatesTokenCount"]
+            .as_u64()
+            .unwrap_or(0);
 
         Ok((result, prompt_tokens, output_tokens))
     }
@@ -97,9 +113,16 @@ impl GeminiSummarizer {
 
 #[async_trait]
 impl Summarizer for GeminiSummarizer {
-    async fn summarize(&self, transcript: &str, language: Option<String>) -> Result<GeminiResult, SummarizationError> {
+    async fn summarize(
+        &self,
+        transcript: &str,
+        language: Option<String>,
+    ) -> Result<GeminiResult, SummarizationError> {
         let language_hint = match &language {
-            Some(lang) => format!("The two-letter code for the language is: {}. Answer only in that language.\n\n", lang),
+            Some(lang) => format!(
+                "The two-letter code for the language is: {}. Answer only in that language.\n\n",
+                lang
+            ),
             None => String::new(),
         };
         let prompt = format!(
@@ -112,17 +135,37 @@ impl Summarizer for GeminiSummarizer {
              Transcript:\n\n{}",
             language_hint, transcript
         );
-        log::info!("Gemini summarize: transcript {} chars, language={:?}", transcript.len(), language);
+        log::info!(
+            "Gemini summarize: transcript {} chars, language={:?}",
+            transcript.len(),
+            language
+        );
         let (text, prompt_tokens, output_tokens) = self.call_gemini(&prompt).await?;
         let cost = prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS
             + output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
-        log::info!("Gemini summarize: tokens in={} out={} cost=${:.6}", prompt_tokens, output_tokens, cost);
-        Ok(GeminiResult { text, prompt_tokens, output_tokens })
+        log::info!(
+            "Gemini summarize: tokens in={} out={} cost=${:.6}",
+            prompt_tokens,
+            output_tokens,
+            cost
+        );
+        Ok(GeminiResult {
+            text,
+            prompt_tokens,
+            output_tokens,
+        })
     }
 
-    async fn correct_transcript(&self, transcript: &str, language: Option<String>) -> Result<GeminiResult, SummarizationError> {
+    async fn correct_transcript(
+        &self,
+        transcript: &str,
+        language: Option<String>,
+    ) -> Result<GeminiResult, SummarizationError> {
         let language_hint = match &language {
-            Some(lang) => format!("The two-letter code for the language is: {}.\nKeep this in mind and answer only in the same language.\n\n", lang),
+            Some(lang) => format!(
+                "The two-letter code for the language is: {}.\nKeep this in mind and answer only in the same language.\n\n",
+                lang
+            ),
             None => String::new(),
         };
         let prompt = format!(
@@ -139,14 +182,26 @@ impl Summarizer for GeminiSummarizer {
              {}\n\
              ---\n\
              Corrected Transcript:",
-            language_hint,
-            transcript
+            language_hint, transcript
         );
-        log::info!("Gemini correction: transcript {} chars, language={:?}", transcript.len(), language);
+        log::info!(
+            "Gemini correction: transcript {} chars, language={:?}",
+            transcript.len(),
+            language
+        );
         let (text, prompt_tokens, output_tokens) = self.call_gemini(&prompt).await?;
         let cost = prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS
             + output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
-        log::info!("Gemini correction: tokens in={} out={} cost=${:.6}", prompt_tokens, output_tokens, cost);
-        Ok(GeminiResult { text: text.trim().to_string(), prompt_tokens, output_tokens })
+        log::info!(
+            "Gemini correction: tokens in={} out={} cost=${:.6}",
+            prompt_tokens,
+            output_tokens,
+            cost
+        );
+        Ok(GeminiResult {
+            text: text.trim().to_string(),
+            prompt_tokens,
+            output_tokens,
+        })
     }
 }

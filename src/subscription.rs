@@ -25,9 +25,9 @@ impl SubscriptionTier {
     pub fn ai_seconds_limit(&self) -> i32 {
         match self {
             Self::Free => 0,
-            Self::Basic => 3_600,    // 60 minutes
-            Self::Pro => 12_000,     // 200 minutes
-            Self::Ultra => 600_000,  // 10 000 minutes
+            Self::Basic => 3_600,   // 60 minutes
+            Self::Pro => 12_000,    // 200 minutes
+            Self::Ultra => 600_000, // 10 000 minutes
         }
     }
 
@@ -110,8 +110,8 @@ impl SubscriptionInfo {
     /// If no purchase date is recorded, the balance is honoured (e.g. owner grants).
     fn active_topup_seconds(&self) -> i32 {
         match self.last_topup_at {
-            Some(t) if chrono::Utc::now() - t
-                < chrono::TimeDelta::days(terms::TOPUP_EXPIRY_DAYS) =>
+            Some(t)
+                if chrono::Utc::now() - t < chrono::TimeDelta::days(terms::TOPUP_EXPIRY_DAYS) =>
             {
                 self.topup_seconds_available
             }
@@ -173,7 +173,11 @@ mod tests {
 
     #[test]
     fn test_tier_display_and_parse_roundtrip() {
-        for tier in [SubscriptionTier::Free, SubscriptionTier::Basic, SubscriptionTier::Pro] {
+        for tier in [
+            SubscriptionTier::Free,
+            SubscriptionTier::Basic,
+            SubscriptionTier::Pro,
+        ] {
             let s = tier.to_string();
             let parsed: SubscriptionTier = s.parse().expect("should parse");
             assert_eq!(parsed, tier);
@@ -381,4 +385,3 @@ mod tests {
         assert_eq!(sub.total_available_seconds(), 0);
     }
 }
-

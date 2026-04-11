@@ -8,11 +8,11 @@ use url::Url;
 use teloxide::types::InlineKeyboardMarkup;
 
 use crate::downloader::{
-    build_caption, DownloadedItem, DownloadedMedia, Downloader, MediaInfo, MediaType,
+    DownloadedItem, DownloadedMedia, Downloader, MediaInfo, MediaType, build_caption,
 };
 use crate::premium::audio_extractor::AudioExtractor;
 use crate::storage::{CachedMedia, Storage};
-use crate::telegram_api::{resize_photo_if_needed, SentMedia, TelegramApi};
+use crate::telegram_api::{SentMedia, TelegramApi, resize_photo_if_needed};
 use crate::validator::validate_media_metadata;
 
 /// Persisted context for a premium action callback button, stored in the DB.
@@ -291,10 +291,7 @@ async fn send_media_group_step(
             }
             MediaType::Photo => {
                 let resized = resize_photo_if_needed(&item.filepath);
-                let path = resized
-                    .as_deref()
-                    .unwrap_or(&item.filepath)
-                    .to_path_buf();
+                let path = resized.as_deref().unwrap_or(&item.filepath).to_path_buf();
                 if let Some(p) = resized {
                     temp_resized.push(p);
                 }
@@ -390,7 +387,10 @@ async fn send_cached_media(
             .await
         {
             Ok(_) => {
-                log::info!("Successfully sent cached media group to chat_id: {}", chat_id);
+                log::info!(
+                    "Successfully sent cached media group to chat_id: {}",
+                    chat_id
+                );
                 Ok(None)
             }
             Err(e) => {
@@ -417,16 +417,23 @@ pub async fn process_download_request(
     // Cache check
     if let Some(cached) = storage.get_cached_media(clean_url_str).await {
         log::info!("Cache hit for {}", clean_url);
-        let is_single_video = cached.files.len() == 1
-            && cached.files[0].media_type == MediaType::Video;
+        let is_single_video =
+            cached.files.len() == 1 && cached.files[0].media_type == MediaType::Video;
 
         if is_single_video {
             // If we stored an audio path but the file is gone, re-download from scratch.
-            let audio_file_missing = cached.audio_cache_path.as_deref()
+            let audio_file_missing = cached
+                .audio_cache_path
+                .as_deref()
                 .is_some_and(|p| !std::path::Path::new(p).exists());
             if audio_file_missing {
-                log::warn!("Cached audio file missing for {}, falling through to re-download", clean_url);
-            } else if let Ok(sent_message_id) = send_cached_media(&cached, chat_id, message_id, telegram_api).await {
+                log::warn!(
+                    "Cached audio file missing for {}, falling through to re-download",
+                    clean_url
+                );
+            } else if let Ok(sent_message_id) =
+                send_cached_media(&cached, chat_id, message_id, telegram_api).await
+            {
                 storage
                     .log_request(
                         chat_id.0,
@@ -458,31 +465,29 @@ pub async fn process_download_request(
             return None;
         }
         // Cache send failed — fall through to normal download
-        log::warn!("Cache send failed for {}, falling through to download", clean_url);
+        log::warn!(
+            "Cache send failed for {}, falling through to download",
+            clean_url
+        );
     }
 
-    let info = match pre_download_validation(
-        &clean_url,
-        chat_id,
-        message_id,
-        downloader,
-        telegram_api,
-    )
-    .await
-    {
-        Ok(info) => info,
-        Err(_) => {
-            storage
-                .log_request(
-                    chat_id.0,
-                    clean_url_str,
-                    "validation_error",
-                    start.elapsed().as_millis() as i64,
-                )
-                .await;
-            return None;
-        }
-    };
+    let info =
+        match pre_download_validation(&clean_url, chat_id, message_id, downloader, telegram_api)
+            .await
+        {
+            Ok(info) => info,
+            Err(_) => {
+                storage
+                    .log_request(
+                        chat_id.0,
+                        clean_url_str,
+                        "validation_error",
+                        start.elapsed().as_millis() as i64,
+                    )
+                    .await;
+                return None;
+            }
+        };
 
     let downloaded = match download_step(
         &info,
@@ -513,43 +518,61 @@ pub async fn process_download_request(
 
     // For a single video item, run upload and audio extraction concurrently.
     // For groups or photos, just upload normally (no audio extraction).
-    let (file_ids, audio_cache_path, media_duration_secs, has_video, sent_message_id) = match &downloaded {
-        DownloadedMedia::Single(item) if item.media_type == MediaType::Video => {
-            let (send_result, audio_result) = tokio::join!(
-                send_single_item(item, &caption, chat_id, message_id, telegram_api),
-                audio_extractor.extract_audio(&item.filepath, info.title.clone(), info.uploader.clone())
-            );
-            let (file_ids, sent_msg_id) = match send_result {
-                Some((file_id, media_type, msg_id)) => (Some(vec![(file_id, media_type)]), Some(msg_id)),
-                None => (None, None),
-            };
-            let (audio_cache_path, media_duration_secs) = match audio_result {
-                Ok(result) => (Some(result.audio_path), Some(result.duration_secs)),
-                Err(e) => {
-                    log::warn!("Audio extraction failed: {}", e);
-                    (None, None)
-                }
-            };
-            (file_ids, audio_cache_path, media_duration_secs, true, sent_msg_id)
-        }
-        DownloadedMedia::Single(item) => {
-            let (file_ids, sent_msg_id) = match send_single_item(item, &caption, chat_id, message_id, telegram_api).await {
-                Some((file_id, media_type, msg_id)) => (Some(vec![(file_id, media_type)]), Some(msg_id)),
-                None => (None, None),
-            };
-            (file_ids, None, None, false, sent_msg_id)
-        }
-        DownloadedMedia::Group(items) => {
-            let file_ids = send_media_group_step(items, &caption, chat_id, message_id, telegram_api)
-                .await
-                .map(|sent| {
-                    sent.into_iter()
-                        .map(|s| (s.file_id, s.media_type))
-                        .collect()
-                });
-            (file_ids, None, None, false, None)
-        }
-    };
+    let (file_ids, audio_cache_path, media_duration_secs, has_video, sent_message_id) =
+        match &downloaded {
+            DownloadedMedia::Single(item) if item.media_type == MediaType::Video => {
+                let (send_result, audio_result) = tokio::join!(
+                    send_single_item(item, &caption, chat_id, message_id, telegram_api),
+                    audio_extractor.extract_audio(
+                        &item.filepath,
+                        info.title.clone(),
+                        info.uploader.clone()
+                    )
+                );
+                let (file_ids, sent_msg_id) = match send_result {
+                    Some((file_id, media_type, msg_id)) => {
+                        (Some(vec![(file_id, media_type)]), Some(msg_id))
+                    }
+                    None => (None, None),
+                };
+                let (audio_cache_path, media_duration_secs) = match audio_result {
+                    Ok(result) => (Some(result.audio_path), Some(result.duration_secs)),
+                    Err(e) => {
+                        log::warn!("Audio extraction failed: {}", e);
+                        (None, None)
+                    }
+                };
+                (
+                    file_ids,
+                    audio_cache_path,
+                    media_duration_secs,
+                    true,
+                    sent_msg_id,
+                )
+            }
+            DownloadedMedia::Single(item) => {
+                let (file_ids, sent_msg_id) =
+                    match send_single_item(item, &caption, chat_id, message_id, telegram_api).await
+                    {
+                        Some((file_id, media_type, msg_id)) => {
+                            (Some(vec![(file_id, media_type)]), Some(msg_id))
+                        }
+                        None => (None, None),
+                    };
+                (file_ids, None, None, false, sent_msg_id)
+            }
+            DownloadedMedia::Group(items) => {
+                let file_ids =
+                    send_media_group_step(items, &caption, chat_id, message_id, telegram_api)
+                        .await
+                        .map(|sent| {
+                            sent.into_iter()
+                                .map(|s| (s.file_id, s.media_type))
+                                .collect()
+                        });
+                (file_ids, None, None, false, None)
+            }
+        };
 
     let elapsed_ms = start.elapsed().as_millis() as i64;
 
@@ -568,7 +591,10 @@ pub async fn process_download_request(
                 clean_url_str,
                 &caption,
                 files,
-                audio_cache_path.as_deref().and_then(|p| p.to_str()).map(String::from),
+                audio_cache_path
+                    .as_deref()
+                    .and_then(|p| p.to_str())
+                    .map(String::from),
                 media_duration_secs,
             )
             .await;
@@ -635,7 +661,9 @@ pub async fn maybe_send_premium_buttons(
         chat_id: chat_id.0,
         has_video: ctx.has_video,
         media_duration_secs: ctx.media_duration_secs,
-        audio_cache_path: ctx.audio_cache_path.map(|p| p.to_string_lossy().to_string()),
+        audio_cache_path: ctx
+            .audio_cache_path
+            .map(|p| p.to_string_lossy().to_string()),
         transcript: None,
         transcript_language: None,
     };
@@ -655,10 +683,7 @@ pub async fn maybe_send_premium_buttons(
             "Transcribe",
             format!("txn:{}", context_id),
         ),
-        teloxide::types::InlineKeyboardButton::callback(
-            "Summarize",
-            format!("sum:{}", context_id),
-        ),
+        teloxide::types::InlineKeyboardButton::callback("Summarize", format!("sum:{}", context_id)),
     ]]);
 
     if let Err(e) = api
@@ -686,27 +711,24 @@ mod tests {
     /// Helper to create a MockStorage that returns no cache and expects log_request.
     fn create_default_mock_storage() -> MockStorage {
         let mut mock_storage = MockStorage::new();
-        mock_storage
-            .expect_get_cached_media()
-            .returning(|_| None);
+        mock_storage.expect_get_cached_media().returning(|_| None);
         mock_storage
             .expect_store_cached_media()
             .returning(|_, _, _, _, _: Option<i32>| ());
-        mock_storage
-            .expect_log_request()
-            .returning(|_, _, _, _| ());
+        mock_storage.expect_log_request().returning(|_, _, _, _| ());
         mock_storage
     }
 
     /// Helper to create a MockAudioExtractor that fails (non-fatal).
     fn create_failing_audio_extractor() -> MockAudioExtractor {
         let mut mock = MockAudioExtractor::new();
-        mock.expect_extract_audio()
-            .returning(|_, _, _| {
-                Err(crate::premium::audio_extractor::AudioExtractionError::FfmpegError(
+        mock.expect_extract_audio().returning(|_, _, _| {
+            Err(
+                crate::premium::audio_extractor::AudioExtractionError::FfmpegError(
                     "not available in test".to_string(),
-                ))
-            });
+                ),
+            )
+        });
         mock
     }
 
@@ -942,9 +964,7 @@ mod tests {
         let mut mock_storage = MockStorage::new();
         let test_url = Url::parse("https://instagram.com/p/too_long").unwrap();
 
-        mock_storage
-            .expect_get_cached_media()
-            .returning(|_| None);
+        mock_storage.expect_get_cached_media().returning(|_| None);
 
         mock_downloader
             .expect_get_media_metadata()
@@ -989,9 +1009,7 @@ mod tests {
         let mut mock_storage = MockStorage::new();
         let test_url = Url::parse("https://instagram.com/p/invalid_post").unwrap();
 
-        mock_storage
-            .expect_get_cached_media()
-            .returning(|_| None);
+        mock_storage.expect_get_cached_media().returning(|_| None);
 
         mock_downloader
             .expect_get_media_metadata()
@@ -1040,9 +1058,7 @@ mod tests {
         let mut mock_storage = MockStorage::new();
         let test_url = Url::parse("https://instagram.com/p/slow_video").unwrap();
 
-        mock_storage
-            .expect_get_cached_media()
-            .returning(|_| None);
+        mock_storage.expect_get_cached_media().returning(|_| None);
 
         mock_downloader
             .expect_get_media_metadata()
@@ -1091,9 +1107,7 @@ mod tests {
         let mut mock_storage = MockStorage::new();
         let test_url = Url::parse("https://instagram.com/p/private_post").unwrap();
 
-        mock_storage
-            .expect_get_cached_media()
-            .returning(|_| None);
+        mock_storage.expect_get_cached_media().returning(|_| None);
 
         mock_downloader
             .expect_get_media_metadata()
@@ -1143,27 +1157,25 @@ mod tests {
         let test_url = Url::parse("https://instagram.com/p/stale_cache").unwrap();
 
         // Cache returns data but send fails (e.g. stale file_id)
-        mock_storage
-            .expect_get_cached_media()
-            .returning(|_| {
-                Some(CachedMedia {
-                    caption: "old caption".to_string(),
-                    files: vec![crate::storage::CachedFile {
-                        telegram_file_id: "stale_file_id".to_string(),
-                        media_type: MediaType::Video,
-                    }],
-                    audio_cache_path: None,
-                    media_duration_secs: None,
-                })
-            });
+        mock_storage.expect_get_cached_media().returning(|_| {
+            Some(CachedMedia {
+                caption: "old caption".to_string(),
+                files: vec![crate::storage::CachedFile {
+                    telegram_file_id: "stale_file_id".to_string(),
+                    media_type: MediaType::Video,
+                }],
+                audio_cache_path: None,
+                media_duration_secs: None,
+            })
+        });
 
         mock_telegram_api
             .expect_send_cached_video()
             .times(1)
             .returning(|_, _, _, _| {
-                Err(teloxide::RequestError::Api(
-                    teloxide::ApiError::Unknown("Bad Request: wrong file_id".to_string()),
-                ))
+                Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
+                    "Bad Request: wrong file_id".to_string(),
+                )))
             });
 
         // Falls through to normal download pipeline
@@ -1222,31 +1234,27 @@ mod tests {
         let mut mock_storage = MockStorage::new();
         let test_url = Url::parse("https://instagram.com/p/send_fail").unwrap();
 
-        mock_storage
-            .expect_get_cached_media()
-            .returning(|_| None);
+        mock_storage.expect_get_cached_media().returning(|_| None);
 
         mock_downloader
             .expect_get_media_metadata()
             .returning(|_| Ok(create_test_info()));
 
-        mock_downloader
-            .expect_download_media()
-            .returning(|_, _| {
-                Ok(DownloadedMedia::Single(DownloadedItem {
-                    filepath: PathBuf::from("/tmp/video.mp4"),
-                    media_type: MediaType::Video,
-                    thumbnail_filepath: None,
-                }))
-            });
+        mock_downloader.expect_download_media().returning(|_, _| {
+            Ok(DownloadedMedia::Single(DownloadedItem {
+                filepath: PathBuf::from("/tmp/video.mp4"),
+                media_type: MediaType::Video,
+                thumbnail_filepath: None,
+            }))
+        });
 
         mock_telegram_api
             .expect_send_video()
             .times(1)
             .returning(|_, _, _, _, _| {
-                Err(teloxide::RequestError::Api(
-                    teloxide::ApiError::Unknown("Request Entity Too Large".to_string()),
-                ))
+                Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
+                    "Request Entity Too Large".to_string(),
+                )))
             });
 
         // send_single_item sends error text on failure
@@ -1470,19 +1478,17 @@ mod tests {
         let mut mock_storage = MockStorage::new();
         let test_url = Url::parse("https://instagram.com/p/cached_photo").unwrap();
 
-        mock_storage
-            .expect_get_cached_media()
-            .returning(|_| {
-                Some(CachedMedia {
-                    caption: "photo caption".to_string(),
-                    files: vec![crate::storage::CachedFile {
-                        telegram_file_id: "cached_photo_id".to_string(),
-                        media_type: MediaType::Photo,
-                    }],
-                    audio_cache_path: None,
-                    media_duration_secs: None,
-                })
-            });
+        mock_storage.expect_get_cached_media().returning(|_| {
+            Some(CachedMedia {
+                caption: "photo caption".to_string(),
+                files: vec![crate::storage::CachedFile {
+                    telegram_file_id: "cached_photo_id".to_string(),
+                    media_type: MediaType::Photo,
+                }],
+                audio_cache_path: None,
+                media_duration_secs: None,
+            })
+        });
 
         mock_telegram_api
             .expect_send_cached_photo()
@@ -1495,9 +1501,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _| Ok(()));
 
-        mock_storage
-            .expect_log_request()
-            .returning(|_, _, _, _| ());
+        mock_storage.expect_log_request().returning(|_, _, _, _| ());
 
         process_download_request(
             &test_url,
@@ -1518,37 +1522,31 @@ mod tests {
         let mut mock_storage = MockStorage::new();
         let test_url = Url::parse("https://instagram.com/p/cached_group").unwrap();
 
-        mock_storage
-            .expect_get_cached_media()
-            .returning(|_| {
-                Some(CachedMedia {
-                    caption: "group caption".to_string(),
-                    files: vec![
-                        crate::storage::CachedFile {
-                            telegram_file_id: "file_1".to_string(),
-                            media_type: MediaType::Video,
-                        },
-                        crate::storage::CachedFile {
-                            telegram_file_id: "file_2".to_string(),
-                            media_type: MediaType::Photo,
-                        },
-                    ],
-                    audio_cache_path: None,
-                    media_duration_secs: None,
-                })
-            });
+        mock_storage.expect_get_cached_media().returning(|_| {
+            Some(CachedMedia {
+                caption: "group caption".to_string(),
+                files: vec![
+                    crate::storage::CachedFile {
+                        telegram_file_id: "file_1".to_string(),
+                        media_type: MediaType::Video,
+                    },
+                    crate::storage::CachedFile {
+                        telegram_file_id: "file_2".to_string(),
+                        media_type: MediaType::Photo,
+                    },
+                ],
+                audio_cache_path: None,
+                media_duration_secs: None,
+            })
+        });
 
         mock_telegram_api
             .expect_send_cached_media_group()
-            .withf(|_, _, files, caption| {
-                files.len() == 2 && caption == "group caption"
-            })
+            .withf(|_, _, files, caption| files.len() == 2 && caption == "group caption")
             .times(1)
             .returning(|_, _, _, _| Ok(()));
 
-        mock_storage
-            .expect_log_request()
-            .returning(|_, _, _, _| ());
+        mock_storage.expect_log_request().returning(|_, _, _, _| ());
 
         process_download_request(
             &test_url,
@@ -1569,23 +1567,19 @@ mod tests {
         let mut mock_storage = MockStorage::new();
         let test_url = Url::parse("https://instagram.com/p/new_post").unwrap();
 
-        mock_storage
-            .expect_get_cached_media()
-            .returning(|_| None);
+        mock_storage.expect_get_cached_media().returning(|_| None);
 
         mock_downloader
             .expect_get_media_metadata()
             .returning(|_| Ok(create_test_info()));
 
-        mock_downloader
-            .expect_download_media()
-            .returning(|_, _| {
-                Ok(DownloadedMedia::Single(DownloadedItem {
-                    filepath: PathBuf::from("/tmp/video.mp4"),
-                    media_type: MediaType::Video,
-                    thumbnail_filepath: None,
-                }))
-            });
+        mock_downloader.expect_download_media().returning(|_, _| {
+            Ok(DownloadedMedia::Single(DownloadedItem {
+                filepath: PathBuf::from("/tmp/video.mp4"),
+                media_type: MediaType::Video,
+                thumbnail_filepath: None,
+            }))
+        });
 
         mock_telegram_api
             .expect_send_video()
@@ -1654,14 +1648,12 @@ mod tests {
             .returning(|_, _, _, _, _| Ok(("file_id_123".to_string(), MessageId(0))));
 
         let mut mock_audio = MockAudioExtractor::new();
-        mock_audio
-            .expect_extract_audio()
-            .returning(|_, _, _| {
-                Ok(AudioExtractionResult {
-                    audio_path: PathBuf::from("/tmp/audio_cache/test.mp3"),
-                    duration_secs: 42,
-                })
-            });
+        mock_audio.expect_extract_audio().returning(|_, _, _| {
+            Ok(AudioExtractionResult {
+                audio_path: PathBuf::from("/tmp/audio_cache/test.mp3"),
+                duration_secs: 42,
+            })
+        });
 
         let ctx = process_download_request(
             &test_url,
@@ -1694,15 +1686,13 @@ mod tests {
             .expect_get_media_metadata()
             .returning(|_| Ok(create_test_info()));
 
-        mock_downloader
-            .expect_download_media()
-            .returning(|_, _| {
-                Ok(DownloadedMedia::Single(DownloadedItem {
-                    filepath: PathBuf::from("/tmp/photo.jpg"),
-                    media_type: MediaType::Photo,
-                    thumbnail_filepath: None,
-                }))
-            });
+        mock_downloader.expect_download_media().returning(|_, _| {
+            Ok(DownloadedMedia::Single(DownloadedItem {
+                filepath: PathBuf::from("/tmp/photo.jpg"),
+                media_type: MediaType::Photo,
+                thumbnail_filepath: None,
+            }))
+        });
 
         mock_telegram_api
             .expect_send_photo()
@@ -1832,9 +1822,21 @@ mod tests {
             .withf(|chat_id, msg_id, keyboard| {
                 chat_id.0 == 1
                     && msg_id.0 == 99
-                    && keyboard.inline_keyboard.iter().flatten().any(|b| b.text == "Extract Audio")
-                    && keyboard.inline_keyboard.iter().flatten().any(|b| b.text == "Transcribe")
-                    && keyboard.inline_keyboard.iter().flatten().any(|b| b.text == "Summarize")
+                    && keyboard
+                        .inline_keyboard
+                        .iter()
+                        .flatten()
+                        .any(|b| b.text == "Extract Audio")
+                    && keyboard
+                        .inline_keyboard
+                        .iter()
+                        .flatten()
+                        .any(|b| b.text == "Transcribe")
+                    && keyboard
+                        .inline_keyboard
+                        .iter()
+                        .flatten()
+                        .any(|b| b.text == "Summarize")
             })
             .times(1)
             .returning(|_, _, _| Ok(()));

@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use teloxide::sugar::request::RequestReplyExt;
 use teloxide::{
     prelude::*,
-    types::{ChatAction, ChatId, InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, MessageId, ParseMode, ReactionType, TelegramTransactionId, UserId},
+    types::{
+        ChatAction, ChatId, InlineKeyboardMarkup, InputFile, InputMedia, InputMediaPhoto,
+        InputMediaVideo, MessageId, ParseMode, ReactionType, TelegramTransactionId, UserId,
+    },
 };
 
 use crate::downloader::MediaType;
@@ -30,7 +33,10 @@ pub(crate) fn resize_photo_if_needed(path: &Path) -> Option<PathBuf> {
     let new_h = (h as f64 * scale).round() as u32;
     log::info!(
         "Resizing photo from {}x{} to {}x{} before sending to Telegram",
-        w, h, new_w, new_h
+        w,
+        h,
+        new_w,
+        new_h
     );
     let resized = img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
@@ -366,7 +372,8 @@ impl TelegramApi for TeloxideApi {
         log::info!("Sending cached video to chat {}", chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadVideo)
             .await?;
-        let msg = self.bot
+        let msg = self
+            .bot
             .send_video(chat_id, InputFile::file_id(file_id.to_owned().into()))
             .caption(caption.to_owned())
             .parse_mode(ParseMode::Html)
@@ -488,7 +495,11 @@ impl TelegramApi for TeloxideApi {
         callback_query_id: &str,
         text: Option<String>,
     ) -> Result<(), teloxide::RequestError> {
-        let mut req = self.bot.answer_callback_query(teloxide::types::CallbackQueryId(callback_query_id.to_string()));
+        let mut req = self
+            .bot
+            .answer_callback_query(teloxide::types::CallbackQueryId(
+                callback_query_id.to_string(),
+            ));
         if let Some(t) = text {
             req = req.text(t);
         }
@@ -502,9 +513,10 @@ impl TelegramApi for TeloxideApi {
         ok: bool,
         error_message: Option<String>,
     ) -> Result<(), teloxide::RequestError> {
-        let mut req = self
-            .bot
-            .answer_pre_checkout_query(teloxide::types::PreCheckoutQueryId(pre_checkout_query_id.to_string()), ok);
+        let mut req = self.bot.answer_pre_checkout_query(
+            teloxide::types::PreCheckoutQueryId(pre_checkout_query_id.to_string()),
+            ok,
+        );
         if let Some(msg) = error_message {
             req = req.error_message(msg);
         }

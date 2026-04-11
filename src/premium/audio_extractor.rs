@@ -58,9 +58,12 @@ impl AudioExtractor for FfmpegAudioExtractor {
         // Step 1: ffprobe to get duration
         let ffprobe_output = tokio::process::Command::new("ffprobe")
             .args([
-                "-v", "quiet",
-                "-show_entries", "format=duration",
-                "-of", "json",
+                "-v",
+                "quiet",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
             ])
             .arg(video_path)
             .output()
@@ -72,9 +75,8 @@ impl AudioExtractor for FfmpegAudioExtractor {
             return Err(AudioExtractionError::FfprobeError(stderr));
         }
 
-        let ffprobe_json: serde_json::Value =
-            serde_json::from_slice(&ffprobe_output.stdout)
-                .map_err(|e| AudioExtractionError::ParseError(e.to_string()))?;
+        let ffprobe_json: serde_json::Value = serde_json::from_slice(&ffprobe_output.stdout)
+            .map_err(|e| AudioExtractionError::ParseError(e.to_string()))?;
 
         let duration_secs = ffprobe_json["format"]["duration"]
             .as_str()
@@ -92,9 +94,12 @@ impl AudioExtractor for FfmpegAudioExtractor {
         let mut cmd = tokio::process::Command::new("ffmpeg");
         cmd.args(["-i"]).arg(video_path).args([
             "-vn",
-            "-acodec", "libmp3lame",
-            "-q:a", "2",
-            "-threads", "1",
+            "-acodec",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            "-threads",
+            "1",
         ]);
         if let Some(t) = title {
             let truncated: String = t.chars().take(MAX_TAG_LEN).collect();

@@ -2,12 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{
-    ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, MessageKind,
-};
+use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, MessageKind};
 
 use crate::concurrency::ConcurrencyLimiter;
-use crate::handler::{send_long_text, CallbackContext};
+use crate::handler::{CallbackContext, send_long_text};
 use crate::premium::summarizer::Summarizer;
 use crate::premium::transcriber::{DeepgramUsage, Transcriber};
 use crate::premium::{
@@ -16,7 +14,7 @@ use crate::premium::{
 };
 use crate::storage::Storage;
 use crate::subscription::{
-    SubscriptionTier, PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, TOPUP_PRICE_STARS,
+    PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_PRICE_STARS,
     TOPUP_SECONDS,
 };
 use crate::telegram_api::TelegramApi;
@@ -27,7 +25,11 @@ pub async fn handle_subscribe(
     message: Message,
     storage: Arc<dyn Storage>,
 ) -> ResponseResult<()> {
-    let user_id = message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(message.chat.id.0);
+    let user_id = message
+        .from
+        .as_ref()
+        .map(|u| u.id.0 as i64)
+        .unwrap_or(message.chat.id.0);
     let sub = storage.get_subscription(user_id).await;
     let status_line = if sub.tier == SubscriptionTier::Free {
         if sub.topup_seconds_available > 0 {
@@ -95,10 +97,15 @@ pub async fn handle_grant(
         return Ok(()); // silently ignore non-owner
     }
 
-    const USAGE: &str =
-        "Usage:\n/grant [user_id] &lt;tier&gt; [days]  (tier: basic, pro, ultra, free)\n/grant [user_id] topup &lt;minutes&gt;";
+    const USAGE: &str = "Usage:\n/grant [user_id] &lt;tier&gt; [days]  (tier: basic, pro, ultra, free)\n/grant [user_id] topup &lt;minutes&gt;";
     let parts: Vec<&str> = args.trim().split_whitespace().collect();
-    let self_uid = || message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(message.chat.id.0);
+    let self_uid = || {
+        message
+            .from
+            .as_ref()
+            .map(|u| u.id.0 as i64)
+            .unwrap_or(message.chat.id.0)
+    };
 
     // Handle topup grants separately: [user_id] topup <minutes>
     let topup_grant: Option<(i64, i32)> = match parts.as_slice() {
@@ -107,7 +114,8 @@ pub async fn handle_grant(
             match m {
                 Some(mins) => Some((self_uid(), mins)),
                 None => {
-                    api.send_text_message(message.chat.id, message.id, USAGE).await?;
+                    api.send_text_message(message.chat.id, message.id, USAGE)
+                        .await?;
                     return Ok(());
                 }
             }
@@ -118,7 +126,8 @@ pub async fn handle_grant(
             match (uid, m) {
                 (Some(uid), Some(mins)) => Some((uid, mins)),
                 _ => {
-                    api.send_text_message(message.chat.id, message.id, USAGE).await?;
+                    api.send_text_message(message.chat.id, message.id, USAGE)
+                        .await?;
                     return Ok(());
                 }
             }
@@ -132,7 +141,10 @@ pub async fn handle_grant(
         api.send_text_message(
             message.chat.id,
             message.id,
-            &format!("Granted {} top-up minutes to user_id {}", minutes, target_user_id),
+            &format!(
+                "Granted {} top-up minutes to user_id {}",
+                minutes, target_user_id
+            ),
         )
         .await?;
         return Ok(());
@@ -151,7 +163,8 @@ pub async fn handle_grant(
             let d = match days_str.parse::<i64>() {
                 Ok(d) if d > 0 => d,
                 _ => {
-                    api.send_text_message(message.chat.id, message.id, USAGE).await?;
+                    api.send_text_message(message.chat.id, message.id, USAGE)
+                        .await?;
                     return Ok(());
                 }
             };
@@ -161,21 +174,24 @@ pub async fn handle_grant(
             let uid = match user_id_str.parse::<i64>() {
                 Ok(id) => id,
                 Err(_) => {
-                    api.send_text_message(message.chat.id, message.id, USAGE).await?;
+                    api.send_text_message(message.chat.id, message.id, USAGE)
+                        .await?;
                     return Ok(());
                 }
             };
             let d = match days_str.parse::<i64>() {
                 Ok(d) if d > 0 => d,
                 _ => {
-                    api.send_text_message(message.chat.id, message.id, USAGE).await?;
+                    api.send_text_message(message.chat.id, message.id, USAGE)
+                        .await?;
                     return Ok(());
                 }
             };
             (uid, *tier, d)
         }
         _ => {
-            api.send_text_message(message.chat.id, message.id, USAGE).await?;
+            api.send_text_message(message.chat.id, message.id, USAGE)
+                .await?;
             return Ok(());
         }
     };
@@ -205,7 +221,10 @@ pub async fn handle_grant(
     api.send_text_message(
         message.chat.id,
         message.id,
-        &format!("Granted {} to user_id {} {}", tier, target_user_id, duration_label),
+        &format!(
+            "Granted {} to user_id {} {}",
+            tier, target_user_id, duration_label
+        ),
     )
     .await?;
     Ok(())
@@ -229,7 +248,7 @@ Please describe your issue after the command, for example:
 <code>/support My subscription did not activate after payment</code>
 
 Note: <b>Telegram support and BotFather cannot help with purchases made through CrabberBot.</b> \
-All support is handled directly by us."},
+            All support is handled directly by us."},
         )
         .await?;
         return Ok(());
@@ -251,7 +270,11 @@ All support is handled directly by us."},
             .and_then(|u| u.username.as_deref())
             .map(|u| format!("@{u}"))
             .unwrap_or_else(|| "(no username)".to_string());
-        let from_user_id = message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(chat_id.0);
+        let from_user_id = message
+            .from
+            .as_ref()
+            .map(|u| u.id.0 as i64)
+            .unwrap_or(chat_id.0);
 
         // Always include subscription status and recent charges
         let sub = storage.get_subscription(from_user_id).await;
@@ -313,13 +336,15 @@ pub async fn handle_reply(
     let target: i64 = match chat_id_str.parse() {
         Ok(id) => id,
         Err(_) => {
-            api.send_text_message(message.chat.id, message.id, "Invalid chat_id.").await?;
+            api.send_text_message(message.chat.id, message.id, "Invalid chat_id.")
+                .await?;
             return Ok(());
         }
     };
     let text = format!("<b>Support reply:</b>\n{}", reply_text.trim());
     let _ = api.send_text_no_reply(ChatId(target), &text).await;
-    api.send_text_message(message.chat.id, message.id, "Reply sent.").await?;
+    api.send_text_message(message.chat.id, message.id, "Reply sent.")
+        .await?;
     Ok(())
 }
 
@@ -329,7 +354,11 @@ pub async fn handle_refundme(
     message: Message,
 ) -> ResponseResult<()> {
     let chat_id = message.chat.id;
-    let user_id = message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(chat_id.0);
+    let user_id = message
+        .from
+        .as_ref()
+        .map(|u| u.id.0 as i64)
+        .unwrap_or(chat_id.0);
 
     let payment = match storage.get_latest_payment(user_id).await {
         Some(p) => p,
@@ -345,7 +374,10 @@ pub async fn handle_refundme(
         }
     };
 
-    if storage.has_ai_usage_since(user_id, payment.created_at).await {
+    if storage
+        .has_ai_usage_since(user_id, payment.created_at)
+        .await
+    {
         api.send_text_message(
             chat_id,
             message.id,
@@ -359,7 +391,10 @@ pub async fn handle_refundme(
     }
 
     // No AI usage since purchase — auto-refund via Telegram Stars API
-    if let Err(e) = api.refund_star_payment(user_id, &payment.telegram_charge_id).await {
+    if let Err(e) = api
+        .refund_star_payment(user_id, &payment.telegram_charge_id)
+        .await
+    {
         log::warn!("Telegram refund API error for user {}: {}", user_id, e);
         api.send_text_message(
             chat_id,
@@ -380,7 +415,11 @@ pub async fn handle_refundme(
             storage.revoke_topup(user_id, TOPUP_SECONDS).await;
         }
         _ => {
-            log::warn!("Unknown product in /refundme for user {}: {}", user_id, payment.product);
+            log::warn!(
+                "Unknown product in /refundme for user {}: {}",
+                user_id,
+                payment.product
+            );
         }
     }
 
@@ -413,7 +452,8 @@ pub async fn handle_refund(
         let uid: i64 = match user_id_str.parse() {
             Ok(id) => id,
             Err(_) => {
-                api.send_text_message(message.chat.id, message.id, "Invalid user_id.").await?;
+                api.send_text_message(message.chat.id, message.id, "Invalid user_id.")
+                    .await?;
                 return Ok(());
             }
         };
@@ -434,7 +474,8 @@ pub async fn handle_refund(
                     p.telegram_charge_id, p.product, p.amount,
                 ));
             }
-            api.send_text_message(message.chat.id, message.id, &lines).await?;
+            api.send_text_message(message.chat.id, message.id, &lines)
+                .await?;
         }
         return Ok(());
     }
@@ -456,7 +497,8 @@ pub async fn handle_refund(
     let target_user_id: i64 = match user_id_str.parse() {
         Ok(id) => id,
         Err(_) => {
-            api.send_text_message(message.chat.id, message.id, "Invalid user_id.").await?;
+            api.send_text_message(message.chat.id, message.id, "Invalid user_id.")
+                .await?;
             return Ok(());
         }
     };
@@ -514,7 +556,11 @@ pub async fn handle_successful_payment(
 
     let chat_id = message.chat.id;
     // Subscription is keyed by user_id so it follows the person across all chats.
-    let user_id = message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(chat_id.0);
+    let user_id = message
+        .from
+        .as_ref()
+        .map(|u| u.id.0 as i64)
+        .unwrap_or(chat_id.0);
     let product = &payment.invoice_payload;
     let amount = payment.total_amount;
 
@@ -581,7 +627,11 @@ pub async fn handle_refunded_payment(
         _ => return Ok(()),
     };
     let chat_id = message.chat.id;
-    let user_id = message.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(chat_id.0);
+    let user_id = message
+        .from
+        .as_ref()
+        .map(|u| u.id.0 as i64)
+        .unwrap_or(chat_id.0);
     let product = &refund.invoice_payload;
     log::info!(
         "Refunded payment: user_id={} product={} charge_id={}",
@@ -646,7 +696,9 @@ pub async fn handle_callback_query(
     };
     let (chat_id, message_id) = match query.message.as_ref() {
         Some(teloxide::types::MaybeInaccessibleMessage::Regular(msg)) => (msg.chat.id, msg.id),
-        Some(teloxide::types::MaybeInaccessibleMessage::Inaccessible(msg)) => (msg.chat.id, msg.message_id),
+        Some(teloxide::types::MaybeInaccessibleMessage::Inaccessible(msg)) => {
+            (msg.chat.id, msg.message_id)
+        }
         None => return Ok(()),
     };
     // Subscription is keyed by user_id, not chat_id, so premium features work in group chats.
@@ -666,7 +718,9 @@ pub async fn handle_callback_query(
     }
 
     if data == "cancel:purchase" {
-        let _ = api.send_text_message(chat_id, message_id, "Purchase cancelled.").await;
+        let _ = api
+            .send_text_message(chat_id, message_id, "Purchase cancelled.")
+            .await;
         return Ok(());
     }
 
@@ -736,9 +790,37 @@ pub async fn handle_callback_query(
     };
 
     match action {
-        "audio" => handle_audio_extraction(&ctx, user_id, chat_id, message_id, &*api, &*storage).await?,
-        "txn" => handle_transcription(context_id, &ctx, user_id, chat_id, message_id, &*api, &*storage, &*transcriber, &*summarizer).await?,
-        "sum" => handle_summarization(context_id, &ctx, user_id, chat_id, message_id, &*api, &*storage, &*transcriber, &*summarizer).await?,
+        "audio" => {
+            handle_audio_extraction(&ctx, user_id, chat_id, message_id, &*api, &*storage).await?
+        }
+        "txn" => {
+            handle_transcription(
+                context_id,
+                &ctx,
+                user_id,
+                chat_id,
+                message_id,
+                &*api,
+                &*storage,
+                &*transcriber,
+                &*summarizer,
+            )
+            .await?
+        }
+        "sum" => {
+            handle_summarization(
+                context_id,
+                &ctx,
+                user_id,
+                chat_id,
+                message_id,
+                &*api,
+                &*storage,
+                &*transcriber,
+                &*summarizer,
+            )
+            .await?
+        }
         _ => {}
     }
 
@@ -770,13 +852,12 @@ async fn handle_subscription_button(
     };
     let prompt = terms::terms_pre_purchase_prompt(product_name, price);
     let keyboard = InlineKeyboardMarkup::new(vec![vec![
-        InlineKeyboardButton::callback(
-            format!("I Agree & Buy — {} ⭐", price),
-            agree_data,
-        ),
+        InlineKeyboardButton::callback(format!("I Agree & Buy — {} ⭐", price), agree_data),
         InlineKeyboardButton::callback("Cancel", "cancel:purchase"),
     ]]);
-    let _ = api.send_text_with_keyboard(chat_id, message_id, &prompt, keyboard).await;
+    let _ = api
+        .send_text_with_keyboard(chat_id, message_id, &prompt, keyboard)
+        .await;
     Ok(())
 }
 
@@ -802,7 +883,9 @@ async fn handle_agree_button(
             TOPUP_PRICE_STARS,
         ),
     };
-    let _ = api.send_invoice(chat_id, title, description, payload, amount).await;
+    let _ = api
+        .send_invoice(chat_id, title, description, payload, amount)
+        .await;
     Ok(())
 }
 
@@ -844,7 +927,14 @@ async fn handle_audio_extraction(
         storage.consume_ai_seconds(user_id, duration_secs).await;
     }
     storage
-        .record_premium_usage(user_id, "audio_extract", &ctx.source_url, duration_secs, 0.0, 0.0)
+        .record_premium_usage(
+            user_id,
+            "audio_extract",
+            &ctx.source_url,
+            duration_secs,
+            0.0,
+            0.0,
+        )
         .await;
     Ok(())
 }
@@ -891,36 +981,44 @@ async fn handle_transcription(
         return Ok(());
     }
 
-    api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
+    api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
+        .await?;
 
     // Use cached transcript if available; otherwise call Deepgram and persist.
     // deepgram_usage = Some(DeepgramUsage { ... }) when Deepgram was actually called.
-    let (raw_transcript, detected_language, deepgram_usage) =
-        if let Some(cached) = &ctx.transcript {
-            (cached.clone(), ctx.transcript_language.clone(), None::<DeepgramUsage>)
-        } else {
-            let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
-            match transcriber.transcribe(&audio_path).await {
-                Ok(t) => {
-                    storage
-                        .cache_transcript(context_id, &t.transcript, t.detected_language.clone())
-                        .await;
-                    let usage = DeepgramUsage { billed_duration_secs: t.billed_duration_secs, cost_usd: t.cost_usd };
-                    (t.transcript, t.detected_language, Some(usage))
-                }
-                Err(e) => {
-                    log::error!("Transcription failed: {}", e);
-                    let _ = api
-                        .send_text_message(
-                            chat_id,
-                            message_id,
-                            "Sorry, transcription failed. Please try again later.",
-                        )
-                        .await;
-                    return Ok(()); // no quota deduction
-                }
+    let (raw_transcript, detected_language, deepgram_usage) = if let Some(cached) = &ctx.transcript
+    {
+        (
+            cached.clone(),
+            ctx.transcript_language.clone(),
+            None::<DeepgramUsage>,
+        )
+    } else {
+        let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
+        match transcriber.transcribe(&audio_path).await {
+            Ok(t) => {
+                storage
+                    .cache_transcript(context_id, &t.transcript, t.detected_language.clone())
+                    .await;
+                let usage = DeepgramUsage {
+                    billed_duration_secs: t.billed_duration_secs,
+                    cost_usd: t.cost_usd,
+                };
+                (t.transcript, t.detected_language, Some(usage))
             }
-        };
+            Err(e) => {
+                log::error!("Transcription failed: {}", e);
+                let _ = api
+                    .send_text_message(
+                        chat_id,
+                        message_id,
+                        "Sorry, transcription failed. Please try again later.",
+                    )
+                    .await;
+                return Ok(()); // no quota deduction
+            }
+        }
+    };
 
     let correction = match summarizer
         .correct_transcript(&raw_transcript, detected_language)
@@ -929,7 +1027,11 @@ async fn handle_transcription(
         Ok(result) => result,
         Err(e) => {
             log::error!("Transcript correction failed: {}", e);
-            crate::premium::summarizer::GeminiResult { text: raw_transcript, prompt_tokens: 0, output_tokens: 0 }
+            crate::premium::summarizer::GeminiResult {
+                text: raw_transcript,
+                prompt_tokens: 0,
+                output_tokens: 0,
+            }
         }
     };
 
@@ -939,20 +1041,43 @@ async fn handle_transcription(
     if let Some(dg) = deepgram_usage {
         storage.consume_ai_seconds(user_id, duration_secs).await;
         storage
-            .record_premium_usage(user_id, "transcribe", &ctx.source_url, duration_secs, dg.billed_duration_secs, dg.cost_usd)
+            .record_premium_usage(
+                user_id,
+                "transcribe",
+                &ctx.source_url,
+                duration_secs,
+                dg.billed_duration_secs,
+                dg.cost_usd,
+            )
             .await;
     }
     // Always record Gemini token usage for analytics (does not affect user quota).
     if correction.prompt_tokens > 0 {
-        let input_cost = correction.prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
+        let input_cost =
+            correction.prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
         storage
-            .record_premium_usage(user_id, "gemini_correction_input", &ctx.source_url, 0, correction.prompt_tokens as f64, input_cost)
+            .record_premium_usage(
+                user_id,
+                "gemini_correction_input",
+                &ctx.source_url,
+                0,
+                correction.prompt_tokens as f64,
+                input_cost,
+            )
             .await;
     }
     if correction.output_tokens > 0 {
-        let output_cost = correction.output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+        let output_cost =
+            correction.output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
         storage
-            .record_premium_usage(user_id, "gemini_correction_output", &ctx.source_url, 0, correction.output_tokens as f64, output_cost)
+            .record_premium_usage(
+                user_id,
+                "gemini_correction_output",
+                &ctx.source_url,
+                0,
+                correction.output_tokens as f64,
+                output_cost,
+            )
             .await;
     }
     Ok(())
@@ -1000,38 +1125,49 @@ async fn handle_summarization(
         return Ok(());
     }
 
-    api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await?;
+    api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
+        .await?;
 
     // Use cached transcript if available; otherwise call Deepgram and persist.
     // deepgram_usage = Some(DeepgramUsage { ... }) when Deepgram was actually called.
-    let (raw_transcript, detected_language, deepgram_usage) =
-        if let Some(cached) = &ctx.transcript {
-            (cached.clone(), ctx.transcript_language.clone(), None::<DeepgramUsage>)
-        } else {
-            let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
-            match transcriber.transcribe(&audio_path).await {
-                Ok(t) => {
-                    storage
-                        .cache_transcript(context_id, &t.transcript, t.detected_language.clone())
-                        .await;
-                    let usage = DeepgramUsage { billed_duration_secs: t.billed_duration_secs, cost_usd: t.cost_usd };
-                    (t.transcript, t.detected_language, Some(usage))
-                }
-                Err(e) => {
-                    log::error!("Transcription failed: {}", e);
-                    let _ = api
-                        .send_text_message(
-                            chat_id,
-                            message_id,
-                            "Sorry, transcription failed. Please try again later.",
-                        )
-                        .await;
-                    return Ok(()); // no quota deduction
-                }
+    let (raw_transcript, detected_language, deepgram_usage) = if let Some(cached) = &ctx.transcript
+    {
+        (
+            cached.clone(),
+            ctx.transcript_language.clone(),
+            None::<DeepgramUsage>,
+        )
+    } else {
+        let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
+        match transcriber.transcribe(&audio_path).await {
+            Ok(t) => {
+                storage
+                    .cache_transcript(context_id, &t.transcript, t.detected_language.clone())
+                    .await;
+                let usage = DeepgramUsage {
+                    billed_duration_secs: t.billed_duration_secs,
+                    cost_usd: t.cost_usd,
+                };
+                (t.transcript, t.detected_language, Some(usage))
             }
-        };
+            Err(e) => {
+                log::error!("Transcription failed: {}", e);
+                let _ = api
+                    .send_text_message(
+                        chat_id,
+                        message_id,
+                        "Sorry, transcription failed. Please try again later.",
+                    )
+                    .await;
+                return Ok(()); // no quota deduction
+            }
+        }
+    };
 
-    let summary = match summarizer.summarize(&raw_transcript, detected_language).await {
+    let summary = match summarizer
+        .summarize(&raw_transcript, detected_language)
+        .await
+    {
         Ok(result) => result,
         Err(e) => {
             log::error!("Summarization failed: {}", e);
@@ -1052,20 +1188,43 @@ async fn handle_summarization(
     if let Some(dg) = deepgram_usage {
         storage.consume_ai_seconds(user_id, duration_secs).await;
         storage
-            .record_premium_usage(user_id, "summarize", &ctx.source_url, duration_secs, dg.billed_duration_secs, dg.cost_usd)
+            .record_premium_usage(
+                user_id,
+                "summarize",
+                &ctx.source_url,
+                duration_secs,
+                dg.billed_duration_secs,
+                dg.cost_usd,
+            )
             .await;
     }
     // Always record Gemini token usage for analytics (does not affect user quota).
     if summary.prompt_tokens > 0 {
-        let input_cost = summary.prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
+        let input_cost =
+            summary.prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
         storage
-            .record_premium_usage(user_id, "gemini_summarize_input", &ctx.source_url, 0, summary.prompt_tokens as f64, input_cost)
+            .record_premium_usage(
+                user_id,
+                "gemini_summarize_input",
+                &ctx.source_url,
+                0,
+                summary.prompt_tokens as f64,
+                input_cost,
+            )
             .await;
     }
     if summary.output_tokens > 0 {
-        let output_cost = summary.output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+        let output_cost =
+            summary.output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
         storage
-            .record_premium_usage(user_id, "gemini_summarize_output", &ctx.source_url, 0, summary.output_tokens as f64, output_cost)
+            .record_premium_usage(
+                user_id,
+                "gemini_summarize_output",
+                &ctx.source_url,
+                0,
+                summary.output_tokens as f64,
+                output_cost,
+            )
             .await;
     }
     Ok(())
@@ -1235,13 +1394,9 @@ mod tests {
         }))
         .unwrap();
 
-        handle_pre_checkout_query(
-            teloxide::Bot::new("fake_token"),
-            Arc::new(mock_api),
-            query,
-        )
-        .await
-        .unwrap();
+        handle_pre_checkout_query(teloxide::Bot::new("fake_token"), Arc::new(mock_api), query)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1262,13 +1417,9 @@ mod tests {
         }))
         .unwrap();
 
-        handle_pre_checkout_query(
-            teloxide::Bot::new("fake_token"),
-            Arc::new(mock_api),
-            query,
-        )
-        .await
-        .unwrap();
+        handle_pre_checkout_query(teloxide::Bot::new("fake_token"), Arc::new(mock_api), query)
+            .await
+            .unwrap();
     }
 
     // ---------------------------------------------------------------------------
@@ -1386,9 +1537,16 @@ mod tests {
             transcript_language: None,
         };
 
-        handle_audio_extraction(&ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage)
-            .await
-            .unwrap();
+        handle_audio_extraction(
+            &ctx,
+            200,
+            ChatId(100),
+            MessageId(1),
+            &mock_api,
+            &mock_storage,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1425,9 +1583,16 @@ mod tests {
             transcript_language: None,
         };
 
-        handle_audio_extraction(&ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage)
-            .await
-            .unwrap();
+        handle_audio_extraction(
+            &ctx,
+            200,
+            ChatId(100),
+            MessageId(1),
+            &mock_api,
+            &mock_storage,
+        )
+        .await
+        .unwrap();
     }
 
     // ---------------------------------------------------------------------------
@@ -1467,7 +1632,9 @@ mod tests {
         let mut mock_transcriber = MockTranscriber::new();
         let mut mock_summarizer = MockSummarizer::new();
 
-        mock_storage.expect_get_subscription().returning(|_| active_basic_with_quota());
+        mock_storage
+            .expect_get_subscription()
+            .returning(|_| active_basic_with_quota());
         mock_api.expect_send_chat_action().returning(|_, _| Ok(()));
 
         mock_transcriber
@@ -1475,16 +1642,31 @@ mod tests {
             .times(1)
             .returning(|_| Ok(make_transcription_result("raw transcript")));
 
-        mock_storage.expect_cache_transcript().times(1).returning(|_, _, _| ());
+        mock_storage
+            .expect_cache_transcript()
+            .times(1)
+            .returning(|_, _, _| ());
 
         mock_summarizer
             .expect_correct_transcript()
             .times(1)
-            .returning(|_, _| Ok(crate::premium::summarizer::GeminiResult { text: "Corrected transcript.".to_string(), prompt_tokens: 1000, output_tokens: 500 }));
+            .returning(|_, _| {
+                Ok(crate::premium::summarizer::GeminiResult {
+                    text: "Corrected transcript.".to_string(),
+                    prompt_tokens: 1000,
+                    output_tokens: 500,
+                })
+            });
 
-        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+        mock_api
+            .expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
 
-        mock_storage.expect_consume_ai_seconds().times(1).returning(|_, _| ());
+        mock_storage
+            .expect_consume_ai_seconds()
+            .times(1)
+            .returning(|_, _| ());
         mock_storage
             .expect_record_premium_usage()
             .withf(|_, feature, _, _, _, _| feature == "transcribe")
@@ -1511,9 +1693,19 @@ mod tests {
             transcript_language: None,
         };
 
-        handle_transcription(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
-            .await
-            .unwrap();
+        handle_transcription(
+            42,
+            &ctx,
+            200,
+            ChatId(100),
+            MessageId(1),
+            &mock_api,
+            &mock_storage,
+            &mock_transcriber,
+            &mock_summarizer,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1525,16 +1717,27 @@ mod tests {
         let mock_transcriber = MockTranscriber::new(); // no expectations — panics if called
         let mut mock_summarizer = MockSummarizer::new();
 
-        mock_storage.expect_get_subscription().returning(|_| active_basic_with_quota());
+        mock_storage
+            .expect_get_subscription()
+            .returning(|_| active_basic_with_quota());
         mock_api.expect_send_chat_action().returning(|_, _| Ok(()));
 
         // cache_transcript must NOT be called since transcript already exists
         mock_summarizer
             .expect_correct_transcript()
             .times(1)
-            .returning(|_, _| Ok(crate::premium::summarizer::GeminiResult { text: "Corrected.".to_string(), prompt_tokens: 800, output_tokens: 400 }));
+            .returning(|_, _| {
+                Ok(crate::premium::summarizer::GeminiResult {
+                    text: "Corrected.".to_string(),
+                    prompt_tokens: 800,
+                    output_tokens: 400,
+                })
+            });
 
-        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+        mock_api
+            .expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
 
         // consume_ai_seconds must NOT be called — no expectations set, panics if invoked
         mock_storage
@@ -1558,9 +1761,19 @@ mod tests {
             transcript_language: Some("en".to_string()),
         };
 
-        handle_transcription(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
-            .await
-            .unwrap();
+        handle_transcription(
+            42,
+            &ctx,
+            200,
+            ChatId(100),
+            MessageId(1),
+            &mock_api,
+            &mock_storage,
+            &mock_transcriber,
+            &mock_summarizer,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1574,7 +1787,10 @@ mod tests {
         mock_storage
             .expect_get_subscription()
             .returning(|_| SubscriptionInfo::free_default()); // 0 seconds
-        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+        mock_api
+            .expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
 
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
@@ -1586,9 +1802,19 @@ mod tests {
             transcript_language: None,
         };
 
-        handle_transcription(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
-            .await
-            .unwrap();
+        handle_transcription(
+            42,
+            &ctx,
+            200,
+            ChatId(100),
+            MessageId(1),
+            &mock_api,
+            &mock_storage,
+            &mock_transcriber,
+            &mock_summarizer,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1599,8 +1825,13 @@ mod tests {
         let mock_transcriber = MockTranscriber::new();
         let mock_summarizer = MockSummarizer::new();
 
-        mock_storage.expect_get_subscription().returning(|_| active_basic_with_quota());
-        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+        mock_storage
+            .expect_get_subscription()
+            .returning(|_| active_basic_with_quota());
+        mock_api
+            .expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
 
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
@@ -1612,9 +1843,19 @@ mod tests {
             transcript_language: None,
         };
 
-        handle_transcription(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
-            .await
-            .unwrap();
+        handle_transcription(
+            42,
+            &ctx,
+            200,
+            ChatId(100),
+            MessageId(1),
+            &mock_api,
+            &mock_storage,
+            &mock_transcriber,
+            &mock_summarizer,
+        )
+        .await
+        .unwrap();
     }
 
     // ---------------------------------------------------------------------------
@@ -1630,7 +1871,9 @@ mod tests {
         let mut mock_transcriber = MockTranscriber::new();
         let mut mock_summarizer = MockSummarizer::new();
 
-        mock_storage.expect_get_subscription().returning(|_| active_basic_with_quota());
+        mock_storage
+            .expect_get_subscription()
+            .returning(|_| active_basic_with_quota());
         mock_api.expect_send_chat_action().returning(|_, _| Ok(()));
 
         mock_transcriber
@@ -1638,16 +1881,31 @@ mod tests {
             .times(1)
             .returning(|_| Ok(make_transcription_result("raw transcript")));
 
-        mock_storage.expect_cache_transcript().times(1).returning(|_, _, _| ());
+        mock_storage
+            .expect_cache_transcript()
+            .times(1)
+            .returning(|_, _, _| ());
 
         mock_summarizer
             .expect_summarize()
             .times(1)
-            .returning(|_, _| Ok(crate::premium::summarizer::GeminiResult { text: "• Point one\n\n• Point two".to_string(), prompt_tokens: 1200, output_tokens: 60 }));
+            .returning(|_, _| {
+                Ok(crate::premium::summarizer::GeminiResult {
+                    text: "• Point one\n\n• Point two".to_string(),
+                    prompt_tokens: 1200,
+                    output_tokens: 60,
+                })
+            });
 
-        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+        mock_api
+            .expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
 
-        mock_storage.expect_consume_ai_seconds().times(1).returning(|_, _| ());
+        mock_storage
+            .expect_consume_ai_seconds()
+            .times(1)
+            .returning(|_, _| ());
         mock_storage
             .expect_record_premium_usage()
             .withf(|_, feature, _, _, _, _| feature == "summarize")
@@ -1674,9 +1932,19 @@ mod tests {
             transcript_language: None,
         };
 
-        handle_summarization(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
-            .await
-            .unwrap();
+        handle_summarization(
+            42,
+            &ctx,
+            200,
+            ChatId(100),
+            MessageId(1),
+            &mock_api,
+            &mock_storage,
+            &mock_transcriber,
+            &mock_summarizer,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1688,15 +1956,26 @@ mod tests {
         let mock_transcriber = MockTranscriber::new(); // no expectations — panics if called
         let mut mock_summarizer = MockSummarizer::new();
 
-        mock_storage.expect_get_subscription().returning(|_| active_basic_with_quota());
+        mock_storage
+            .expect_get_subscription()
+            .returning(|_| active_basic_with_quota());
         mock_api.expect_send_chat_action().returning(|_, _| Ok(()));
 
         mock_summarizer
             .expect_summarize()
             .times(1)
-            .returning(|_, _| Ok(crate::premium::summarizer::GeminiResult { text: "• Point one".to_string(), prompt_tokens: 900, output_tokens: 30 }));
+            .returning(|_, _| {
+                Ok(crate::premium::summarizer::GeminiResult {
+                    text: "• Point one".to_string(),
+                    prompt_tokens: 900,
+                    output_tokens: 30,
+                })
+            });
 
-        mock_api.expect_send_text_message().times(1).returning(|_, _, _| Ok(()));
+        mock_api
+            .expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
 
         // consume_ai_seconds must NOT be called
         mock_storage
@@ -1720,8 +1999,18 @@ mod tests {
             transcript_language: Some("it".to_string()),
         };
 
-        handle_summarization(42, &ctx, 200, ChatId(100), MessageId(1), &mock_api, &mock_storage, &mock_transcriber, &mock_summarizer)
-            .await
-            .unwrap();
+        handle_summarization(
+            42,
+            &ctx,
+            200,
+            ChatId(100),
+            MessageId(1),
+            &mock_api,
+            &mock_storage,
+            &mock_transcriber,
+            &mock_summarizer,
+        )
+        .await
+        .unwrap();
     }
 }

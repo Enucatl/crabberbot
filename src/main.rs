@@ -20,10 +20,10 @@ use crabberbot::commands::{
 use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
 use crabberbot::handler::{maybe_send_premium_buttons, process_download_request};
+use crabberbot::premium::AUDIO_CACHE_DIR;
 use crabberbot::premium::audio_extractor::{AudioExtractor, FfmpegAudioExtractor};
 use crabberbot::premium::summarizer::{GeminiSummarizer, Summarizer};
 use crabberbot::premium::transcriber::{DeepgramTranscriber, Transcriber};
-use crabberbot::premium::AUDIO_CACHE_DIR;
 use crabberbot::storage::{PostgresStorage, Storage};
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 use crabberbot::terms;
@@ -66,12 +66,15 @@ async fn create_http_client() -> Result<Client, SetupError> {
                 data: headers, ..
             } = headers_resource
             {
-                log::info!("Successfully obtained GCP authentication headers. {:?}", headers);
+                log::info!(
+                    "Successfully obtained GCP authentication headers. {:?}",
+                    headers
+                );
                 let client = Client::builder().default_headers(headers).build()?;
                 Ok(client)
             } else {
                 Err(SetupError::HeadersError(
-                    "Failed to get new headers from credentials; received NotModified unexpectedly"
+                    "Failed to get new headers from credentials; received NotModified unexpectedly",
                 ))
             }
         }
@@ -121,7 +124,8 @@ If you encounter any issues, please double-check the URL or try again later. Not
                 .await?;
         }
         Command::Environment => {
-            let env = std::env::var("EXECUTION_ENVIRONMENT").unwrap_or_else(|_| "local".to_string());
+            let env =
+                std::env::var("EXECUTION_ENVIRONMENT").unwrap_or_else(|_| "local".to_string());
             let value = format!("CrabberBot environment {0}", env);
             api.send_text_message(message.chat.id, message.id, &value)
                 .await?;
@@ -153,9 +157,13 @@ async fn handle_owner_command(
     owner_chat_id: i64,
 ) -> ResponseResult<()> {
     match command {
-        OwnerCommand::Grant(args) => handle_grant(api, message, storage, args, owner_chat_id).await?,
+        OwnerCommand::Grant(args) => {
+            handle_grant(api, message, storage, args, owner_chat_id).await?
+        }
         OwnerCommand::Reply(args) => handle_reply(api, message, args, owner_chat_id).await?,
-        OwnerCommand::Refund(args) => handle_refund(api, storage, message, args, owner_chat_id).await?,
+        OwnerCommand::Refund(args) => {
+            handle_refund(api, storage, message, args, owner_chat_id).await?
+        }
     }
     Ok(())
 }
@@ -300,8 +308,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Starting CrabberBot version {}", version);
 
     // Ensure audio cache directory exists
-    std::fs::create_dir_all(AUDIO_CACHE_DIR)
-        .expect("Failed to create audio cache directory");
+    std::fs::create_dir_all(AUDIO_CACHE_DIR).expect("Failed to create audio cache directory");
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = sqlx::PgPool::connect(&database_url)
@@ -329,12 +336,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = create_http_client().await?;
     let bot = Bot::from_env_with_client(client.clone());
 
-    let deepgram_api_key =
-        std::env::var("DEEPGRAM_API_KEY").unwrap_or_else(|_| String::new());
-    let gemini_api_key =
-        std::env::var("GEMINI_API_KEY").unwrap_or_else(|_| String::new());
-    let gemini_model =
-        std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.1-flash-lite-preview".to_string());
+    let deepgram_api_key = std::env::var("DEEPGRAM_API_KEY").unwrap_or_else(|_| String::new());
+    let gemini_api_key = std::env::var("GEMINI_API_KEY").unwrap_or_else(|_| String::new());
+    let gemini_model = std::env::var("GEMINI_MODEL")
+        .unwrap_or_else(|_| "gemini-3.1-flash-lite-preview".to_string());
     if deepgram_api_key.is_empty() || gemini_api_key.is_empty() {
         log::warn!(
             "DEEPGRAM_API_KEY and/or GEMINI_API_KEY not set — transcription and summarization will be unavailable"
@@ -352,8 +357,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let audio_extractor: Arc<dyn AudioExtractor> = Arc::new(FfmpegAudioExtractor::new(3));
     let transcriber: Arc<dyn Transcriber> =
         Arc::new(DeepgramTranscriber::new(client.clone(), deepgram_api_key));
-    let summarizer: Arc<dyn Summarizer> =
-        Arc::new(GeminiSummarizer::new(client.clone(), gemini_api_key, gemini_model));
+    let summarizer: Arc<dyn Summarizer> = Arc::new(GeminiSummarizer::new(
+        client.clone(),
+        gemini_api_key,
+        gemini_model,
+    ));
 
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string())
@@ -392,12 +400,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     log::info!("Successfully set bot name. {}", bot_name);
 
-    let successful_payment_filter = dptree::filter(|msg: Message| {
-        msg.successful_payment().is_some()
-    });
-    let refunded_payment_filter = dptree::filter(|msg: Message| {
-        matches!(msg.kind, MessageKind::RefundedPayment(_))
-    });
+    let successful_payment_filter =
+        dptree::filter(|msg: Message| msg.successful_payment().is_some());
+    let refunded_payment_filter =
+        dptree::filter(|msg: Message| matches!(msg.kind, MessageKind::RefundedPayment(_)));
 
     let owner_commands = dptree::entry()
         .filter(|msg: Message, oid: i64| msg.chat.id.0 == oid)
