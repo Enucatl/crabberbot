@@ -62,7 +62,7 @@ jobs:
             type=sha,prefix=sha-,format=short
 
       - name: Build Docker image for scan
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -115,7 +115,7 @@ jobs:
           sarif_file: trivy-results.sarif
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
