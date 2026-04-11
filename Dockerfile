@@ -52,13 +52,12 @@ RUN echo "building release ${CARGO_PACKAGE_VERSION}" && cargo build --release &&
 FROM python:3.14-slim-trixie AS runtime
 
 # The yt-dlp binary is a zipapp that requires the python3 interpreter to run.
-# yt-dlp stable@2026.03.17 supports curl_cffi 0.10.x through 0.14.x for
-# impersonation; 0.15.x is importable but is marked unsupported by yt-dlp.
+# Use the fixed 0.15.x line for curl_cffi to avoid CVE-2026-33752.
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir "curl_cffi>=0.10,<0.15" requests brotli
+    && pip install --no-cache-dir "curl_cffi>=0.15,<0.16" requests brotli
 
 # Create a non-root user for security best practices
 RUN useradd --create-home --shell /bin/bash appuser
