@@ -97,6 +97,15 @@ Your bot instance is now live!
 
 The provided `docker-compose.override.yml` makes local development easy.
 
+-   **To install local Git hooks**:
+    ```bash
+    cargo install cargo-audit --locked
+    uv tool install pre-commit
+    pre-commit install
+    pre-commit install --hook-type pre-push
+    ```
+    The pre-commit hook runs `cargo fmt --all`; the pre-push hook runs `cargo audit --deny warnings --ignore RUSTSEC-2023-0071`. See [SECURITY.md](SECURITY.md) for the ignored advisory rationale.
+
 -   **To build and run a local version of the bot (instead of pulling from GHCR)**:
     ```bash
     CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/\./') docker compose --env-file .env.test up --build

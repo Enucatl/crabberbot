@@ -14,6 +14,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      security-events: write
 
     steps:
       - name: Checkout code
@@ -59,6 +60,59 @@ jobs:
             type=raw,value=latest
             type=raw,value=${{ steps.version.outputs.value }}
             type=sha,prefix=sha-,format=short
+
+      - name: Build Docker image for scan
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: crabberbot:scan
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CARGO_PACKAGE_VERSION=${{ steps.version.outputs.value }}
+            YT_DLP_COMMIT_HASH=${{ steps.yt_dlp.outputs.commit_hash }}
+          cache-from: type=gha
+
+      - name: Scan repository config with Trivy
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: '1'
+          scanners: config,secret
+          severity: CRITICAL,HIGH
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: crabberbot:scan
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+
+      - name: Generate Trivy SARIF report
+        if: always()
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: crabberbot:scan
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: os,library
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+
+      - name: Upload Trivy SARIF report
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6

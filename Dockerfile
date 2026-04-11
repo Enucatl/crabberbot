@@ -54,7 +54,7 @@ FROM python:3.14-slim-trixie AS runtime
 # The yt-dlp binary is a zipapp that requires the python3 interpreter to run.
 # yt-dlp stable@2026.03.17 supports curl_cffi 0.10.x through 0.14.x for
 # impersonation; 0.15.x is importable but is marked unsupported by yt-dlp.
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
