@@ -63,7 +63,6 @@ services:
       service: postgres
     image: postgres:17
     cpu_shares: 1024
-    restart: unless-stopped
     networks:
       - crabberbot
     environment:
@@ -74,9 +73,6 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U crabberbot"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
 
 networks:
   crabberbot:
