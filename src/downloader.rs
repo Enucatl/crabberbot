@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -258,9 +258,36 @@ impl YtDlpDownloader {
         escaped
     }
 
+    fn resolve_download_path(download_dir: &Path, filepath: &str) -> PathBuf {
+        let path = PathBuf::from(filepath);
+        if path.is_absolute() {
+            path
+        } else {
+            let relative_path = path
+                .components()
+                .filter_map(|component| match component {
+                    Component::Normal(part) => Some(PathBuf::from(part)),
+                    Component::CurDir
+                    | Component::ParentDir
+                    | Component::RootDir
+                    | Component::Prefix(_) => None,
+                })
+                .collect::<PathBuf>();
+            download_dir.join(relative_path)
+        }
+    }
+
     /// Finds a thumbnail file written by `--write-thumbnail`, excluding the video file itself.
-    fn find_thumbnail(uuid: &str, id: &str, video_filepath: &Path) -> Option<PathBuf> {
-        let pattern = format!("./{}.{}.*", uuid, Self::escape_glob(id));
+    fn find_thumbnail(
+        download_dir: &Path,
+        uuid: &str,
+        id: &str,
+        video_filepath: &Path,
+    ) -> Option<PathBuf> {
+        let pattern = download_dir
+            .join(format!("{}.{}.*", uuid, Self::escape_glob(id)))
+            .to_string_lossy()
+            .into_owned();
         glob::glob(&pattern)
             .ok()?
             .filter_map(|entry| entry.ok())
@@ -314,7 +341,9 @@ impl Downloader for YtDlpDownloader {
             std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/downloads".to_string());
 
         let uuid = uuid::Uuid::new_v4().to_string();
-        let filename_template = format!("{}/{}.%(id)s.%(ext)s", download_dir, uuid);
+        let download_dir = PathBuf::from(download_dir);
+        let filename_template = format!("{}.%(id)s.%(ext)s", uuid);
+        let thumbnail_template = format!("thumbnail:{}.%(id)s.%(ext)s", uuid);
         let is_single_with_thumbnail = info.entries.is_none() && info.thumbnail.is_some();
 
         log::info!("Downloading {}", url);
@@ -322,6 +351,10 @@ impl Downloader for YtDlpDownloader {
         let mut command = self.build_base_command();
         command
             .current_dir(&download_dir)
+            .arg("--paths")
+            .arg(&download_dir)
+            .arg("--paths")
+            .arg(format!("temp:{}", download_dir.display()))
             .arg("--print-json")
             .arg("-S")
             .arg("vcodec:h264,res,acodec:m4a")
@@ -329,7 +362,10 @@ impl Downloader for YtDlpDownloader {
             .arg(&filename_template);
 
         if is_single_with_thumbnail {
-            command.arg("--write-thumbnail");
+            command
+                .arg("--write-thumbnail")
+                .arg("-o")
+                .arg(&thumbnail_template);
         }
 
         command.arg(url.as_str());
@@ -379,7 +415,7 @@ impl Downloader for YtDlpDownloader {
                     let ext = dl.ext.as_deref()?;
                     let media_type = MediaType::from_extension(ext)?;
                     Some(DownloadedItem {
-                        filepath: PathBuf::from(filepath),
+                        filepath: Self::resolve_download_path(&download_dir, filepath),
                         media_type,
                         thumbnail_filepath: None,
                     })
@@ -400,7 +436,7 @@ impl Downloader for YtDlpDownloader {
             let filepath_str = dl.filepath.as_ref().ok_or_else(|| {
                 DownloadError::ParsingFailed("Download output missing filepath".to_string())
             })?;
-            let filepath = PathBuf::from(filepath_str);
+            let filepath = Self::resolve_download_path(&download_dir, filepath_str);
             let ext = dl.ext.as_deref().ok_or_else(|| {
                 DownloadError::ParsingFailed("Download output missing extension".to_string())
             })?;
@@ -409,7 +445,7 @@ impl Downloader for YtDlpDownloader {
             })?;
 
             let thumbnail_filepath = if is_single_with_thumbnail {
-                Self::find_thumbnail(&uuid, &info.id, &filepath)
+                Self::find_thumbnail(&download_dir, &uuid, &info.id, &filepath)
             } else {
                 None
             };
@@ -492,5 +528,50 @@ mod tests {
             }
             _ => panic!("Expected CommandFailed error, but got something else."),
         }
+    }
+
+    #[test]
+    fn test_resolve_download_path_keeps_absolute_paths() {
+        let download_dir = Path::new("/downloads");
+        let filepath = "/downloads/video.mp4";
+
+        let resolved = YtDlpDownloader::resolve_download_path(download_dir, filepath);
+
+        assert_eq!(resolved, PathBuf::from("/downloads/video.mp4"));
+    }
+
+    #[test]
+    fn test_resolve_download_path_rebases_relative_paths_under_downloads_dir() {
+        let download_dir = Path::new("/downloads");
+        let filepath = "./video.mp4";
+
+        let resolved = YtDlpDownloader::resolve_download_path(download_dir, filepath);
+
+        assert_eq!(resolved, PathBuf::from("/downloads/video.mp4"));
+    }
+
+    #[test]
+    fn test_resolve_download_path_does_not_allow_relative_escape() {
+        let download_dir = Path::new("/downloads");
+        let filepath = "../video.mp4";
+
+        let resolved = YtDlpDownloader::resolve_download_path(download_dir, filepath);
+
+        assert_eq!(resolved, PathBuf::from("/downloads/video.mp4"));
+    }
+
+    #[test]
+    fn test_find_thumbnail_searches_downloads_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let download_dir = temp_dir.path();
+        let video_filepath = download_dir.join("test-id.media.mp4");
+        let thumbnail_filepath = download_dir.join("test-id.media.jpg");
+        std::fs::write(&video_filepath, b"video").unwrap();
+        std::fs::write(&thumbnail_filepath, b"thumbnail").unwrap();
+
+        let found =
+            YtDlpDownloader::find_thumbnail(download_dir, "test-id", "media", &video_filepath);
+
+        assert_eq!(found, Some(thumbnail_filepath));
     }
 }
