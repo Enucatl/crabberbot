@@ -351,10 +351,6 @@ impl Downloader for YtDlpDownloader {
         let mut command = self.build_base_command();
         command
             .current_dir(&download_dir)
-            .arg("--paths")
-            .arg(&download_dir)
-            .arg("--paths")
-            .arg(format!("temp:{}", download_dir.display()))
             .arg("--print-json")
             .arg("-S")
             .arg("vcodec:h264,res,acodec:m4a")
