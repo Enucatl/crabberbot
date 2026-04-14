@@ -309,14 +309,19 @@ impl Downloader for YtDlpDownloader {
         info: &MediaInfo,
         url: &Url,
     ) -> Result<DownloadedMedia, DownloadError> {
+        // Get the download directory from environment variable, default to /downloads
+        let download_dir =
+            std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/downloads".to_string());
+
         let uuid = uuid::Uuid::new_v4().to_string();
-        let filename_template = format!("./{}.%(id)s.%(ext)s", uuid);
+        let filename_template = format!("{}/{}.%(id)s.%(ext)s", download_dir, uuid);
         let is_single_with_thumbnail = info.entries.is_none() && info.thumbnail.is_some();
 
         log::info!("Downloading {}", url);
 
         let mut command = self.build_base_command();
         command
+            .current_dir(&download_dir)
             .arg("--print-json")
             .arg("-S")
             .arg("vcodec:h264,res,acodec:m4a")

@@ -75,4 +75,6 @@ COPY --from=builder /usr/local/bin/yt-dlp /usr/local/bin/
 EXPOSE 8080
 
 # Set the command to run the bot
+# Mount point for downloaded media
+VOLUME ["/downloads"]
 CMD ["./crabberbot"]

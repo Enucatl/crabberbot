@@ -1,10 +1,9 @@
 services:
-  bot:
+  crabberbot:
     extends:
       file: ../compose-security-baseline/hardening.yml
       service: hardened-medium
     image: ghcr.io/enucatl/crabberbot:latest
-    container_name: crabberbot
     cpu_shares: 512
     networks:
       - crabberbot
@@ -16,9 +15,9 @@ services:
       - DATABASE_URL=postgres://crabberbot:${POSTGRES_PASSWORD}@crabberbot-postgres-1:5432/crabberbot
       - DEEPGRAM_API_KEY
       - GEMINI_API_KEY
+      - DOWNLOADS_DIR=/downloads
       - GEMINI_MODEL=gemini-3.1-flash-lite-preview
       - OWNER_CHAT_ID
-    restart: unless-stopped
     depends_on:
       telegram-bot-api:
         condition: service_started
@@ -26,13 +25,14 @@ services:
         condition: service_healthy
     labels:
       - "checkmk_monitor=true"
+    volumes:
+      - downloads:/downloads
 
   cloudflared:
     extends:
       file: ../compose-security-baseline/hardening.yml
       service: hardened-small
     image: cloudflare/cloudflared:latest
-    restart: unless-stopped
     networks:
       - crabberbot
     environment:
@@ -44,9 +44,11 @@ services:
   telegram-bot-api:
     extends:
       file: ../compose-security-baseline/hardening.yml
-      service: root-chown-init
-    image: aiogram/telegram-bot-api:latest
-    restart: unless-stopped
+      service: hardened-small
+    image: ghcr.io/enucatl/telegram-bot-api:latest
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
+      - telegram-bot-api-tmp:/tmp/telegram-bot-api
     networks:
       - crabberbot
     environment:
@@ -80,7 +82,10 @@ networks:
     enable_ipv6: true
 
 volumes:
+  downloads:
   pgdata:
+  telegram-bot-api-data:
+  telegram-bot-api-tmp:
 
 secrets:
   tunnel_token:
