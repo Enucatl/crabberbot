@@ -20,7 +20,7 @@ services:
       - OWNER_CHAT_ID
     depends_on:
       telegram-bot-api:
-        condition: service_started
+        condition: service_healthy
       postgres:
         condition: service_healthy
     labels:
@@ -46,9 +46,10 @@ services:
       file: ../compose-security-baseline/hardening.yml
       service: hardened-small
     image: ghcr.io/enucatl/telegram-bot-api:latest
+    tmpfs:
+      - "/tmp/telegram-bot-api:rw,noexec,size=100m"
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
-      - telegram-bot-api-tmp:/tmp/telegram-bot-api
     networks:
       - crabberbot
     environment:
