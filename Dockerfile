@@ -53,7 +53,8 @@ FROM python:3.14-slim-trixie AS runtime
 
 # The yt-dlp binary is a zipapp that requires the python3 interpreter to run.
 # Use the fixed 0.15.x line for curl_cffi to avoid CVE-2026-33752.
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
