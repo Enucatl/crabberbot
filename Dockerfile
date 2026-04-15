@@ -61,7 +61,10 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get upgrade -y && \
     && pip install --no-cache-dir "curl_cffi>=0.15,<0.16" requests brotli
 
 # Create a non-root user for security best practices
-RUN useradd --create-home --shell /bin/bash appuser
+RUN useradd --create-home --shell /bin/bash appuser \
+  && mkdir /downloads \
+  && chown -R appuser:appuser /downloads
+
 USER appuser
 WORKDIR /home/appuser
 
@@ -74,7 +77,8 @@ COPY --from=builder /usr/local/bin/yt-dlp /usr/local/bin/
 # Expose the port the bot listens on for webhooks
 EXPOSE 8080
 
-# Set the command to run the bot
 # Mount point for downloaded media
 VOLUME ["/downloads"]
+
+# Set the command to run the bot
 CMD ["./crabberbot"]

@@ -7,7 +7,7 @@ x-common-build-args: &common_build_args
 # docker-compose.override.yml
 
 services:
-  bot:
+  crabberbot:
     # Override the 'image' directive from docker-compose.yml with 'build' for local development
     build:
       context: .
@@ -27,3 +27,6 @@ services:
       args: *common_build_args
     command: cargo test -- --nocapture
 
+# secrets:
+#   tunnel_token:
+#     file: /dev/null

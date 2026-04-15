@@ -2,8 +2,15 @@ pub mod audio_extractor;
 pub mod summarizer;
 pub mod transcriber;
 
-/// Directory for extracted audio files awaiting transcription/sending.
-pub const AUDIO_CACHE_DIR: &str = "/tmp/audio_cache";
+/// Returns the audio cache directory path from environment or default.
+pub fn audio_cache_dir() -> String {
+    std::env::var("AUDIO_CACHE_DIR")
+        .or_else(|_| std::env::var("DOWNLOADS_DIR").map(|d| format!("{}/audio_cache", d)))
+        .unwrap_or_else(|_| "/downloads/audio_cache".to_string())
+}
+
+/// Default audio cache directory path.
+pub const DEFAULT_AUDIO_CACHE_DIR: &str = "/downloads/audio_cache";
 
 /// Max per-file duration for AI features (transcription/summarization).
 /// Prevents webhook timeouts, Deepgram choking on huge files, and RAM hogging.

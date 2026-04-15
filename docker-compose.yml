@@ -16,6 +16,9 @@ services:
       - DEEPGRAM_API_KEY
       - GEMINI_API_KEY
       - DOWNLOADS_DIR=/downloads
+      - AUDIO_CACHE_DIR=/downloads/audio_cache
+      - TMPDIR=/downloads/tmp
+      - XDG_CACHE_HOME=/downloads/.cache
       - GEMINI_MODEL=gemini-3.1-flash-lite-preview
       - OWNER_CHAT_ID
     depends_on:
@@ -57,8 +60,6 @@ services:
       - TELEGRAM_API_ID
       - TELEGRAM_LOCAL=1
       - TELEGRAM_VERBOSITY
-    depends_on:
-      - cloudflared
 
   postgres:
     extends:
@@ -86,7 +87,6 @@ volumes:
   downloads:
   pgdata:
   telegram-bot-api-data:
-  telegram-bot-api-tmp:
 
 secrets:
   tunnel_token:

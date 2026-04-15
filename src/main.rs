@@ -20,10 +20,10 @@ use crabberbot::commands::{
 use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
 use crabberbot::handler::{maybe_send_premium_buttons, process_download_request};
-use crabberbot::premium::AUDIO_CACHE_DIR;
 use crabberbot::premium::audio_extractor::{AudioExtractor, FfmpegAudioExtractor};
 use crabberbot::premium::summarizer::{GeminiSummarizer, Summarizer};
 use crabberbot::premium::transcriber::{DeepgramTranscriber, Transcriber};
+use crabberbot::premium::{DEFAULT_AUDIO_CACHE_DIR, audio_cache_dir};
 use crabberbot::storage::{PostgresStorage, Storage};
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 use crabberbot::terms;
@@ -308,7 +308,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Starting CrabberBot version {}", version);
 
     // Ensure audio cache directory exists
-    std::fs::create_dir_all(AUDIO_CACHE_DIR).expect("Failed to create audio cache directory");
+    std::fs::create_dir_all(DEFAULT_AUDIO_CACHE_DIR)
+        .expect("Failed to create audio cache directory");
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = sqlx::PgPool::connect(&database_url)
@@ -480,7 +481,7 @@ async fn cleanup_audio_cache(pool: &sqlx::PgPool) {
     .map(|(p,)| p)
     .collect();
 
-    let mut entries = match tokio::fs::read_dir(AUDIO_CACHE_DIR).await {
+    let mut entries = match tokio::fs::read_dir(audio_cache_dir()).await {
         Ok(e) => e,
         Err(e) => {
             log::warn!("Failed to read audio cache dir: {}", e);
