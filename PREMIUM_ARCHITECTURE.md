@@ -466,6 +466,22 @@ Revenue is derived from the `payments` table:
 | Subscribers by tier | Pie chart | Basic vs Pro distribution |
 | Outstanding top-up liability | Stat | Total unspent top-up minutes across all users |
 
+### Alert Rules
+
+Provisioned alert definitions live in `grafana-alert-rules.json`. They use the same PostgreSQL
+datasource as the dashboard and cover:
+
+| Alert | Signal | Default threshold |
+|---|---|---|
+| Premium Cost Spike | `premium_usage.estimated_cost_usd` over 1 hour | > $2 |
+| Premium Error Rate | `requests.status = 'error'` over 15 minutes | > 25% |
+| Deepgram Volume Spike | Deepgram `units` over 1 hour | > 120 billed minutes |
+| Gemini Token Spike | Gemini `units` over 1 hour | > 500k tokens |
+| Quota Exhaustion Pattern | Paid subscriptions with <= 60 seconds remaining | > 5 users |
+
+Thresholds are intentionally conservative defaults. Tune them to the production budget and
+expected daily premium volume before enabling paging.
+
 ### Data Integrity Notes
 
 - Owner-granted subscriptions create no `payments` rows, so they do not inflate revenue.
@@ -480,6 +496,9 @@ Revenue is derived from the `payments` table:
 |---|---|---|
 | `TELOXIDE_TOKEN` | Yes | Telegram Bot API token (existing) |
 | `DATABASE_URL` | Yes | PostgreSQL connection string (existing) |
+| `POSTGRES_MAX_CONNECTIONS` | No | SQLx pool max connections, default 10. Keep at or below Postgres capacity after reserving admin headroom. |
+| `POSTGRES_MIN_CONNECTIONS` | No | SQLx pool warm connections, default 0 in code and 1 in Docker Compose. |
+| `POSTGRES_ACQUIRE_TIMEOUT_SECS` | No | SQLx acquire timeout, default 5 seconds. |
 | `DEEPGRAM_API_KEY` | For transcription | Deepgram Nova-3 API key |
 | `GEMINI_API_KEY` | For summarization | Google Gemini API key |
 | `OWNER_CHAT_ID` | For `/grant`, `/reply`, `/refund` | Bot owner's Telegram user ID. Also receives support relay messages. |

@@ -1,7 +1,14 @@
 use async_trait::async_trait;
+use reqwest::StatusCode;
+use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 use crate::premium::{GEMINI_INPUT_COST_PER_MILLION_TOKENS, GEMINI_OUTPUT_COST_PER_MILLION_TOKENS};
+use crate::retry::{
+    RetryPolicy, retry_after_from_response, retry_async, retryable_status, transient_reqwest_error,
+};
 
 #[derive(Debug, Error)]
 pub enum SummarizationError {
@@ -9,6 +16,11 @@ pub enum SummarizationError {
     HttpError(#[from] reqwest::Error),
     #[error("Gemini API error: {0}")]
     ApiError(String),
+    #[error("Gemini transient API error: HTTP {status}")]
+    RetryableApi {
+        status: StatusCode,
+        retry_after: Option<Duration>,
+    },
 }
 
 pub struct GeminiResult {
@@ -36,6 +48,8 @@ pub struct GeminiSummarizer {
     client: reqwest::Client,
     api_key: String,
     model: String,
+    retry_policy: RetryPolicy,
+    cooldown_until: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl GeminiSummarizer {
@@ -44,11 +58,33 @@ impl GeminiSummarizer {
             client,
             api_key,
             model,
+            retry_policy: RetryPolicy::provider_default(),
+            cooldown_until: Arc::new(Mutex::new(None)),
         }
+    }
+
+    async fn enforce_cooldown(&self) -> Result<(), SummarizationError> {
+        let until = *self.cooldown_until.lock().await;
+        if let Some(until) = until {
+            let now = std::time::Instant::now();
+            if until > now {
+                return Err(SummarizationError::ApiError(format!(
+                    "Gemini temporarily unavailable; retry after {:?}",
+                    until - now
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn start_cooldown(&self) {
+        *self.cooldown_until.lock().await =
+            Some(std::time::Instant::now() + Duration::from_secs(30));
     }
 
     /// Returns `(text, prompt_tokens, output_tokens)`.
     async fn call_gemini(&self, prompt: &str) -> Result<(String, u64, u64), SummarizationError> {
+        self.enforce_cooldown().await?;
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.model, self.api_key
@@ -67,13 +103,48 @@ impl GeminiSummarizer {
 
         log::debug!("Gemini request body: {}", body);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let response_result = retry_async(
+            &self.retry_policy,
+            || async {
+                let response = self
+                    .client
+                    .post(&url)
+                    .timeout(Duration::from_secs(45))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await?;
+                let status = response.status();
+                if retryable_status(status) {
+                    return Err(SummarizationError::RetryableApi {
+                        status,
+                        retry_after: retry_after_from_response(&response),
+                    });
+                }
+                Ok(response)
+            },
+            |error| match error {
+                SummarizationError::RetryableApi { retry_after, .. } => *retry_after,
+                _ => None,
+            },
+            |error| match error {
+                SummarizationError::HttpError(e) => transient_reqwest_error(e),
+                SummarizationError::RetryableApi { .. } => true,
+                _ => false,
+            },
+            "gemini.generate_content",
+        )
+        .await;
+        let response = match response_result {
+            Ok(response) => response,
+            Err(error) => {
+                if matches!(error, SummarizationError::RetryableApi { .. }) {
+                    log::error!("Gemini retry budget exhausted: {}", error);
+                    self.start_cooldown().await;
+                }
+                return Err(error);
+            }
+        };
 
         let status = response.status();
         let text = response.text().await?;

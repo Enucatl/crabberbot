@@ -90,13 +90,41 @@ impl Drop for FileCleanupGuard {
                 });
             }
             Err(_) => {
-                for path in &paths_to_delete {
-                    if let Err(e) = std::fs::remove_file(path) {
-                        log::error!("Failed to remove file {}: {}", path.display(), e);
+                std::thread::spawn(move || {
+                    for path in &paths_to_delete {
+                        if let Err(e) = std::fs::remove_file(path) {
+                            log::error!("Failed to remove file {}: {}", path.display(), e);
+                        }
                     }
-                }
+                });
             }
         }
+    }
+}
+
+async fn remove_temp_file(path: PathBuf, context: &str) {
+    if let Err(e) = tokio::fs::remove_file(&path).await {
+        log::warn!(
+            "Failed to remove temporary file {} for {}: {}",
+            path.display(),
+            context,
+            e
+        );
+    }
+}
+
+async fn log_reply_failure(
+    result: Result<(), teloxide::RequestError>,
+    chat_id: ChatId,
+    action: &str,
+) {
+    if let Err(e) = result {
+        log::error!(
+            "Telegram reply failed: action={} chat_id={} error={:?}",
+            action,
+            chat_id,
+            e
+        );
     }
 }
 
@@ -157,9 +185,14 @@ async fn pre_download_validation(
         Ok(info) => {
             if let Err(validation_error) = validate_media_metadata(&info) {
                 log::warn!("Validation failed for {}: {}", url, validation_error);
-                let _ = telegram_api
-                    .send_text_message(chat_id, message_id, &validation_error.to_string())
-                    .await;
+                log_reply_failure(
+                    telegram_api
+                        .send_text_message(chat_id, message_id, &validation_error.to_string())
+                        .await,
+                    chat_id,
+                    "validation_error",
+                )
+                .await;
                 Err(())
             } else {
                 log::info!(
@@ -171,13 +204,17 @@ async fn pre_download_validation(
         }
         Err(e) => {
             log::error!("Pre-download metadata fetch failed for {}: {}", url, e);
-            let _ = telegram_api
-                .send_text_message(
+            log_reply_failure(
+                telegram_api.send_text_message(
                     chat_id,
                     message_id,
                     "Sorry, I could not fetch information for that link. It might require age verification, be private or unsupported.",
                 )
-                .await;
+                .await,
+                chat_id,
+                "metadata_error",
+            )
+            .await;
             Err(())
         }
     }
@@ -201,9 +238,14 @@ async fn download_step(
             } else {
                 "Sorry, I could not download the media. Please try again later."
             };
-            let _ = telegram_api
-                .send_text_message(chat_id, message_id, user_message)
-                .await;
+            log_reply_failure(
+                telegram_api
+                    .send_text_message(chat_id, message_id, user_message)
+                    .await,
+                chat_id,
+                "download_error",
+            )
+            .await;
             Err(())
         }
     }
@@ -230,14 +272,27 @@ async fn send_single_item(
             .map(|(file_id, sent_id)| (file_id, MediaType::Video, sent_id)),
         MediaType::Photo => {
             // Resize happens at the handler layer for both single and group photos.
-            let resized = resize_photo_if_needed(&item.filepath);
+            let resized = match resize_photo_if_needed(&item.filepath) {
+                Ok(resized) => resized,
+                Err(e) => {
+                    log_reply_failure(
+                        telegram_api
+                            .send_text_message(chat_id, message_id, &e)
+                            .await,
+                        chat_id,
+                        "photo_policy_reject",
+                    )
+                    .await;
+                    return None;
+                }
+            };
             let effective_path = resized.as_deref().unwrap_or(&item.filepath);
             let send_result = telegram_api
                 .send_photo(chat_id, message_id, effective_path, caption)
                 .await
                 .map(|(file_id, sent_id)| (file_id, MediaType::Photo, sent_id));
             if let Some(p) = resized {
-                let _ = std::fs::remove_file(&p);
+                remove_temp_file(p, "single photo resize").await;
             }
             send_result
         }
@@ -250,13 +305,18 @@ async fn send_single_item(
         }
         Err(e) => {
             log::error!("Failed to send: Error: {:?}", e);
-            let _ = telegram_api
-                .send_text_message(
-                    chat_id,
-                    message_id,
-                    "Sorry, I encountered an error while sending the media.",
-                )
-                .await;
+            log_reply_failure(
+                telegram_api
+                    .send_text_message(
+                        chat_id,
+                        message_id,
+                        "Sorry, I encountered an error while sending the media.",
+                    )
+                    .await,
+                chat_id,
+                "send_media_error",
+            )
+            .await;
             None
         }
     }
@@ -290,7 +350,20 @@ async fn send_media_group_step(
                 )
             }
             MediaType::Photo => {
-                let resized = resize_photo_if_needed(&item.filepath);
+                let resized = match resize_photo_if_needed(&item.filepath) {
+                    Ok(resized) => resized,
+                    Err(e) => {
+                        log_reply_failure(
+                            telegram_api
+                                .send_text_message(chat_id, message_id, &e)
+                                .await,
+                            chat_id,
+                            "photo_policy_reject",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
                 let path = resized.as_deref().unwrap_or(&item.filepath).to_path_buf();
                 if let Some(p) = resized {
                     temp_resized.push(p);
@@ -307,9 +380,14 @@ async fn send_media_group_step(
 
     if media_group.is_empty() {
         let msg = "Sorry, although multiple items were found, none were of a supported type for a media group.";
-        let _ = telegram_api
-            .send_text_message(chat_id, message_id, msg)
-            .await;
+        log_reply_failure(
+            telegram_api
+                .send_text_message(chat_id, message_id, msg)
+                .await,
+            chat_id,
+            "empty_media_group",
+        )
+        .await;
         return None;
     }
 
@@ -317,7 +395,7 @@ async fn send_media_group_step(
         .send_media_group(chat_id, message_id, media_group)
         .await;
     for p in temp_resized {
-        let _ = std::fs::remove_file(&p);
+        remove_temp_file(p, "media group resize").await;
     }
     match result {
         Ok(sent) => {
@@ -326,13 +404,18 @@ async fn send_media_group_step(
         }
         Err(e) => {
             log::error!("Failed to send media group: Error: {:?}", e);
-            let _ = telegram_api
-                .send_text_message(
-                    chat_id,
-                    message_id,
-                    "Sorry, I encountered an error while sending the media.",
-                )
-                .await;
+            log_reply_failure(
+                telegram_api
+                    .send_text_message(
+                        chat_id,
+                        message_id,
+                        "Sorry, I encountered an error while sending the media.",
+                    )
+                    .await,
+                chat_id,
+                "send_media_group_error",
+            )
+            .await;
             None
         }
     }
@@ -578,13 +661,17 @@ pub async fn process_download_request(
 
     if let Some(files) = &file_ids {
         if has_video && audio_cache_path.is_none() {
-            let _ = telegram_api
-                .send_text_message(
+            log_reply_failure(
+                telegram_api.send_text_message(
                     chat_id,
                     message_id,
                     "Audio extraction failed — AI features (Extract Audio, Transcribe, Summarize) are not available for this video.",
                 )
-                .await;
+                .await,
+                chat_id,
+                "audio_extraction_notice",
+            )
+            .await;
         }
         storage
             .store_cached_media(
@@ -625,14 +712,24 @@ pub async fn send_long_text(
 ) {
     const MAX_LEN: usize = 4000;
     if text.len() <= MAX_LEN {
-        let _ = api.send_text_message(chat_id, message_id, text).await;
+        log_reply_failure(
+            api.send_text_message(chat_id, message_id, text).await,
+            chat_id,
+            "long_text_chunk",
+        )
+        .await;
         return;
     }
     let mut start = 0;
     while start < text.len() {
         let end = text.floor_char_boundary((start + MAX_LEN).min(text.len()));
         let chunk = &text[start..end];
-        let _ = api.send_text_message(chat_id, message_id, chunk).await;
+        log_reply_failure(
+            api.send_text_message(chat_id, message_id, chunk).await,
+            chat_id,
+            "long_text_chunk",
+        )
+        .await;
         start = end;
     }
 }

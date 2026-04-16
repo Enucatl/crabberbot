@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::premium::audio_cache_dir;
-
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::Semaphore;
@@ -35,12 +33,14 @@ pub trait AudioExtractor: Send + Sync {
 
 pub struct FfmpegAudioExtractor {
     semaphore: Arc<Semaphore>,
+    audio_cache_dir: PathBuf,
 }
 
 impl FfmpegAudioExtractor {
-    pub fn new(permits: usize) -> Self {
+    pub fn new(permits: usize, audio_cache_dir: PathBuf) -> Self {
         Self {
             semaphore: Arc::new(Semaphore::new(permits)),
+            audio_cache_dir,
         }
     }
 }
@@ -88,7 +88,7 @@ impl AudioExtractor for FfmpegAudioExtractor {
 
         // Step 2: ffmpeg to extract audio
         let audio_filename = format!("{}.mp3", uuid::Uuid::new_v4());
-        let audio_path = PathBuf::from(&audio_cache_dir()).join(&audio_filename);
+        let audio_path = self.audio_cache_dir.join(&audio_filename);
 
         const MAX_TAG_LEN: usize = 255;
         let mut cmd = tokio::process::Command::new("ffmpeg");

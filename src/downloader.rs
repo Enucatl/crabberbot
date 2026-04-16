@@ -188,12 +188,13 @@ pub trait Downloader: Send + Sync {
 
 pub struct YtDlpDownloader {
     yt_dlp_path: String,
+    download_dir: PathBuf,
 }
 
 impl YtDlpDownloader {
-    pub async fn new() -> Self {
-        let yt_dlp_path = std::env::var("YT_DLP_PATH").unwrap_or_else(|_| "yt-dlp".to_string());
+    pub async fn new(yt_dlp_path: String, download_dir: PathBuf) -> Self {
         log::info!("Using yt-dlp executable at: {}", yt_dlp_path);
+        log::info!("Using download directory: {}", download_dir.display());
 
         // Log yt-dlp version
         if let Ok(output) = tokio::process::Command::new(&yt_dlp_path)
@@ -231,7 +232,10 @@ impl YtDlpDownloader {
             }
         }
 
-        Self { yt_dlp_path }
+        Self {
+            yt_dlp_path,
+            download_dir,
+        }
     }
 
     fn build_base_command(&self) -> tokio::process::Command {
@@ -336,12 +340,8 @@ impl Downloader for YtDlpDownloader {
         info: &MediaInfo,
         url: &Url,
     ) -> Result<DownloadedMedia, DownloadError> {
-        // Get the download directory from environment variable, default to /downloads
-        let download_dir =
-            std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/downloads".to_string());
-
         let uuid = uuid::Uuid::new_v4().to_string();
-        let download_dir = PathBuf::from(download_dir);
+        let download_dir = self.download_dir.clone();
         let filename_template = format!("{}.%(id)s.%(ext)s", uuid);
         let thumbnail_template = format!("thumbnail:{}.%(id)s.%(ext)s", uuid);
         let is_single_with_thumbnail = info.entries.is_none() && info.thumbnail.is_some();
@@ -510,6 +510,7 @@ mod tests {
     async fn test_yt_dlp_uses_custom_path_and_fails_if_invalid() {
         let downloader = YtDlpDownloader {
             yt_dlp_path: "/path/to/a/nonexistent/yt-dlp-binary".to_string(),
+            download_dir: PathBuf::from("/downloads"),
         };
 
         let url = Url::parse("https://example.com").unwrap();

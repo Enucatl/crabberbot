@@ -20,6 +20,25 @@ use crate::subscription::{
 use crate::telegram_api::TelegramApi;
 use crate::terms;
 
+async fn log_telegram_failure<T>(
+    result: Result<T, teloxide::RequestError>,
+    chat_id: ChatId,
+    action: &str,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(e) => {
+            log::error!(
+                "Telegram request failed: action={} chat_id={} error={:?}",
+                action,
+                chat_id,
+                e
+            );
+            None
+        }
+    }
+}
+
 pub async fn handle_subscribe(
     api: Arc<dyn TelegramApi>,
     message: Message,
@@ -306,7 +325,12 @@ Note: <b>Telegram support and BotFather cannot help with purchases made through 
              {text}\n\n\
              Reply: <code>/reply {chat_id} your message here</code>",
         );
-        let _ = api.send_text_no_reply(ChatId(owner_chat_id), &relay).await;
+        log_telegram_failure(
+            api.send_text_no_reply(ChatId(owner_chat_id), &relay).await,
+            ChatId(owner_chat_id),
+            "support_relay",
+        )
+        .await;
     }
 
     Ok(())
@@ -342,7 +366,12 @@ pub async fn handle_reply(
         }
     };
     let text = format!("<b>Support reply:</b>\n{}", reply_text.trim());
-    let _ = api.send_text_no_reply(ChatId(target), &text).await;
+    log_telegram_failure(
+        api.send_text_no_reply(ChatId(target), &text).await,
+        ChatId(target),
+        "support_reply",
+    )
+    .await;
     api.send_text_message(message.chat.id, message.id, "Reply sent.")
         .await?;
     Ok(())
@@ -527,13 +556,17 @@ pub async fn handle_refund(
     }
 
     // Notify the user. For private chats user_id == chat_id; for groups we send to user_id directly.
-    let _ = api
-        .send_text_no_reply(
+    log_telegram_failure(
+        api.send_text_no_reply(
             ChatId(target_user_id),
             "Your refund has been processed. The Stars have been returned to your account. \
              Any associated subscription or top-up credits have been deactivated.",
         )
-        .await;
+        .await,
+        ChatId(target_user_id),
+        "refund_user_notice",
+    )
+    .await;
 
     api.send_text_message(
         message.chat.id,
@@ -549,6 +582,12 @@ pub async fn handle_successful_payment(
     storage: Arc<dyn Storage>,
     message: Message,
 ) -> ResponseResult<()> {
+    log::info!(
+        "request_context action=successful_payment update_message_id={} chat_id={} user_id={:?}",
+        message.id,
+        message.chat.id,
+        message.from.as_ref().map(|user| user.id.0)
+    );
     let payment = match message.successful_payment() {
         Some(p) => p,
         None => return Ok(()),
@@ -622,6 +661,12 @@ pub async fn handle_refunded_payment(
     storage: Arc<dyn Storage>,
     message: Message,
 ) -> ResponseResult<()> {
+    log::info!(
+        "request_context action=refunded_payment update_message_id={} chat_id={} user_id={:?}",
+        message.id,
+        message.chat.id,
+        message.from.as_ref().map(|user| user.id.0)
+    );
     let refund = match &message.kind {
         MessageKind::RefundedPayment(r) => &r.refunded_payment,
         _ => return Ok(()),
@@ -665,6 +710,12 @@ pub async fn handle_pre_checkout_query(
     api: Arc<dyn TelegramApi>,
     query: PreCheckoutQuery,
 ) -> ResponseResult<()> {
+    log::info!(
+        "request_context action=pre_checkout query_id={} user_id={} payload={}",
+        query.id.0,
+        query.from.id.0,
+        query.invoice_payload
+    );
     let payload = &query.invoice_payload;
     let ok = payload.starts_with("sub_") || payload.starts_with("topup_");
     let error_msg: Option<String> = if ok {
@@ -690,6 +741,12 @@ pub async fn handle_callback_query(
     summarizer: Arc<dyn Summarizer>,
     query: CallbackQuery,
 ) -> ResponseResult<()> {
+    log::info!(
+        "request_context action=callback callback_id={} user_id={} data={:?}",
+        query.id.0,
+        query.from.id.0,
+        query.data
+    );
     let data = match query.data.as_deref() {
         Some(d) => d.to_string(),
         None => return Ok(()),
@@ -705,7 +762,12 @@ pub async fn handle_callback_query(
     let user_id = query.from.id.0 as i64;
 
     // Always dismiss spinner immediately
-    let _ = api.answer_callback_query(&query.id.0, None::<String>).await;
+    log_telegram_failure(
+        api.answer_callback_query(&query.id.0, None::<String>).await,
+        chat_id,
+        "callback_answer",
+    )
+    .await;
 
     // Subscription/top-up button presses: show T&C confirmation before sending invoice
     if data == "sub:basic" || data == "sub:pro" || data == "topup:60" {
@@ -718,9 +780,13 @@ pub async fn handle_callback_query(
     }
 
     if data == "cancel:purchase" {
-        let _ = api
-            .send_text_message(chat_id, message_id, "Purchase cancelled.")
-            .await;
+        log_telegram_failure(
+            api.send_text_message(chat_id, message_id, "Purchase cancelled.")
+                .await,
+            chat_id,
+            "purchase_cancelled",
+        )
+        .await;
         return Ok(());
     }
 
@@ -737,13 +803,17 @@ pub async fn handle_callback_query(
     let ctx = match storage.get_callback_context(context_id).await {
         Some(ctx) => ctx,
         None => {
-            let _ = api
-                .send_text_message(
+            log_telegram_failure(
+                api.send_text_message(
                     chat_id,
                     message_id,
                     "This action has expired. Please download the video again.",
                 )
-                .await;
+                .await,
+                chat_id,
+                "callback_context_expired",
+            )
+            .await;
             return Ok(());
         }
     };
@@ -752,25 +822,33 @@ pub async fn handle_callback_query(
     let audio_path = match &ctx.audio_cache_path {
         Some(p) => PathBuf::from(p),
         None => {
-            let _ = api
-                .send_text_message(
+            log_telegram_failure(
+                api.send_text_message(
                     chat_id,
                     message_id,
                     "This action has expired. Please download the video again.",
                 )
-                .await;
+                .await,
+                chat_id,
+                "audio_context_missing",
+            )
+            .await;
             return Ok(());
         }
     };
 
     if !audio_path.exists() {
-        let _ = api
-            .send_text_message(
+        log_telegram_failure(
+            api.send_text_message(
                 chat_id,
                 message_id,
                 "This action has expired. Please download the video again.",
             )
-            .await;
+            .await,
+            chat_id,
+            "audio_file_missing",
+        )
+        .await;
         return Ok(());
     }
 
@@ -778,13 +856,17 @@ pub async fn handle_callback_query(
     let _guard = match premium_limiter.try_lock(ChatId(user_id)) {
         Some(g) => g,
         None => {
-            let _ = api
-                .send_text_message(
+            log_telegram_failure(
+                api.send_text_message(
                     chat_id,
                     message_id,
                     "I'm already processing a premium action for you. Please wait.",
                 )
-                .await;
+                .await,
+                chat_id,
+                "premium_limiter_busy",
+            )
+            .await;
             return Ok(());
         }
     };
@@ -855,9 +937,13 @@ async fn handle_subscription_button(
         InlineKeyboardButton::callback(format!("I Agree & Buy — {} ⭐", price), agree_data),
         InlineKeyboardButton::callback("Cancel", "cancel:purchase"),
     ]]);
-    let _ = api
-        .send_text_with_keyboard(chat_id, message_id, &prompt, keyboard)
-        .await;
+    log_telegram_failure(
+        api.send_text_with_keyboard(chat_id, message_id, &prompt, keyboard)
+            .await,
+        chat_id,
+        "subscription_terms_prompt",
+    )
+    .await;
     Ok(())
 }
 
@@ -883,9 +969,13 @@ async fn handle_agree_button(
             TOPUP_PRICE_STARS,
         ),
     };
-    let _ = api
-        .send_invoice(chat_id, title, description, payload, amount)
-        .await;
+    log_telegram_failure(
+        api.send_invoice(chat_id, title, description, payload, amount)
+            .await,
+        chat_id,
+        "send_invoice",
+    )
+    .await;
     Ok(())
 }
 
@@ -910,16 +1000,25 @@ async fn handle_audio_extraction(
                 duration_secs as f64 / 60.0,
             )
         };
-        let _ = api.send_text_message(chat_id, message_id, &msg).await;
+        log_telegram_failure(
+            api.send_text_message(chat_id, message_id, &msg).await,
+            chat_id,
+            "audio_quota_denied",
+        )
+        .await;
         return Ok(());
     }
 
     let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
     if let Err(e) = api.send_audio(chat_id, message_id, &audio_path).await {
         log::error!("Failed to send audio: {}", e);
-        let _ = api
-            .send_text_message(chat_id, message_id, "Sorry, failed to send the audio.")
-            .await;
+        log_telegram_failure(
+            api.send_text_message(chat_id, message_id, "Sorry, failed to send the audio.")
+                .await,
+            chat_id,
+            "audio_send_failed_notice",
+        )
+        .await;
         return Ok(());
     }
     // Pro gets unlimited free extraction; everyone else consumes their AI Video Minutes.
@@ -954,8 +1053,8 @@ async fn handle_transcription(
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
 
     if duration_secs > MAX_PREMIUM_FILE_DURATION_SECS {
-        let _ = api
-            .send_text_message(
+        log_telegram_failure(
+            api.send_text_message(
                 chat_id,
                 message_id,
                 &format!(
@@ -963,13 +1062,17 @@ async fn handle_transcription(
                     MAX_PREMIUM_FILE_DURATION_SECS / 60
                 ),
             )
-            .await;
+            .await,
+            chat_id,
+            "transcription_duration_limit",
+        )
+        .await;
         return Ok(());
     }
 
     if !sub.can_use_ai(duration_secs) {
-        let _ = api
-            .send_text_message(
+        log_telegram_failure(
+            api.send_text_message(
                 chat_id,
                 message_id,
                 &format!(
@@ -977,7 +1080,11 @@ async fn handle_transcription(
                     sub.remaining_ai_minutes()
                 ),
             )
-            .await;
+            .await,
+            chat_id,
+            "transcription_quota_denied",
+        )
+        .await;
         return Ok(());
     }
 
@@ -1008,13 +1115,17 @@ async fn handle_transcription(
             }
             Err(e) => {
                 log::error!("Transcription failed: {}", e);
-                let _ = api
-                    .send_text_message(
+                log_telegram_failure(
+                    api.send_text_message(
                         chat_id,
                         message_id,
                         "Sorry, transcription failed. Please try again later.",
                     )
-                    .await;
+                    .await,
+                    chat_id,
+                    "transcription_failed_notice",
+                )
+                .await;
                 return Ok(()); // no quota deduction
             }
         }
@@ -1098,8 +1209,8 @@ async fn handle_summarization(
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
 
     if duration_secs > MAX_PREMIUM_FILE_DURATION_SECS {
-        let _ = api
-            .send_text_message(
+        log_telegram_failure(
+            api.send_text_message(
                 chat_id,
                 message_id,
                 &format!(
@@ -1107,13 +1218,17 @@ async fn handle_summarization(
                     MAX_PREMIUM_FILE_DURATION_SECS / 60
                 ),
             )
-            .await;
+            .await,
+            chat_id,
+            "summarization_duration_limit",
+        )
+        .await;
         return Ok(());
     }
 
     if !sub.can_use_ai(duration_secs) {
-        let _ = api
-            .send_text_message(
+        log_telegram_failure(
+            api.send_text_message(
                 chat_id,
                 message_id,
                 &format!(
@@ -1121,7 +1236,11 @@ async fn handle_summarization(
                     sub.remaining_ai_minutes()
                 ),
             )
-            .await;
+            .await,
+            chat_id,
+            "summarization_quota_denied",
+        )
+        .await;
         return Ok(());
     }
 
@@ -1152,13 +1271,17 @@ async fn handle_summarization(
             }
             Err(e) => {
                 log::error!("Transcription failed: {}", e);
-                let _ = api
-                    .send_text_message(
+                log_telegram_failure(
+                    api.send_text_message(
                         chat_id,
                         message_id,
                         "Sorry, transcription failed. Please try again later.",
                     )
-                    .await;
+                    .await,
+                    chat_id,
+                    "summarization_transcription_failed_notice",
+                )
+                .await;
                 return Ok(()); // no quota deduction
             }
         }
@@ -1171,13 +1294,17 @@ async fn handle_summarization(
         Ok(result) => result,
         Err(e) => {
             log::error!("Summarization failed: {}", e);
-            let _ = api
-                .send_text_message(
+            log_telegram_failure(
+                api.send_text_message(
                     chat_id,
                     message_id,
                     "Sorry, summarization failed. Please try again later.",
                 )
-                .await;
+                .await,
+                chat_id,
+                "summarization_failed_notice",
+            )
+            .await;
             return Ok(()); // no quota deduction
         }
     };

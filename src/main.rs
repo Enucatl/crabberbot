@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::Client;
+use sqlx::postgres::PgPoolOptions;
 use teloxide::prelude::*;
 use teloxide::types::MessageKind;
 use teloxide::utils::command::BotCommands;
@@ -18,12 +19,12 @@ use crabberbot::commands::{
     handle_successful_payment, handle_support,
 };
 use crabberbot::concurrency::ConcurrencyLimiter;
+use crabberbot::config::AppConfig;
 use crabberbot::downloader::{Downloader, YtDlpDownloader};
 use crabberbot::handler::{maybe_send_premium_buttons, process_download_request};
 use crabberbot::premium::audio_extractor::{AudioExtractor, FfmpegAudioExtractor};
 use crabberbot::premium::summarizer::{GeminiSummarizer, Summarizer};
 use crabberbot::premium::transcriber::{DeepgramTranscriber, Transcriber};
-use crabberbot::premium::{DEFAULT_AUDIO_CACHE_DIR, audio_cache_dir};
 use crabberbot::storage::{PostgresStorage, Storage};
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 use crabberbot::terms;
@@ -53,10 +54,8 @@ pub enum SetupError {
 }
 
 /// Creates an HTTP client, authenticating for GCP if in that environment.
-async fn create_http_client() -> Result<Client, SetupError> {
-    let exec_env = std::env::var("EXECUTION_ENVIRONMENT").unwrap_or_else(|_| "local".to_string());
-
-    match exec_env.as_str() {
+async fn create_http_client(execution_environment: &str) -> Result<Client, SetupError> {
+    match execution_environment {
         "gcp" => {
             log::info!("GCP environment detected. Creating authenticated reqwest client...");
 
@@ -94,7 +93,9 @@ async fn handle_command(
     message: Message,
     command: Command,
     owner_chat_id: i64,
+    execution_environment: String,
 ) -> ResponseResult<()> {
+    log_update_context("command", &message);
     let comprehensive_guide = indoc::formatdoc! { "
 Hello there! I am CrabberBot, your friendly media downloader.
 
@@ -124,9 +125,7 @@ If you encounter any issues, please double-check the URL or try again later. Not
                 .await?;
         }
         Command::Environment => {
-            let env =
-                std::env::var("EXECUTION_ENVIRONMENT").unwrap_or_else(|_| "local".to_string());
-            let value = format!("CrabberBot environment {0}", env);
+            let value = format!("CrabberBot environment {0}", execution_environment);
             api.send_text_message(message.chat.id, message.id, &value)
                 .await?;
         }
@@ -156,6 +155,7 @@ async fn handle_owner_command(
     command: OwnerCommand,
     owner_chat_id: i64,
 ) -> ResponseResult<()> {
+    log_update_context("owner_command", &message);
     match command {
         OwnerCommand::Grant(args) => {
             handle_grant(api, message, storage, args, owner_chat_id).await?
@@ -179,6 +179,13 @@ async fn handle_url(
     url: Url,
 ) -> ResponseResult<()> {
     let chat_id = message.chat.id;
+    log::info!(
+        "request_context action=url update_message_id={} chat_id={} user_id={:?} url={}",
+        message.id,
+        chat_id,
+        message.from.as_ref().map(|user| user.id.0),
+        url
+    );
 
     let _guard = match download_limiter.try_lock(chat_id) {
         Some(guard) => guard,
@@ -220,13 +227,20 @@ async fn handle_url(
     let download_ctx = match result {
         Err(_) => {
             log::error!("Overall request timed out for {}", url);
-            let _ = api
+            if let Err(e) = api
                 .send_text_message(
                     chat_id,
                     message.id,
                     "Sorry, the request timed out. Please try again.",
                 )
-                .await;
+                .await
+            {
+                log::error!(
+                    "Telegram reply failed: action=request_timeout chat_id={} error={:?}",
+                    chat_id,
+                    e
+                );
+            }
             None
         }
         Ok(ctx) => ctx,
@@ -240,6 +254,16 @@ async fn handle_url(
     }
 
     Ok(())
+}
+
+fn log_update_context(action: &str, message: &Message) {
+    log::info!(
+        "request_context action={} update_message_id={} chat_id={} user_id={:?}",
+        action,
+        message.id,
+        message.chat.id,
+        message.from.as_ref().map(|user| user.id.0)
+    );
 }
 
 // Required catch-all branch — silently ignore messages that are neither commands nor URLs.
@@ -307,12 +331,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let version = env!("CARGO_PACKAGE_VERSION");
     log::info!("Starting CrabberBot version {}", version);
 
-    // Ensure audio cache directory exists
-    std::fs::create_dir_all(DEFAULT_AUDIO_CACHE_DIR)
-        .expect("Failed to create audio cache directory");
+    let config = AppConfig::from_env()?;
+    if config.deepgram_api_key.is_empty() || config.gemini_api_key.is_empty() {
+        log::warn!(
+            "DEEPGRAM_API_KEY and/or GEMINI_API_KEY not set — transcription and summarization will be unavailable"
+        );
+    }
+    log::info!(
+        "Postgres pool configured: min={} max={} acquire_timeout={:?}",
+        config.postgres_min_connections,
+        config.postgres_max_connections,
+        config.postgres_acquire_timeout
+    );
 
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let pool = sqlx::PgPool::connect(&database_url)
+    let pool = PgPoolOptions::new()
+        .max_connections(config.postgres_max_connections)
+        .min_connections(config.postgres_min_connections)
+        .acquire_timeout(config.postgres_acquire_timeout)
+        .connect(&config.database_url)
         .await
         .expect("Failed to connect to database");
     PostgresStorage::run_migrations(&pool)
@@ -321,6 +357,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Database connected and migrations applied.");
     let storage: Arc<dyn Storage> = Arc::new(PostgresStorage::new(pool.clone()));
 
+    let audio_cache_dir = config.audio_cache_dir.clone();
     let cleanup_pool = pool.clone();
     let cleanup_storage = storage.clone();
     tokio::spawn(async move {
@@ -330,48 +367,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             PostgresStorage::cleanup_expired(&cleanup_pool, 7).await;
             cleanup_storage.cleanup_expired_callback_contexts().await;
             cleanup_storage.expire_stale_topups().await;
-            cleanup_audio_cache(&cleanup_pool).await;
+            cleanup_audio_cache(&cleanup_pool, &audio_cache_dir).await;
         }
     });
 
-    let client = create_http_client().await?;
+    let client = create_http_client(&config.execution_environment).await?;
     let bot = Bot::from_env_with_client(client.clone());
 
-    let deepgram_api_key = std::env::var("DEEPGRAM_API_KEY").unwrap_or_else(|_| String::new());
-    let gemini_api_key = std::env::var("GEMINI_API_KEY").unwrap_or_else(|_| String::new());
-    let gemini_model = std::env::var("GEMINI_MODEL")
-        .unwrap_or_else(|_| "gemini-3.1-flash-lite-preview".to_string());
-    if deepgram_api_key.is_empty() || gemini_api_key.is_empty() {
-        log::warn!(
-            "DEEPGRAM_API_KEY and/or GEMINI_API_KEY not set — transcription and summarization will be unavailable"
-        );
-    }
-    let owner_chat_id: i64 = std::env::var("OWNER_CHAT_ID")
-        .unwrap_or_else(|_| "0".to_string())
-        .parse()
-        .unwrap_or(0);
-
-    let downloader: Arc<dyn Downloader> = Arc::new(YtDlpDownloader::new().await);
+    let downloader: Arc<dyn Downloader> = Arc::new(
+        YtDlpDownloader::new(config.yt_dlp_path.clone(), config.downloads_dir.clone()).await,
+    );
     let api: Arc<dyn TelegramApi> = Arc::new(TeloxideApi::new(bot.clone()));
     let download_limiter = Arc::new(ConcurrencyLimiter::new());
     let premium_limiter = Arc::new(ConcurrencyLimiter::new());
-    let audio_extractor: Arc<dyn AudioExtractor> = Arc::new(FfmpegAudioExtractor::new(3));
-    let transcriber: Arc<dyn Transcriber> =
-        Arc::new(DeepgramTranscriber::new(client.clone(), deepgram_api_key));
+    let audio_extractor: Arc<dyn AudioExtractor> =
+        Arc::new(FfmpegAudioExtractor::new(3, config.audio_cache_dir.clone()));
+    let transcriber: Arc<dyn Transcriber> = Arc::new(DeepgramTranscriber::new(
+        client.clone(),
+        config.deepgram_api_key.clone(),
+    ));
     let summarizer: Arc<dyn Summarizer> = Arc::new(GeminiSummarizer::new(
         client.clone(),
-        gemini_api_key,
-        gemini_model,
+        config.gemini_api_key.clone(),
+        config.gemini_model.clone(),
     ));
 
-    let port: u16 = std::env::var("PORT")
-        .unwrap_or_else(|_| "8080".to_string())
-        .parse()
-        .expect("PORT must be a valid number");
-
-    let addr = ([0, 0, 0, 0], port).into();
-    let webhook_url_str = std::env::var("WEBHOOK_URL").expect("WEBHOOK_URL env var not set");
-    let url: Url = webhook_url_str.parse().unwrap();
+    let addr = ([0, 0, 0, 0], config.port).into();
+    let url = config.webhook_url.clone();
 
     log::info!("Setting webhook {}", url);
     let listener = teloxide::update_listeners::webhooks::axum(
@@ -394,7 +416,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to set bot description.");
     log::info!("Successfully set bot description.");
 
-    let bot_name = if webhook_url_str.contains("test") {
+    let bot_name = if config.webhook_url.as_str().contains("test") {
         "CrabberBot TEST"
     } else {
         "CrabberBot | Video Downloader"
@@ -454,7 +476,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             audio_extractor,
             transcriber,
             summarizer,
-            owner_chat_id
+            config.owner_chat_id,
+            config.execution_environment.clone()
         ])
         .enable_ctrlc_handler()
         .build()
@@ -468,7 +491,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Delete audio cache files older than 2 hours.
-async fn cleanup_audio_cache(pool: &sqlx::PgPool) {
+async fn cleanup_audio_cache(pool: &sqlx::PgPool, audio_cache_dir: &std::path::Path) {
     // Fetch paths currently referenced by active (non-expired) cache entries so
     // we don't delete audio files that are still needed for premium buttons.
     let referenced: HashSet<String> = sqlx::query_as::<_, (String,)>(
@@ -481,7 +504,7 @@ async fn cleanup_audio_cache(pool: &sqlx::PgPool) {
     .map(|(p,)| p)
     .collect();
 
-    let mut entries = match tokio::fs::read_dir(audio_cache_dir()).await {
+    let mut entries = match tokio::fs::read_dir(audio_cache_dir).await {
         Ok(e) => e,
         Err(e) => {
             log::warn!("Failed to read audio cache dir: {}", e);

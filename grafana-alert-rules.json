@@ -1,0 +1,173 @@
+{
+  "apiVersion": 1,
+  "groups": [
+    {
+      "orgId": 1,
+      "name": "crabberbot-premium",
+      "folder": "CrabberBot",
+      "interval": "1m",
+      "rules": [
+        {
+          "uid": "crabberbot-premium-cost-spike",
+          "title": "Premium Cost Spike",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {"from": 3600, "to": 0},
+              "datasourceUid": "DS_POSTGRES",
+              "model": {
+                "format": "table",
+                "rawQuery": true,
+                "rawSql": "SELECT COALESCE(SUM(estimated_cost_usd), 0) AS value FROM premium_usage WHERE created_at > NOW() - INTERVAL '1 hour'"
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "conditions": [{"evaluator": {"params": [2.0], "type": "gt"}, "operator": {"type": "and"}, "query": {"params": ["A"]}, "reducer": {"type": "last"}, "type": "query"}],
+                "datasource": {"type": "__expr__", "uid": "__expr__"},
+                "expression": "A",
+                "type": "threshold"
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "Error",
+          "for": "5m",
+          "annotations": {"summary": "Premium provider cost exceeded the hourly budget."},
+          "labels": {"service": "crabberbot", "severity": "warning"}
+        },
+        {
+          "uid": "crabberbot-premium-error-rate",
+          "title": "Premium Error Rate",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {"from": 900, "to": 0},
+              "datasourceUid": "DS_POSTGRES",
+              "model": {
+                "format": "table",
+                "rawQuery": true,
+                "rawSql": "SELECT COALESCE(100.0 * COUNT(*) FILTER (WHERE status = 'error') / NULLIF(COUNT(*), 0), 0) AS value FROM requests WHERE created_at > NOW() - INTERVAL '15 minutes'"
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "conditions": [{"evaluator": {"params": [25.0], "type": "gt"}, "operator": {"type": "and"}, "query": {"params": ["A"]}, "reducer": {"type": "last"}, "type": "query"}],
+                "datasource": {"type": "__expr__", "uid": "__expr__"},
+                "expression": "A",
+                "type": "threshold"
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "Error",
+          "for": "10m",
+          "annotations": {"summary": "Download/API request errors are above normal levels."},
+          "labels": {"service": "crabberbot", "severity": "critical"}
+        },
+        {
+          "uid": "crabberbot-deepgram-volume",
+          "title": "Deepgram Volume Spike",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {"from": 3600, "to": 0},
+              "datasourceUid": "DS_POSTGRES",
+              "model": {
+                "format": "table",
+                "rawQuery": true,
+                "rawSql": "SELECT COALESCE(SUM(units) / 60.0, 0) AS value FROM premium_usage WHERE feature IN ('transcribe', 'summarize') AND created_at > NOW() - INTERVAL '1 hour'"
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "conditions": [{"evaluator": {"params": [120.0], "type": "gt"}, "operator": {"type": "and"}, "query": {"params": ["A"]}, "reducer": {"type": "last"}, "type": "query"}],
+                "datasource": {"type": "__expr__", "uid": "__expr__"},
+                "expression": "A",
+                "type": "threshold"
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "Error",
+          "for": "5m",
+          "annotations": {"summary": "Deepgram billed minutes are above the expected hourly volume."},
+          "labels": {"service": "crabberbot", "severity": "warning"}
+        },
+        {
+          "uid": "crabberbot-gemini-volume",
+          "title": "Gemini Token Spike",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {"from": 3600, "to": 0},
+              "datasourceUid": "DS_POSTGRES",
+              "model": {
+                "format": "table",
+                "rawQuery": true,
+                "rawSql": "SELECT COALESCE(SUM(units), 0) AS value FROM premium_usage WHERE feature LIKE 'gemini_%' AND created_at > NOW() - INTERVAL '1 hour'"
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "conditions": [{"evaluator": {"params": [500000.0], "type": "gt"}, "operator": {"type": "and"}, "query": {"params": ["A"]}, "reducer": {"type": "last"}, "type": "query"}],
+                "datasource": {"type": "__expr__", "uid": "__expr__"},
+                "expression": "A",
+                "type": "threshold"
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "Error",
+          "for": "5m",
+          "annotations": {"summary": "Gemini token usage is above the expected hourly volume."},
+          "labels": {"service": "crabberbot", "severity": "warning"}
+        },
+        {
+          "uid": "crabberbot-quota-exhaustion",
+          "title": "Quota Exhaustion Pattern",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {"from": 86400, "to": 0},
+              "datasourceUid": "DS_POSTGRES",
+              "model": {
+                "format": "table",
+                "rawQuery": true,
+                "rawSql": "SELECT COUNT(*) AS value FROM subscriptions WHERE tier <> 'free' AND (ai_seconds_limit - ai_seconds_used + topup_seconds_available) <= 60"
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "conditions": [{"evaluator": {"params": [5.0], "type": "gt"}, "operator": {"type": "and"}, "query": {"params": ["A"]}, "reducer": {"type": "last"}, "type": "query"}],
+                "datasource": {"type": "__expr__", "uid": "__expr__"},
+                "expression": "A",
+                "type": "threshold"
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "Error",
+          "for": "30m",
+          "annotations": {"summary": "Multiple paid users are near AI quota exhaustion."},
+          "labels": {"service": "crabberbot", "severity": "warning"}
+        }
+      ]
+    }
+  ]
+}

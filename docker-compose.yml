@@ -13,6 +13,9 @@ services:
       - TELOXIDE_TOKEN
       - WEBHOOK_URL
       - DATABASE_URL=postgres://crabberbot:${POSTGRES_PASSWORD}@crabberbot-postgres-1:5432/crabberbot
+      - POSTGRES_MAX_CONNECTIONS=10
+      - POSTGRES_MIN_CONNECTIONS=1
+      - POSTGRES_ACQUIRE_TIMEOUT_SECS=5
       - DEEPGRAM_API_KEY
       - GEMINI_API_KEY
       - DOWNLOADS_DIR=/downloads
