@@ -29,8 +29,32 @@ jobs:
         id: version
         run: |
           VERSION=$(git describe --long | sed 's/-/\./')
-          echo "Detected version: $VERSION"
-          echo "value=$VERSION" >> $GITHUB_OUTPUT
+          RELEASE_VERSION=$(git describe --tags --abbrev=0)
+          TAGS=(
+            "type=raw,value=latest"
+            "type=raw,value=${VERSION}"
+            "type=sha,prefix=sha-,format=short"
+          )
+
+          PARTIAL_VERSION=
+          IFS='.' read -ra VERSION_PARTS <<< "${RELEASE_VERSION}"
+          for PART in "${VERSION_PARTS[@]}"; do
+            if [[ -z "${PARTIAL_VERSION}" ]]; then
+              PARTIAL_VERSION="${PART}"
+            else
+              PARTIAL_VERSION="${PARTIAL_VERSION}.${PART}"
+            fi
+            TAGS+=("type=raw,value=${PARTIAL_VERSION}")
+          done
+
+          echo "Detected version: ${VERSION}"
+          echo "Detected release version: ${RELEASE_VERSION}"
+          {
+            echo "value=${VERSION}"
+            echo "tags<<EOF"
+            printf '%s\n' "${TAGS[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Get yt-dlp latest commit hash
         id: yt_dlp
@@ -56,10 +80,7 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest
-            type=raw,value=${{ steps.version.outputs.value }}
-            type=sha,prefix=sha-,format=short
+          tags: ${{ steps.version.outputs.tags }}
 
       - name: Build Docker image for scan
         uses: docker/build-push-action@v7
