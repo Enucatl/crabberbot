@@ -1,6 +1,8 @@
 # CrabberBot 🦀
 
 [![GitHub Actions CI/CD](https://github.com/Enucatl/crabberbot/actions/workflows/deploy.yml/badge.svg)](https://github.com/Enucatl/crabberbot/actions/workflows/deploy.yml)
+[![Latest tag](https://img.shields.io/github/v/tag/Enucatl/crabberbot?label=latest%20tag)](https://github.com/Enucatl/crabberbot/tags)
+[![Trivy scan](https://img.shields.io/github/actions/workflow/status/Enucatl/crabberbot/deploy.yml?label=trivy%20scan)](https://github.com/Enucatl/crabberbot/actions/workflows/deploy.yml)
 [![Made with Rust](https://img.shields.io/badge/made%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
