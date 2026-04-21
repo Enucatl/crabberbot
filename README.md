@@ -162,3 +162,4 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 ## Security baseline
 
 This compose project uses the shared [docker-compose-security-baseline](https://github.com/Enucatl/docker-compose-security-baseline) for common container hardening defaults, including capabilities, no-new-privileges, memory/swap, and PID limits.
+
