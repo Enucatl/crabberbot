@@ -1,149 +1,71 @@
 name: Build & Deploy
 
 on:
+  pull_request:
   push:
     branches:
       - main
-
-env:
-  IMAGE_NAME: ghcr.io/enucatl/crabberbot
+    tags:
+      - "*"
 
 jobs:
-  deploy:
+  prepare:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      security-events: write
-
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      yt_dlp_commit_hash: ${{ steps.yt_dlp.outputs.commit_hash }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Get version from git
+      - name: Compute git version
         id: version
-        run: |
-          VERSION=$(git describe --long | sed 's/-/\./')
-          RELEASE_VERSION=$(git describe --tags --abbrev=0)
-          TAGS=(
-            "type=raw,value=latest"
-            "type=raw,value=${VERSION}"
-            "type=sha,prefix=sha-,format=short"
-          )
-
-          PARTIAL_VERSION=
-          IFS='.' read -ra VERSION_PARTS <<< "${RELEASE_VERSION}"
-          for PART in "${VERSION_PARTS[@]}"; do
-            if [[ -z "${PARTIAL_VERSION}" ]]; then
-              PARTIAL_VERSION="${PART}"
-            else
-              PARTIAL_VERSION="${PARTIAL_VERSION}.${PART}"
-            fi
-            TAGS+=("type=raw,value=${PARTIAL_VERSION}")
-          done
-
-          echo "Detected version: ${VERSION}"
-          echo "Detected release version: ${RELEASE_VERSION}"
-          {
-            echo "value=${VERSION}"
-            echo "tags<<EOF"
-            printf '%s\n' "${TAGS[@]}"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+        uses: Enucatl/docker-compose-security-baseline/.github/actions/git-version@main
 
       - name: Get yt-dlp latest commit hash
         id: yt_dlp
+        shell: bash
         run: |
-          HASH=$(git ls-remote https://github.com/Enucatl/yt-dlp.git refs/heads/master | cut -f1)
-          echo "commit_hash=$HASH" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          hash="$(git ls-remote https://github.com/Enucatl/yt-dlp.git refs/heads/master | cut -f1)"
+          echo "commit_hash=${hash}" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Run cargo test
         run: cargo test --verbose
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: ${{ steps.version.outputs.tags }}
-
-      - name: Build Docker image for scan
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          tags: crabberbot:scan
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            CARGO_PACKAGE_VERSION=${{ steps.version.outputs.value }}
-            YT_DLP_COMMIT_HASH=${{ steps.yt_dlp.outputs.commit_hash }}
-          cache-from: type=gha
-
-      - name: Scan repository config with Trivy
-        uses: aquasecurity/trivy-action@v0.35.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          format: table
-          exit-code: '1'
-          scanners: config,secret
-          severity: CRITICAL,HIGH
-
-      - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@v0.35.0
-        with:
-          image-ref: crabberbot:scan
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: os,library
-          scanners: vuln,secret
-          severity: CRITICAL,HIGH
-
-      - name: Generate Trivy SARIF report
-        if: always()
-        uses: aquasecurity/trivy-action@v0.35.0
-        with:
-          image-ref: crabberbot:scan
-          format: sarif
-          output: trivy-results.sarif
-          exit-code: '0'
-          ignore-unfixed: true
-          vuln-type: os,library
-          scanners: vuln,secret
-          severity: CRITICAL,HIGH
-          limit-severities-for-sarif: true
-
-      - name: Upload Trivy SARIF report
-        if: always()
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-results.sarif
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            CARGO_PACKAGE_VERSION=${{ steps.version.outputs.value }}
-            YT_DLP_COMMIT_HASH=${{ steps.yt_dlp.outputs.commit_hash }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+  docker:
+    needs:
+      - prepare
+      - test
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      security-events: write
+    uses: Enucatl/docker-compose-security-baseline/.github/workflows/docker-ci.yml@main
+    with:
+      image_name: ghcr.io/enucatl/crabberbot
+      context: .
+      dockerfile: Dockerfile
+      platforms: linux/amd64
+      push: ${{ github.event_name != 'pull_request' }}
+      build_args: |
+        CARGO_PACKAGE_VERSION=${{ needs.prepare.outputs.version }}
+        YT_DLP_COMMIT_HASH=${{ needs.prepare.outputs.yt_dlp_commit_hash }}
+    secrets: inherit
