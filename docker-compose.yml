@@ -53,7 +53,7 @@ services:
       service: hardened-small
     image: ghcr.io/enucatl/telegram-bot-api:latest
     tmpfs:
-      - "/tmp/telegram-bot-api:rw,noexec,size=100m"
+      - "/tmp/telegram-bot-api:rw,noexec,uid=101,gid=101,mode=0755,size=100m"
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
     networks:
