@@ -95,7 +95,44 @@ This will:
 
 Your bot instance is now live!
 
-### 4. Local Development & Testing
+### 4. Database Upgrade to PostgreSQL 18
+
+The bundled `postgres` service now uses `postgres:18`. If you already have an
+existing `pgdata` volume from PostgreSQL 17, perform a short downtime
+dump/restore when upgrading:
+
+1. While PostgreSQL 17 is still running, dump the current database:
+   ```bash
+   docker compose exec -T postgres pg_dump --format=custom --no-owner --no-acl -U crabberbot crabberbot > crabberbot.dump
+   ```
+2. Stop the stack and remove the old data volume so PostgreSQL 18 can create a
+   fresh data directory:
+   ```bash
+   docker compose down -v
+   ```
+3. Update the stack to use `postgres:18` and mount `pgdata` at
+   `/var/lib/postgresql`:
+   ```yaml
+   volumes:
+     - pgdata:/var/lib/postgresql
+   ```
+   PostgreSQL 18 stores its data under `/var/lib/postgresql/18/docker` inside
+   that mounted volume, so future major upgrades can reuse the same parent
+   volume path.
+4. Start only the database service:
+   ```bash
+   docker compose up -d postgres
+   ```
+5. Restore the dump into the new instance:
+   ```bash
+   cat crabberbot.dump | docker compose exec -T postgres pg_restore --clean --if-exists --no-owner --dbname=crabberbot -U crabberbot
+   ```
+6. Start the bot service again and verify the app can connect:
+   ```bash
+   docker compose up -d crabberbot
+   ```
+
+### 5. Local Development & Testing
 
 The provided `docker-compose.override.yml` makes local development easy.
 
@@ -162,4 +199,3 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 ## Security baseline
 
 This compose project uses the shared [docker-compose-security-baseline](https://github.com/Enucatl/docker-compose-security-baseline) for common container hardening defaults, including capabilities, no-new-privileges, memory/swap, and PID limits.
-

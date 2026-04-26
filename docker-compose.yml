@@ -68,7 +68,7 @@ services:
     extends:
       file: ../compose-security-baseline/hardening.yml
       service: postgres
-    image: postgres:17
+    image: postgres:18
     cpu_shares: 1024
     networks:
       - crabberbot
@@ -77,7 +77,7 @@ services:
       POSTGRES_USER: crabberbot
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U crabberbot"]
 
