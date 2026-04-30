@@ -35,13 +35,24 @@ Using CrabberBot is as simple as it gets:
 -   `/start` - Displays a welcome message and a guide on how to use the bot.
 -   `/version` - Shows the current running version of the bot.
 
+## 🏗️ Technical Architecture
+
+![CrabberBot architecture diagram](architecture.png)
+
+The bot is composed of several services that work together, all managed by Docker Compose.
+
+1.  **`crabberbot` (Rust Application)**: The core of the bot. It's written in Rust using the `teloxide` framework. It handles incoming messages, parses URLs, interacts with `yt-dlp`, validates media, and sends files back to the user.
+2.  **`yt-dlp`**: The workhorse for downloading. It's built from source within the `Dockerfile` to ensure the latest features and fixes. The bot executes `yt-dlp` as a command-line process.
+3.  **`telegram-bot-api` (Local Server)**: A local instance of the Telegram Bot API. **This is crucial for uploading files larger than 50MB**. By running our own API server, we bypass the standard file size limit imposed on bots using Telegram's public API.
+4.  **`cloudflared` (Webhook Tunnel)**: Creates a secure tunnel from a public Cloudflare URL to the bot running on your local machine. This allows Telegram's servers to send webhook updates to the bot without you needing to configure firewalls or port forwarding.
+
 ---
 
 ## 🛠️ Self-Hosting Guide for Developers
 
 You can easily run your own instance of CrabberBot using Docker and Docker Compose. This is for users who want to run a private instance or contribute to development.
 
-### Prerequisites
+### 1. Prerequisites
 
 -   **Docker** and **Docker Compose**
 -   **Telegram Bot Token**: Get one from [@BotFather](https://t.me/BotFather) on Telegram.
@@ -95,44 +106,7 @@ This will:
 
 Your bot instance is now live!
 
-### 4. Database Upgrade to PostgreSQL 18
-
-The bundled `postgres` service now uses `postgres:18`. If you already have an
-existing `pgdata` volume from PostgreSQL 17, perform a short downtime
-dump/restore when upgrading:
-
-1. While PostgreSQL 17 is still running, dump the current database:
-   ```bash
-   docker compose exec -T postgres pg_dump --format=custom --no-owner --no-acl -U crabberbot crabberbot > crabberbot.dump
-   ```
-2. Stop the stack and remove the old data volume so PostgreSQL 18 can create a
-   fresh data directory:
-   ```bash
-   docker compose down -v
-   ```
-3. Update the stack to use `postgres:18` and mount `pgdata` at
-   `/var/lib/postgresql`:
-   ```yaml
-   volumes:
-     - pgdata:/var/lib/postgresql
-   ```
-   PostgreSQL 18 stores its data under `/var/lib/postgresql/18/docker` inside
-   that mounted volume, so future major upgrades can reuse the same parent
-   volume path.
-4. Start only the database service:
-   ```bash
-   docker compose up -d postgres
-   ```
-5. Restore the dump into the new instance:
-   ```bash
-   cat crabberbot.dump | docker compose exec -T postgres pg_restore --clean --if-exists --no-owner --dbname=crabberbot -U crabberbot
-   ```
-6. Start the bot service again and verify the app can connect:
-   ```bash
-   docker compose up -d crabberbot
-   ```
-
-### 5. Local Development & Testing
+### 4. Local Development & Testing
 
 The provided `docker-compose.override.yml` makes local development easy.
 
@@ -155,7 +129,7 @@ The provided `docker-compose.override.yml` makes local development easy.
     CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/\./') docker compose --profile test run --build --rm test-runner
     ```
 
-#### Rebuilding yt-dlp
+### 5. Rebuilding yt-dlp
 
 `yt-dlp` is built from source inside the Docker image. Docker caches this layer, so it is **not** rebuilt on every `docker compose up --build` unless something changes.
 
@@ -171,16 +145,6 @@ Docker uses `YT_DLP_COMMIT_HASH` as part of the layer cache key. If the hash is 
 
 Omitting `YT_DLP_COMMIT_HASH` falls back to cloning `master` without cache-busting (the default behaviour).
 
-## 🏗️ Technical Architecture
-
-![CrabberBot architecture diagram](architecture.png)
-
-The bot is composed of several services that work together, all managed by Docker Compose.
-
-1.  **`crabberbot` (Rust Application)**: The core of the bot. It's written in Rust using the `teloxide` framework. It handles incoming messages, parses URLs, interacts with `yt-dlp`, validates media, and sends files back to the user.
-2.  **`yt-dlp`**: The workhorse for downloading. It's built from source within the `Dockerfile` to ensure the latest features and fixes. The bot executes `yt-dlp` as a command-line process.
-3.  **`telegram-bot-api` (Local Server)**: A local instance of the Telegram Bot API. **This is crucial for uploading files larger than 50MB**. By running our own API server, we bypass the standard file size limit imposed on bots using Telegram's public API.
-4.  **`cloudflared` (Webhook Tunnel)**: Creates a secure tunnel from a public Cloudflare URL to the bot running on your local machine. This allows Telegram's servers to send webhook updates to the bot without you needing to configure firewalls or port forwarding.
 
 ## ❤️ Contributing
 
@@ -191,12 +155,6 @@ Contributions are welcome! If you have a feature request, bug report, or pull re
 3.  Commit your changes (`git commit -am 'Add some feature'`).
 4.  Push to the branch (`git push origin feature/your-feature`).
 5.  Open a new Pull Request.
-
-## 📄 License
-
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
-
-
 
 ## Security baseline
 
