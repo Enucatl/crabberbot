@@ -173,6 +173,8 @@ Omitting `YT_DLP_COMMIT_HASH` falls back to cloning `master` without cache-busti
 
 ## 🏗️ Technical Architecture
 
+![CrabberBot architecture diagram](architecture.png)
+
 The bot is composed of several services that work together, all managed by Docker Compose.
 
 1.  **`crabberbot` (Rust Application)**: The core of the bot. It's written in Rust using the `teloxide` framework. It handles incoming messages, parses URLs, interacts with `yt-dlp`, validates media, and sends files back to the user.
