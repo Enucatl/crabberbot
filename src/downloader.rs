@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
+use uuid::Uuid;
 
 const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -245,6 +246,7 @@ impl YtDlpDownloader {
             .arg("--ignore-config")
             .arg("--impersonate")
             .arg("chrome");
+        command.kill_on_drop(true);
         command
     }
 
@@ -297,6 +299,109 @@ impl YtDlpDownloader {
             .filter_map(|entry| entry.ok())
             .find(|path| path != video_filepath)
     }
+
+    async fn cleanup_download_artifacts(download_dir: &Path, uuid: &str) {
+        let pattern = download_dir
+            .join(format!("{}.*", Self::escape_glob(uuid)))
+            .to_string_lossy()
+            .into_owned();
+        let paths = match glob::glob(&pattern) {
+            Ok(paths) => paths,
+            Err(e) => {
+                log::warn!("Failed to build cleanup glob for {}: {}", uuid, e);
+                return;
+            }
+        };
+
+        for path in paths.filter_map(|entry| entry.ok()) {
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => log::info!("Removed incomplete download artifact: {}", path.display()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => log::warn!(
+                    "Failed to remove incomplete download artifact {}: {}",
+                    path.display(),
+                    e
+                ),
+            }
+        }
+    }
+}
+
+/// Remove media files left in the downloads directory by older crashed or timed-out runs.
+///
+/// Normal in-flight downloads are UUID-prefixed and live at the top level of
+/// `download_dir`; durable caches live in subdirectories and are intentionally skipped.
+pub async fn cleanup_orphaned_downloads(download_dir: &Path) -> usize {
+    let mut removed = 0usize;
+    let mut entries = match tokio::fs::read_dir(download_dir).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!(
+                "Failed to read downloads dir for startup cleanup {}: {}",
+                download_dir.display(),
+                e
+            );
+            return 0;
+        }
+    };
+
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                let path = entry.path();
+                let is_file = entry
+                    .file_type()
+                    .await
+                    .is_ok_and(|file_type| file_type.is_file());
+                let should_remove = is_file
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(is_download_artifact_name);
+                if !should_remove {
+                    continue;
+                }
+
+                match tokio::fs::remove_file(&path).await {
+                    Ok(()) => {
+                        removed += 1;
+                        log::info!("Removed orphaned download artifact: {}", path.display());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => log::warn!(
+                        "Failed to remove orphaned download artifact {}: {}",
+                        path.display(),
+                        e
+                    ),
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                log::warn!("Error reading downloads dir during startup cleanup: {}", e);
+                break;
+            }
+        }
+    }
+
+    removed
+}
+
+fn is_download_artifact_name(filename: &str) -> bool {
+    let Some((prefix, rest)) = filename.split_once('.') else {
+        return false;
+    };
+    if Uuid::parse_str(prefix).is_err() {
+        return false;
+    }
+
+    if rest.ends_with(".part") {
+        return true;
+    }
+
+    let Some(extension) = rest.rsplit('.').next().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    MediaType::from_extension(&extension).is_some() || extension == "image"
 }
 
 #[async_trait]
@@ -366,14 +471,22 @@ impl Downloader for YtDlpDownloader {
 
         command.arg(url.as_str());
 
-        let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, command.output())
-            .await
-            .map_err(|_| DownloadError::Timeout(DOWNLOAD_TIMEOUT.as_secs()))?
-            .map_err(|e| DownloadError::CommandFailed(e.to_string()))?;
+        let output = match tokio::time::timeout(DOWNLOAD_TIMEOUT, command.output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                Self::cleanup_download_artifacts(&download_dir, &uuid).await;
+                return Err(DownloadError::CommandFailed(e.to_string()));
+            }
+            Err(_) => {
+                Self::cleanup_download_artifacts(&download_dir, &uuid).await;
+                return Err(DownloadError::Timeout(DOWNLOAD_TIMEOUT.as_secs()));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             log::error!("yt-dlp failed for url {}: {}", url, stderr);
+            Self::cleanup_download_artifacts(&download_dir, &uuid).await;
             return Err(DownloadError::CommandFailed(stderr.to_string()));
         }
 
@@ -397,6 +510,7 @@ impl Downloader for YtDlpDownloader {
         }
 
         if downloaded_files.is_empty() {
+            Self::cleanup_download_artifacts(&download_dir, &uuid).await;
             return Err(DownloadError::ParsingFailed(
                 "Could not extract any media metadata from yt-dlp output.".to_string(),
             ));
@@ -419,6 +533,7 @@ impl Downloader for YtDlpDownloader {
                 .collect();
 
             if items.is_empty() {
+                Self::cleanup_download_artifacts(&download_dir, &uuid).await;
                 return Err(DownloadError::ParsingFailed(
                     "No valid media items found in playlist output.".to_string(),
                 ));
@@ -426,19 +541,45 @@ impl Downloader for YtDlpDownloader {
 
             Ok(DownloadedMedia::Group(items))
         } else {
-            let dl = downloaded_files.get(&info.id).ok_or_else(|| {
-                DownloadError::ParsingFailed(format!("No download output for id {}", info.id))
-            })?;
-            let filepath_str = dl.filepath.as_ref().ok_or_else(|| {
-                DownloadError::ParsingFailed("Download output missing filepath".to_string())
-            })?;
+            let dl = match downloaded_files.get(&info.id) {
+                Some(dl) => dl,
+                None => {
+                    Self::cleanup_download_artifacts(&download_dir, &uuid).await;
+                    return Err(DownloadError::ParsingFailed(format!(
+                        "No download output for id {}",
+                        info.id
+                    )));
+                }
+            };
+            let filepath_str = match dl.filepath.as_ref() {
+                Some(filepath) => filepath,
+                None => {
+                    Self::cleanup_download_artifacts(&download_dir, &uuid).await;
+                    return Err(DownloadError::ParsingFailed(
+                        "Download output missing filepath".to_string(),
+                    ));
+                }
+            };
             let filepath = Self::resolve_download_path(&download_dir, filepath_str);
-            let ext = dl.ext.as_deref().ok_or_else(|| {
-                DownloadError::ParsingFailed("Download output missing extension".to_string())
-            })?;
-            let media_type = MediaType::from_extension(ext).ok_or_else(|| {
-                DownloadError::ParsingFailed(format!("Unsupported file extension: {}", ext))
-            })?;
+            let ext = match dl.ext.as_deref() {
+                Some(ext) => ext,
+                None => {
+                    Self::cleanup_download_artifacts(&download_dir, &uuid).await;
+                    return Err(DownloadError::ParsingFailed(
+                        "Download output missing extension".to_string(),
+                    ));
+                }
+            };
+            let media_type = match MediaType::from_extension(ext) {
+                Some(media_type) => media_type,
+                None => {
+                    Self::cleanup_download_artifacts(&download_dir, &uuid).await;
+                    return Err(DownloadError::ParsingFailed(format!(
+                        "Unsupported file extension: {}",
+                        ext
+                    )));
+                }
+            };
 
             let thumbnail_filepath = if is_single_with_thumbnail {
                 Self::find_thumbnail(&download_dir, &uuid, &info.id, &filepath)
@@ -570,5 +711,62 @@ mod tests {
             YtDlpDownloader::find_thumbnail(download_dir, "test-id", "media", &video_filepath);
 
         assert_eq!(found, Some(thumbnail_filepath));
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_orphaned_downloads_removes_uuid_media_artifacts() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let download_dir = temp_dir.path();
+        let uuid = uuid::Uuid::new_v4();
+        let video = download_dir.join(format!("{uuid}.media.mp4"));
+        let thumbnail = download_dir.join(format!("{uuid}.media.jpg"));
+        let partial = download_dir.join(format!("{uuid}.media.mp4.part"));
+        let tiktok_image = download_dir.join(format!("{uuid}.media.image"));
+        let unrelated = download_dir.join("keep.mp4");
+        let cache_dir = download_dir.join("audio_cache");
+        let cached_audio = cache_dir.join(format!("{uuid}.mp3"));
+
+        std::fs::create_dir(&cache_dir).unwrap();
+        for path in [
+            &video,
+            &thumbnail,
+            &partial,
+            &tiktok_image,
+            &unrelated,
+            &cached_audio,
+        ] {
+            std::fs::write(path, b"data").unwrap();
+        }
+
+        let removed = cleanup_orphaned_downloads(download_dir).await;
+
+        assert_eq!(removed, 4);
+        assert!(!video.exists());
+        assert!(!thumbnail.exists());
+        assert!(!partial.exists());
+        assert!(!tiktok_image.exists());
+        assert!(unrelated.exists());
+        assert!(cached_audio.exists());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_download_artifacts_removes_only_matching_uuid() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let download_dir = temp_dir.path();
+        let target_uuid = uuid::Uuid::new_v4().to_string();
+        let other_uuid = uuid::Uuid::new_v4();
+        let target_video = download_dir.join(format!("{target_uuid}.media.mp4"));
+        let target_part = download_dir.join(format!("{target_uuid}.media.mp4.part"));
+        let other_video = download_dir.join(format!("{other_uuid}.media.mp4"));
+
+        for path in [&target_video, &target_part, &other_video] {
+            std::fs::write(path, b"data").unwrap();
+        }
+
+        YtDlpDownloader::cleanup_download_artifacts(download_dir, &target_uuid).await;
+
+        assert!(!target_video.exists());
+        assert!(!target_part.exists());
+        assert!(other_video.exists());
     }
 }

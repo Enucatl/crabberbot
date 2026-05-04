@@ -20,7 +20,7 @@ use crabberbot::commands::{
 };
 use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::config::AppConfig;
-use crabberbot::downloader::{Downloader, YtDlpDownloader};
+use crabberbot::downloader::{Downloader, YtDlpDownloader, cleanup_orphaned_downloads};
 use crabberbot::handler::{maybe_send_premium_buttons, process_download_request};
 use crabberbot::premium::audio_extractor::{AudioExtractor, FfmpegAudioExtractor};
 use crabberbot::premium::summarizer::{GeminiSummarizer, Summarizer};
@@ -343,6 +343,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.postgres_max_connections,
         config.postgres_acquire_timeout
     );
+
+    let removed_orphans = cleanup_orphaned_downloads(&config.downloads_dir).await;
+    if removed_orphans > 0 {
+        log::info!(
+            "Startup cleanup removed {} orphaned download artifact(s)",
+            removed_orphans
+        );
+    }
 
     let pool = PgPoolOptions::new()
         .max_connections(config.postgres_max_connections)
