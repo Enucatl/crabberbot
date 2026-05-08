@@ -22,7 +22,7 @@ services:
       - AUDIO_CACHE_DIR=/downloads/audio_cache
       - TMPDIR=/downloads/tmp
       - XDG_CACHE_HOME=/downloads/.cache
-      - GEMINI_MODEL=gemini-3.1-flash-lite-preview
+      - GEMINI_MODEL=gemini-3.1-flash-lite
       - OWNER_CHAT_ID
     depends_on:
       telegram-bot-api:

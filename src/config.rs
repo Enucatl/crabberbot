@@ -51,8 +51,8 @@ impl AppConfig {
         let postgres_acquire_timeout_secs = parse_env("POSTGRES_ACQUIRE_TIMEOUT_SECS", 5u64)?;
         let deepgram_api_key = std::env::var("DEEPGRAM_API_KEY").unwrap_or_default();
         let gemini_api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
-        let gemini_model = std::env::var("GEMINI_MODEL")
-            .unwrap_or_else(|_| "gemini-3.1-flash-lite-preview".to_string());
+        let gemini_model =
+            std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.1-flash-lite".to_string());
         let owner_chat_id = parse_env("OWNER_CHAT_ID", 0i64)?;
         let port = parse_env("PORT", 8080u16)?;
         let webhook_url = required("WEBHOOK_URL")?
