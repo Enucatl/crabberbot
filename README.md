@@ -143,7 +143,7 @@ docker compose --profile test run --build --rm test-runner
 
 Docker uses `YT_DLP_COMMIT_HASH` as part of the layer cache key. If the hash is unchanged, the cached layer is reused. If a new commit has been pushed to the upstream repo, the yt-dlp build step is invalidated and yt-dlp is rebuilt from the new source.
 
-Omitting `YT_DLP_COMMIT_HASH` falls back to cloning `master` without cache-busting (the default behaviour).
+If `YT_DLP_COMMIT_HASH` is not set, the build falls back to `master`.
 
 
 ## ❤️ Contributing

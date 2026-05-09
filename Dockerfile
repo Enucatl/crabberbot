@@ -18,10 +18,13 @@ RUN apt update && apt install -y \
 # and clean up the source code to keep this layer smaller.
 ARG YT_DLP_REPO_URL="https://github.com/Enucatl/yt-dlp.git"
 ARG YT_DLP_COMMIT_HASH="master"
-RUN git clone --depth 1 --branch master "${YT_DLP_REPO_URL}" /tmp/yt-dlp && \
-    cd /tmp/yt-dlp && \
-    git fetch --depth 1 origin "${YT_DLP_COMMIT_HASH}" && \
-    git checkout FETCH_HEAD && \
+RUN set -eux; \
+    git init /tmp/yt-dlp; \
+    cd /tmp/yt-dlp; \
+    git remote add origin "${YT_DLP_REPO_URL}"; \
+    git fetch --depth 1 origin "${YT_DLP_COMMIT_HASH}"; \
+    git checkout --detach FETCH_HEAD; \
+    git rev-parse HEAD; \
     make yt-dlp && \
     mv yt-dlp /usr/local/bin/yt-dlp && \
     rm -rf /tmp/yt-dlp
