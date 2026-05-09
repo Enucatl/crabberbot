@@ -50,10 +50,10 @@ services:
   telegram-bot-api:
     extends:
       file: ../compose-security-baseline/hardening.yml
-      service: hardened-small
+      service: hardened-xlarge
     image: ghcr.io/enucatl/telegram-bot-api:latest
     tmpfs:
-      - "/tmp/telegram-bot-api:rw,noexec,uid=101,gid=101,mode=0755,size=100m"
+      - "/tmp/telegram-bot-api:rw,noexec,uid=101,gid=101,mode=0755,size=2g"
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
     networks:
