@@ -1,0 +1,27 @@
+name: Latest Dependencies
+
+on:
+  schedule:
+    - cron: "22 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-latest-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Update dependencies
+        run: cargo update
+
+      - name: Run cargo test
+        run: cargo test --verbose
