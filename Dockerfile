@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.4
 # ---- Build Stage: Compile the application and build yt-dlp ----
 FROM rust:1-slim-trixie AS builder
 
