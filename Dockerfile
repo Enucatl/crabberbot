@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.4
 # ---- Build Stage: Compile the application and build yt-dlp ----
 FROM rust:1-slim-trixie AS builder
 
@@ -32,8 +31,14 @@ RUN set -eux; \
 
 WORKDIR /usr/src/crabberbot
 
-# Copy the actual source code and build files
+# Copy manifests and pre-build dependencies to leverage Docker layer caching.
 COPY Cargo.toml Cargo.lock ./
+# Create a dummy project to build only dependencies.
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release && cargo test --no-run
+RUN rm -rf src target/release/deps/crabberbot*
+
+# Copy the actual source code and build files
 COPY src ./src
 COPY build.rs ./build.rs
 COPY migrations ./migrations
@@ -42,12 +47,9 @@ ARG CARGO_PACKAGE_VERSION
 ENV CARGO_PACKAGE_VERSION=${CARGO_PACKAGE_VERSION}
 
 # Build the application
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/src/crabberbot/target \
-    echo "building release ${CARGO_PACKAGE_VERSION}" && \
+RUN echo "building release ${CARGO_PACKAGE_VERSION}" && \
     cargo build --release && \
-    cargo test --no-run && \
-    cp target/release/crabberbot /tmp/crabberbot
+    cargo test --no-run
 
 
 # ---- Runtime Stage: Create the final, smaller image ----
@@ -71,7 +73,7 @@ USER appuser
 WORKDIR /home/appuser
 
 # Copy the compiled Rust binary from the builder stage
-COPY --from=builder /tmp/crabberbot .
+COPY --from=builder /usr/src/crabberbot/target/release/crabberbot .
 
 # Copy the yt-dlp binary that was built in the builder stage
 COPY --from=builder /usr/local/bin/yt-dlp /usr/local/bin/
