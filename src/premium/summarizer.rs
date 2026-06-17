@@ -1,13 +1,12 @@
 use async_trait::async_trait;
 use reqwest::StatusCode;
-use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 use crate::premium::{GEMINI_INPUT_COST_PER_MILLION_TOKENS, GEMINI_OUTPUT_COST_PER_MILLION_TOKENS};
 use crate::retry::{
-    RetryPolicy, retry_after_from_response, retry_async, retryable_status, transient_reqwest_error,
+    ProviderCooldown, RetryPolicy, retry_after_from_response, retry_async, retryable_status,
+    transient_reqwest_error,
 };
 
 #[derive(Debug, Error)]
@@ -49,7 +48,7 @@ pub struct GeminiSummarizer {
     api_key: String,
     model: String,
     retry_policy: RetryPolicy,
-    cooldown_until: Arc<Mutex<Option<std::time::Instant>>>,
+    cooldown: ProviderCooldown,
 }
 
 impl GeminiSummarizer {
@@ -59,32 +58,16 @@ impl GeminiSummarizer {
             api_key,
             model,
             retry_policy: RetryPolicy::provider_default(),
-            cooldown_until: Arc::new(Mutex::new(None)),
+            cooldown: ProviderCooldown::new("Gemini"),
         }
-    }
-
-    async fn enforce_cooldown(&self) -> Result<(), SummarizationError> {
-        let until = *self.cooldown_until.lock().await;
-        if let Some(until) = until {
-            let now = std::time::Instant::now();
-            if until > now {
-                return Err(SummarizationError::ApiError(format!(
-                    "Gemini temporarily unavailable; retry after {:?}",
-                    until - now
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    async fn start_cooldown(&self) {
-        *self.cooldown_until.lock().await =
-            Some(std::time::Instant::now() + Duration::from_secs(30));
     }
 
     /// Returns `(text, prompt_tokens, output_tokens)`.
     async fn call_gemini(&self, prompt: &str) -> Result<(String, u64, u64), SummarizationError> {
-        self.enforce_cooldown().await?;
+        self.cooldown
+            .check()
+            .await
+            .map_err(SummarizationError::ApiError)?;
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.model, self.api_key
@@ -140,7 +123,7 @@ impl GeminiSummarizer {
             Err(error) => {
                 if matches!(error, SummarizationError::RetryableApi { .. }) {
                     log::error!("Gemini retry budget exhausted: {}", error);
-                    self.start_cooldown().await;
+                    self.cooldown.start(Duration::from_secs(30)).await;
                 }
                 return Err(error);
             }

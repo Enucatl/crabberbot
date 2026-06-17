@@ -9,7 +9,6 @@ use sqlx::postgres::PgPoolOptions;
 use teloxide::prelude::*;
 use teloxide::types::MessageKind;
 use teloxide::utils::command::BotCommands;
-use thiserror::Error;
 use url::Url;
 
 // Use our library crate
@@ -30,61 +29,6 @@ use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 use crabberbot::terms;
 
 const OVERALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(360);
-
-/// A dedicated error type for our application's setup.
-#[derive(Debug, Error)]
-pub enum SetupError {
-    #[error("Missing environment variable: {0}")]
-    EnvVarMissing(&'static str),
-
-    #[error("Couldn't get authentication headers: {0}")]
-    HeadersError(&'static str),
-
-    #[error("Failed to build Google Cloud authentication token")]
-    BuildAuthError(#[from] google_cloud_auth::build_errors::Error),
-
-    #[error("Failed to acquire Google Cloud authentication token")]
-    CredentialAuthError(#[from] google_cloud_auth::errors::CredentialsError),
-
-    #[error("Failed to build HTTP client")]
-    ClientBuildError(#[from] reqwest::Error),
-
-    #[error("The Authorization header value could not be created")]
-    InvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
-}
-
-/// Creates an HTTP client, authenticating for GCP if in that environment.
-async fn create_http_client(execution_environment: &str) -> Result<Client, SetupError> {
-    match execution_environment {
-        "gcp" => {
-            log::info!("GCP environment detected. Creating authenticated reqwest client...");
-
-            let credentials = google_cloud_auth::credentials::Builder::default().build()?;
-            let headers_resource = credentials.headers(http::Extensions::new()).await?;
-            if let google_cloud_auth::credentials::CacheableResource::New {
-                data: headers, ..
-            } = headers_resource
-            {
-                log::info!(
-                    "Successfully obtained GCP authentication headers. {:?}",
-                    headers
-                );
-                let client = Client::builder().default_headers(headers).build()?;
-                Ok(client)
-            } else {
-                Err(SetupError::HeadersError(
-                    "Failed to get new headers from credentials; received NotModified unexpectedly",
-                ))
-            }
-        }
-        _ => {
-            log::info!(
-                "Local or non-GCP environment detected. Creating standard reqwest client..."
-            );
-            Ok(Client::new())
-        }
-    }
-}
 
 async fn handle_command(
     _bot: Bot,
@@ -379,7 +323,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let client = create_http_client(&config.execution_environment).await?;
+    let client = Client::new();
     let bot = Bot::from_env_with_client(client.clone());
 
     let downloader: Arc<dyn Downloader> = Arc::new(

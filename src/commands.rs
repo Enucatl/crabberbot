@@ -6,7 +6,7 @@ use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Messag
 
 use crate::concurrency::ConcurrencyLimiter;
 use crate::handler::{CallbackContext, send_long_text};
-use crate::premium::summarizer::Summarizer;
+use crate::premium::summarizer::{GeminiResult, Summarizer};
 use crate::premium::transcriber::{DeepgramUsage, Transcriber};
 use crate::premium::{
     GEMINI_INPUT_COST_PER_MILLION_TOKENS, GEMINI_OUTPUT_COST_PER_MILLION_TOKENS,
@@ -1049,86 +1049,21 @@ async fn handle_transcription(
     transcriber: &dyn Transcriber,
     summarizer: &dyn Summarizer,
 ) -> ResponseResult<()> {
-    let sub = storage.get_subscription(user_id).await;
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
-
-    if duration_secs > MAX_PREMIUM_FILE_DURATION_SECS {
-        log_telegram_failure(
-            api.send_text_message(
-                chat_id,
-                message_id,
-                &format!(
-                    "AI features are limited to videos under {} minutes.",
-                    MAX_PREMIUM_FILE_DURATION_SECS / 60
-                ),
-            )
-            .await,
-            chat_id,
-            "transcription_duration_limit",
-        )
-        .await;
+    let Some((raw_transcript, detected_language, deepgram_usage)) = prepare_ai_action(
+        context_id,
+        ctx,
+        user_id,
+        chat_id,
+        message_id,
+        api,
+        storage,
+        transcriber,
+        "transcription",
+    )
+    .await?
+    else {
         return Ok(());
-    }
-
-    if !sub.can_use_ai(duration_secs) {
-        log_telegram_failure(
-            api.send_text_message(
-                chat_id,
-                message_id,
-                &format!(
-                    "You have {:.1} AI Minutes remaining. Need more? /subscribe to upgrade or buy a top-up.",
-                    sub.remaining_ai_minutes()
-                ),
-            )
-            .await,
-            chat_id,
-            "transcription_quota_denied",
-        )
-        .await;
-        return Ok(());
-    }
-
-    api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
-        .await?;
-
-    // Use cached transcript if available; otherwise call Deepgram and persist.
-    // deepgram_usage = Some(DeepgramUsage { ... }) when Deepgram was actually called.
-    let (raw_transcript, detected_language, deepgram_usage) = if let Some(cached) = &ctx.transcript
-    {
-        (
-            cached.clone(),
-            ctx.transcript_language.clone(),
-            None::<DeepgramUsage>,
-        )
-    } else {
-        let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
-        match transcriber.transcribe(&audio_path).await {
-            Ok(t) => {
-                storage
-                    .cache_transcript(context_id, &t.transcript, t.detected_language.clone())
-                    .await;
-                let usage = DeepgramUsage {
-                    billed_duration_secs: t.billed_duration_secs,
-                    cost_usd: t.cost_usd,
-                };
-                (t.transcript, t.detected_language, Some(usage))
-            }
-            Err(e) => {
-                log::error!("Transcription failed: {}", e);
-                log_telegram_failure(
-                    api.send_text_message(
-                        chat_id,
-                        message_id,
-                        "Sorry, transcription failed. Please try again later.",
-                    )
-                    .await,
-                    chat_id,
-                    "transcription_failed_notice",
-                )
-                .await;
-                return Ok(()); // no quota deduction
-            }
-        }
     };
 
     let correction = match summarizer
@@ -1138,7 +1073,7 @@ async fn handle_transcription(
         Ok(result) => result,
         Err(e) => {
             log::error!("Transcript correction failed: {}", e);
-            crate::premium::summarizer::GeminiResult {
+            GeminiResult {
                 text: raw_transcript,
                 prompt_tokens: 0,
                 output_tokens: 0,
@@ -1148,49 +1083,16 @@ async fn handle_transcription(
 
     send_long_text(chat_id, message_id, &correction.text, api).await;
 
-    // Only deduct quota and record Deepgram cost when it was actually called.
-    if let Some(dg) = deepgram_usage {
-        storage.consume_ai_seconds(user_id, duration_secs).await;
-        storage
-            .record_premium_usage(
-                user_id,
-                "transcribe",
-                &ctx.source_url,
-                duration_secs,
-                dg.billed_duration_secs,
-                dg.cost_usd,
-            )
-            .await;
-    }
-    // Always record Gemini token usage for analytics (does not affect user quota).
-    if correction.prompt_tokens > 0 {
-        let input_cost =
-            correction.prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
-        storage
-            .record_premium_usage(
-                user_id,
-                "gemini_correction_input",
-                &ctx.source_url,
-                0,
-                correction.prompt_tokens as f64,
-                input_cost,
-            )
-            .await;
-    }
-    if correction.output_tokens > 0 {
-        let output_cost =
-            correction.output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
-        storage
-            .record_premium_usage(
-                user_id,
-                "gemini_correction_output",
-                &ctx.source_url,
-                0,
-                correction.output_tokens as f64,
-                output_cost,
-            )
-            .await;
-    }
+    record_deepgram_usage(
+        storage,
+        user_id,
+        ctx,
+        duration_secs,
+        "transcribe",
+        deepgram_usage,
+    )
+    .await;
+    record_gemini_usage(storage, user_id, ctx, "gemini_correction", &correction).await;
     Ok(())
 }
 
@@ -1205,86 +1107,21 @@ async fn handle_summarization(
     transcriber: &dyn Transcriber,
     summarizer: &dyn Summarizer,
 ) -> ResponseResult<()> {
-    let sub = storage.get_subscription(user_id).await;
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
-
-    if duration_secs > MAX_PREMIUM_FILE_DURATION_SECS {
-        log_telegram_failure(
-            api.send_text_message(
-                chat_id,
-                message_id,
-                &format!(
-                    "AI features are limited to videos under {} minutes.",
-                    MAX_PREMIUM_FILE_DURATION_SECS / 60
-                ),
-            )
-            .await,
-            chat_id,
-            "summarization_duration_limit",
-        )
-        .await;
+    let Some((raw_transcript, detected_language, deepgram_usage)) = prepare_ai_action(
+        context_id,
+        ctx,
+        user_id,
+        chat_id,
+        message_id,
+        api,
+        storage,
+        transcriber,
+        "summarization",
+    )
+    .await?
+    else {
         return Ok(());
-    }
-
-    if !sub.can_use_ai(duration_secs) {
-        log_telegram_failure(
-            api.send_text_message(
-                chat_id,
-                message_id,
-                &format!(
-                    "You have {:.1} AI Minutes remaining. Need more? /subscribe to upgrade or buy a top-up.",
-                    sub.remaining_ai_minutes()
-                ),
-            )
-            .await,
-            chat_id,
-            "summarization_quota_denied",
-        )
-        .await;
-        return Ok(());
-    }
-
-    api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
-        .await?;
-
-    // Use cached transcript if available; otherwise call Deepgram and persist.
-    // deepgram_usage = Some(DeepgramUsage { ... }) when Deepgram was actually called.
-    let (raw_transcript, detected_language, deepgram_usage) = if let Some(cached) = &ctx.transcript
-    {
-        (
-            cached.clone(),
-            ctx.transcript_language.clone(),
-            None::<DeepgramUsage>,
-        )
-    } else {
-        let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
-        match transcriber.transcribe(&audio_path).await {
-            Ok(t) => {
-                storage
-                    .cache_transcript(context_id, &t.transcript, t.detected_language.clone())
-                    .await;
-                let usage = DeepgramUsage {
-                    billed_duration_secs: t.billed_duration_secs,
-                    cost_usd: t.cost_usd,
-                };
-                (t.transcript, t.detected_language, Some(usage))
-            }
-            Err(e) => {
-                log::error!("Transcription failed: {}", e);
-                log_telegram_failure(
-                    api.send_text_message(
-                        chat_id,
-                        message_id,
-                        "Sorry, transcription failed. Please try again later.",
-                    )
-                    .await,
-                    chat_id,
-                    "summarization_transcription_failed_notice",
-                )
-                .await;
-                return Ok(()); // no quota deduction
-            }
-        }
     };
 
     let summary = match summarizer
@@ -1311,13 +1148,124 @@ async fn handle_summarization(
 
     send_long_text(chat_id, message_id, &summary.text, api).await;
 
-    // Only deduct quota and record Deepgram cost when it was actually called.
-    if let Some(dg) = deepgram_usage {
+    record_deepgram_usage(
+        storage,
+        user_id,
+        ctx,
+        duration_secs,
+        "summarize",
+        deepgram_usage,
+    )
+    .await;
+    record_gemini_usage(storage, user_id, ctx, "gemini_summarize", &summary).await;
+    Ok(())
+}
+
+async fn prepare_ai_action(
+    context_id: i32,
+    ctx: &CallbackContext,
+    user_id: i64,
+    chat_id: ChatId,
+    message_id: MessageId,
+    api: &dyn TelegramApi,
+    storage: &dyn Storage,
+    transcriber: &dyn Transcriber,
+    action: &str,
+) -> ResponseResult<Option<(String, Option<String>, Option<DeepgramUsage>)>> {
+    let sub = storage.get_subscription(user_id).await;
+    let duration_secs = ctx.media_duration_secs.unwrap_or(0);
+
+    if duration_secs > MAX_PREMIUM_FILE_DURATION_SECS {
+        log_telegram_failure(
+            api.send_text_message(
+                chat_id,
+                message_id,
+                &format!(
+                    "AI features are limited to videos under {} minutes.",
+                    MAX_PREMIUM_FILE_DURATION_SECS / 60
+                ),
+            )
+            .await,
+            chat_id,
+            &format!("{action}_duration_limit"),
+        )
+        .await;
+        return Ok(None);
+    }
+
+    if !sub.can_use_ai(duration_secs) {
+        log_telegram_failure(
+            api.send_text_message(
+                chat_id,
+                message_id,
+                &format!(
+                    "You have {:.1} AI Minutes remaining. Need more? /subscribe to upgrade or buy a top-up.",
+                    sub.remaining_ai_minutes()
+                ),
+            )
+            .await,
+            chat_id,
+            &format!("{action}_quota_denied"),
+        )
+        .await;
+        return Ok(None);
+    }
+
+    api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
+        .await?;
+
+    if let Some(cached) = &ctx.transcript {
+        return Ok(Some((
+            cached.clone(),
+            ctx.transcript_language.clone(),
+            None::<DeepgramUsage>,
+        )));
+    }
+
+    let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
+    match transcriber.transcribe(&audio_path).await {
+        Ok(t) => {
+            storage
+                .cache_transcript(context_id, &t.transcript, t.detected_language.clone())
+                .await;
+            let usage = DeepgramUsage {
+                billed_duration_secs: t.billed_duration_secs,
+                cost_usd: t.cost_usd,
+            };
+            Ok(Some((t.transcript, t.detected_language, Some(usage))))
+        }
+        Err(e) => {
+            log::error!("Transcription failed: {}", e);
+            log_telegram_failure(
+                api.send_text_message(
+                    chat_id,
+                    message_id,
+                    "Sorry, transcription failed. Please try again later.",
+                )
+                .await,
+                chat_id,
+                &format!("{action}_transcription_failed_notice"),
+            )
+            .await;
+            Ok(None)
+        }
+    }
+}
+
+async fn record_deepgram_usage(
+    storage: &dyn Storage,
+    user_id: i64,
+    ctx: &CallbackContext,
+    duration_secs: i32,
+    feature: &str,
+    usage: Option<DeepgramUsage>,
+) {
+    if let Some(dg) = usage {
         storage.consume_ai_seconds(user_id, duration_secs).await;
         storage
             .record_premium_usage(
                 user_id,
-                "summarize",
+                feature,
                 &ctx.source_url,
                 duration_secs,
                 dg.billed_duration_secs,
@@ -1325,36 +1273,43 @@ async fn handle_summarization(
             )
             .await;
     }
-    // Always record Gemini token usage for analytics (does not affect user quota).
-    if summary.prompt_tokens > 0 {
+}
+
+async fn record_gemini_usage(
+    storage: &dyn Storage,
+    user_id: i64,
+    ctx: &CallbackContext,
+    feature_prefix: &str,
+    result: &GeminiResult,
+) {
+    if result.prompt_tokens > 0 {
         let input_cost =
-            summary.prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
+            result.prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
         storage
             .record_premium_usage(
                 user_id,
-                "gemini_summarize_input",
+                &format!("{feature_prefix}_input"),
                 &ctx.source_url,
                 0,
-                summary.prompt_tokens as f64,
+                result.prompt_tokens as f64,
                 input_cost,
             )
             .await;
     }
-    if summary.output_tokens > 0 {
+    if result.output_tokens > 0 {
         let output_cost =
-            summary.output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+            result.output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
         storage
             .record_premium_usage(
                 user_id,
-                "gemini_summarize_output",
+                &format!("{feature_prefix}_output"),
                 &ctx.source_url,
                 0,
-                summary.output_tokens as f64,
+                result.output_tokens as f64,
                 output_cost,
             )
             .await;
     }
-    Ok(())
 }
 
 #[cfg(test)]

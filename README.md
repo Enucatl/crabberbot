@@ -117,7 +117,7 @@ The provided `docker-compose.override.yml` makes local development easy.
     pre-commit install
     pre-commit install --hook-type pre-push
     ```
-    The pre-commit hook runs `cargo fmt --all`; the pre-push hook runs `cargo audit --deny warnings --ignore RUSTSEC-2023-0071`. See [SECURITY.md](SECURITY.md) for the ignored advisory rationale.
+    The pre-commit hook runs `cargo fmt --all`; the pre-push hook runs `cargo audit --deny warnings` with narrow advisory ignores. See [SECURITY.md](SECURITY.md) for the ignored advisory rationale.
 
 -   **To build and run a local version of the bot (instead of pulling from GHCR)**:
     ```bash

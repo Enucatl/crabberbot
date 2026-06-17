@@ -1,15 +1,14 @@
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 use crate::premium::DEEPGRAM_COST_PER_SECOND;
 use crate::retry::{
-    RetryPolicy, retry_after_from_response, retry_async, retryable_status, transient_reqwest_error,
+    ProviderCooldown, RetryPolicy, retry_after_from_response, retry_async, retryable_status,
+    transient_reqwest_error,
 };
 
 #[derive(Debug, Error)]
@@ -56,7 +55,7 @@ pub struct DeepgramTranscriber {
     client: reqwest::Client,
     api_key: String,
     retry_policy: RetryPolicy,
-    cooldown_until: Arc<Mutex<Option<std::time::Instant>>>,
+    cooldown: ProviderCooldown,
 }
 
 impl DeepgramTranscriber {
@@ -65,27 +64,8 @@ impl DeepgramTranscriber {
             client,
             api_key,
             retry_policy: RetryPolicy::provider_default(),
-            cooldown_until: Arc::new(Mutex::new(None)),
+            cooldown: ProviderCooldown::new("Deepgram"),
         }
-    }
-
-    async fn enforce_cooldown(&self) -> Result<(), TranscriptionError> {
-        let until = *self.cooldown_until.lock().await;
-        if let Some(until) = until {
-            let now = std::time::Instant::now();
-            if until > now {
-                return Err(TranscriptionError::ApiError(format!(
-                    "Deepgram temporarily unavailable; retry after {:?}",
-                    until - now
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    async fn start_cooldown(&self) {
-        *self.cooldown_until.lock().await =
-            Some(std::time::Instant::now() + Duration::from_secs(30));
     }
 }
 
@@ -95,7 +75,10 @@ impl Transcriber for DeepgramTranscriber {
         &self,
         audio_path: &Path,
     ) -> Result<TranscriptionResult, TranscriptionError> {
-        self.enforce_cooldown().await?;
+        self.cooldown
+            .check()
+            .await
+            .map_err(TranscriptionError::ApiError)?;
         let audio_bytes = tokio::fs::read(audio_path).await?;
         log::debug!(
             "Deepgram: sending {} bytes from {:?}",
@@ -141,7 +124,7 @@ impl Transcriber for DeepgramTranscriber {
             Err(error) => {
                 if matches!(error, TranscriptionError::RetryableApi { .. }) {
                     log::error!("Deepgram retry budget exhausted: {}", error);
-                    self.start_cooldown().await;
+                    self.cooldown.start(Duration::from_secs(30)).await;
                 }
                 return Err(error);
             }

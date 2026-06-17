@@ -250,20 +250,6 @@ impl YtDlpDownloader {
         command
     }
 
-    fn escape_glob(s: &str) -> String {
-        let mut escaped = String::with_capacity(s.len());
-        for c in s.chars() {
-            match c {
-                '*' => escaped.push_str("[*]"),
-                '?' => escaped.push_str("[?]"),
-                '[' => escaped.push_str("[[]"),
-                ']' => escaped.push_str("[]]"),
-                _ => escaped.push(c),
-            }
-        }
-        escaped
-    }
-
     fn resolve_download_path(download_dir: &Path, filepath: &str) -> PathBuf {
         let path = PathBuf::from(filepath);
         if path.is_absolute() {
@@ -290,30 +276,44 @@ impl YtDlpDownloader {
         id: &str,
         video_filepath: &Path,
     ) -> Option<PathBuf> {
-        let pattern = download_dir
-            .join(format!("{}.{}.*", uuid, Self::escape_glob(id)))
-            .to_string_lossy()
-            .into_owned();
-        glob::glob(&pattern)
+        let prefix = format!("{uuid}.{id}.");
+        std::fs::read_dir(download_dir)
             .ok()?
-            .filter_map(|entry| entry.ok())
-            .find(|path| path != video_filepath)
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path != video_filepath
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(&prefix))
+            })
     }
 
     async fn cleanup_download_artifacts(download_dir: &Path, uuid: &str) {
-        let pattern = download_dir
-            .join(format!("{}.*", Self::escape_glob(uuid)))
-            .to_string_lossy()
-            .into_owned();
-        let paths = match glob::glob(&pattern) {
-            Ok(paths) => paths,
+        let mut entries = match tokio::fs::read_dir(download_dir).await {
+            Ok(entries) => entries,
             Err(e) => {
-                log::warn!("Failed to build cleanup glob for {}: {}", uuid, e);
+                log::warn!(
+                    "Failed to read downloads dir for cleanup {}: {}",
+                    download_dir.display(),
+                    e
+                );
                 return;
             }
         };
 
-        for path in paths.filter_map(|entry| entry.ok()) {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let should_remove =
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(uuid) && name.as_bytes().get(36) == Some(&b'.')
+                    });
+            if !should_remove {
+                continue;
+            }
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => log::info!("Removed incomplete download artifact: {}", path.display()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

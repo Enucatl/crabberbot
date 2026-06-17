@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use reqwest::header::RETRY_AFTER;
 use reqwest::{Response, StatusCode};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -75,6 +76,39 @@ pub fn retry_after_from_response(response: &Response) -> Option<Duration> {
 
 pub fn retryable_status(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+pub struct ProviderCooldown {
+    provider: &'static str,
+    until: Mutex<Option<std::time::Instant>>,
+}
+
+impl ProviderCooldown {
+    pub fn new(provider: &'static str) -> Self {
+        Self {
+            provider,
+            until: Mutex::new(None),
+        }
+    }
+
+    pub async fn check(&self) -> Result<(), String> {
+        let until = *self.until.lock().await;
+        if let Some(until) = until {
+            let now = std::time::Instant::now();
+            if until > now {
+                return Err(format!(
+                    "{} temporarily unavailable; retry after {:?}",
+                    self.provider,
+                    until - now
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn start(&self, duration: Duration) {
+        *self.until.lock().await = Some(std::time::Instant::now() + duration);
+    }
 }
 
 fn backoff_delay(policy: &RetryPolicy, attempt: usize) -> Duration {
