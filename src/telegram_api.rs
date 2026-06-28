@@ -24,6 +24,32 @@ const MAX_PHOTO_WIDTH: u32 = 12_000;
 const MAX_PHOTO_HEIGHT: u32 = 12_000;
 const MAX_PHOTO_PIXELS: u64 = 48_000_000;
 const MAX_PHOTO_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_VIDEO_THUMBNAIL_DIMENSION: u32 = 320;
+const MAX_VIDEO_THUMBNAIL_BYTES: u64 = 200_000;
+
+fn prepare_video_thumbnail(path: &Path) -> Result<PathBuf, String> {
+    let img = image::ImageReader::open(path)
+        .map_err(|e| e.to_string())
+        .and_then(|reader| reader.with_guessed_format().map_err(|e| e.to_string()))
+        .and_then(|mut reader| {
+            reader.limits(image_limits());
+            reader.decode().map_err(|e| e.to_string())
+        })?;
+    let resized = img.thumbnail(MAX_VIDEO_THUMBNAIL_DIMENSION, MAX_VIDEO_THUMBNAIL_DIMENSION);
+    let temp_path = std::env::temp_dir().join(format!("{}.jpg", uuid::Uuid::new_v4()));
+    let file = std::fs::File::create(&temp_path).map_err(|e| e.to_string())?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(file, 80)
+        .encode_image(&resized)
+        .map_err(|e| e.to_string())?;
+    let size = std::fs::metadata(&temp_path)
+        .map_err(|e| e.to_string())?
+        .len();
+    if size >= MAX_VIDEO_THUMBNAIL_BYTES {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("encoded thumbnail is {size} bytes"));
+    }
+    Ok(temp_path)
+}
 
 /// Resize a photo if its dimension sum exceeds Telegram's 10000 limit.
 /// Returns the path to a temporary resized file, or None if no resize was needed.
@@ -356,7 +382,12 @@ impl TelegramApi for TeloxideApi {
         log::info!("Sending video {:?} to chat {}", file_path, chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadVideo)
             .await?;
-        let message = self
+        let prepared_thumbnail = thumbnail_filepath.as_deref().and_then(|path| {
+            prepare_video_thumbnail(path)
+                .inspect_err(|e| log::warn!("Could not prepare video thumbnail {:?}: {}", path, e))
+                .ok()
+        });
+        let result = self
             .request(Some(chat_id), "telegram.send_video", || {
                 let mut request = self
                     .bot
@@ -365,12 +396,16 @@ impl TelegramApi for TeloxideApi {
                     .parse_mode(ParseMode::Html)
                     .reply_to(message_id);
 
-                if let Some(p) = thumbnail_filepath.clone() {
+                if let Some(p) = prepared_thumbnail.clone() {
                     request = request.thumbnail(InputFile::file(p));
                 }
                 async move { request.await }
             })
-            .await?;
+            .await;
+        if let Some(path) = prepared_thumbnail {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        let message = result?;
         let file_id = message
             .video()
             .map(|v| v.file.id.to_string())
@@ -773,5 +808,30 @@ impl TelegramApi for TeloxideApi {
         })
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_thumbnail_meets_telegram_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jpg");
+        image::DynamicImage::new_rgb8(1320, 2347)
+            .save(&source)
+            .unwrap();
+
+        let prepared = prepare_video_thumbnail(&source).unwrap();
+        let (width, height) = image::ImageReader::open(&prepared)
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+
+        assert!(width <= 320 && height <= 320);
+        assert!(std::fs::metadata(&prepared).unwrap().len() < 200_000);
+        assert_eq!(prepared.extension().unwrap(), "jpg");
+        std::fs::remove_file(prepared).unwrap();
     }
 }
