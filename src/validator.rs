@@ -4,7 +4,7 @@ use thiserror::Error;
 const MAX_DURATION_SECONDS: f64 = 1800.0;
 const MAX_FILESIZE_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
 const MAX_VIDEO_PLAYLIST_ITEMS: usize = 5;
-const MAX_IMAGE_PLAYLIST_ITEMS: usize = 10;
+const MAX_IMAGE_PLAYLIST_ITEMS: usize = 20;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum ValidationError {
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn test_valid_image_playlist() {
         let mut info = create_test_info();
-        let n_items = MAX_IMAGE_PLAYLIST_ITEMS - 1;
+        let n_items = MAX_IMAGE_PLAYLIST_ITEMS;
         assert!(n_items > MAX_VIDEO_PLAYLIST_ITEMS);
 
         let mut image_entry = create_test_info();

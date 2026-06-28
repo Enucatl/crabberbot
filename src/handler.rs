@@ -15,6 +15,17 @@ use crate::storage::{CachedMedia, Storage};
 use crate::telegram_api::{SentMedia, TelegramApi, resize_photo_if_needed};
 use crate::validator::validate_media_metadata;
 
+const MAX_TELEGRAM_ALBUM_ITEMS: usize = 10;
+
+fn telegram_album_chunks<T>(items: &[T]) -> impl Iterator<Item = &[T]> {
+    let chunk_size = if items.len() > MAX_TELEGRAM_ALBUM_ITEMS {
+        items.len().div_ceil(2)
+    } else {
+        MAX_TELEGRAM_ALBUM_ITEMS
+    };
+    items.chunks(chunk_size)
+}
+
 /// Persisted context for a premium action callback button, stored in the DB.
 /// Decoupled from subscriptions — tracks the download destination and media info
 /// needed to serve the audio/transcribe/summarize callback when the user taps the button.
@@ -391,9 +402,18 @@ async fn send_media_group_step(
         return None;
     }
 
-    let result = telegram_api
-        .send_media_group(chat_id, message_id, media_group)
-        .await;
+    let result: Result<Vec<SentMedia>, teloxide::RequestError> = async {
+        let mut sent = Vec::with_capacity(media_group.len());
+        for chunk in telegram_album_chunks(&media_group) {
+            sent.extend(
+                telegram_api
+                    .send_media_group(chat_id, message_id, chunk.to_vec())
+                    .await?,
+            );
+        }
+        Ok(sent)
+    }
+    .await;
     for p in temp_resized {
         remove_temp_file(p, "media group resize").await;
     }
@@ -465,22 +485,21 @@ async fn send_cached_media(
             }
         }
     } else {
-        match telegram_api
-            .send_cached_media_group(chat_id, message_id, &cached.files, &cached.caption)
-            .await
-        {
-            Ok(_) => {
-                log::info!(
-                    "Successfully sent cached media group to chat_id: {}",
-                    chat_id
-                );
-                Ok(None)
-            }
-            Err(e) => {
+        for (i, chunk) in telegram_album_chunks(&cached.files).enumerate() {
+            let caption = if i == 0 { &cached.caption } else { "" };
+            if let Err(e) = telegram_api
+                .send_cached_media_group(chat_id, message_id, chunk, caption)
+                .await
+            {
                 log::error!("Failed to send cached media group: {:?}", e);
-                Err(())
+                return Err(());
             }
         }
+        log::info!(
+            "Successfully sent cached media group to chat_id: {}",
+            chat_id
+        );
+        Ok(None)
     }
 }
 
@@ -827,6 +846,112 @@ mod tests {
             )
         });
         mock
+    }
+
+    #[test]
+    fn test_telegram_album_chunk_sizes() {
+        for (count, expected) in [(10, vec![10]), (11, vec![6, 5]), (20, vec![10, 10])] {
+            let items: Vec<_> = (0..count).collect();
+            let chunks: Vec<_> = telegram_album_chunks(&items).collect();
+            assert_eq!(
+                chunks.iter().map(|chunk| chunk.len()).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(chunks.concat(), items);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_media_group_splits_and_preserves_caption_and_order() {
+        let items: Vec<_> = (0..11)
+            .map(|i| DownloadedItem {
+                filepath: PathBuf::from(format!("/tmp/item_{i}.mp4")),
+                media_type: MediaType::Video,
+                thumbnail_filepath: None,
+            })
+            .collect();
+        let mut api = MockTelegramApi::new();
+
+        api.expect_send_media_group()
+            .withf(|_, _, media| {
+                media.len() == 6
+                    && matches!(&media[0], InputMedia::Video(v) if v.caption.as_deref() == Some("caption"))
+                    && media[1..].iter().all(|item| matches!(item, InputMedia::Video(v) if v.caption.as_deref() == Some("")))
+            })
+            .times(1)
+            .returning(|_, _, _| {
+                Ok((0..6)
+                    .map(|i| SentMedia {
+                        file_id: i.to_string(),
+                        media_type: MediaType::Video,
+                    })
+                    .collect())
+            });
+        api.expect_send_media_group()
+            .withf(|_, _, media| {
+                media.len() == 5
+                    && media.iter().all(|item| matches!(item, InputMedia::Video(v) if v.caption.as_deref() == Some("")))
+            })
+            .times(1)
+            .returning(|_, _, _| {
+                Ok((6..11)
+                    .map(|i| SentMedia {
+                        file_id: i.to_string(),
+                        media_type: MediaType::Video,
+                    })
+                    .collect())
+            });
+
+        let sent = send_media_group_step(&items, "caption", ChatId(123), MessageId(456), &api)
+            .await
+            .unwrap();
+        assert_eq!(
+            sent.into_iter()
+                .map(|item| item.file_id)
+                .collect::<Vec<_>>(),
+            (0..11).map(|i| i.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_media_group_splits_identically() {
+        let cached = CachedMedia {
+            caption: "caption".to_string(),
+            files: (0..20)
+                .map(|i| crate::storage::CachedFile {
+                    telegram_file_id: i.to_string(),
+                    media_type: MediaType::Photo,
+                })
+                .collect(),
+            audio_cache_path: None,
+            media_duration_secs: None,
+        };
+        let mut api = MockTelegramApi::new();
+
+        api.expect_send_cached_media_group()
+            .withf(|_, _, files, caption| {
+                files.len() == 10
+                    && files[0].telegram_file_id == "0"
+                    && files[9].telegram_file_id == "9"
+                    && caption == "caption"
+            })
+            .times(1)
+            .returning(|_, _, _, _| Ok(()));
+        api.expect_send_cached_media_group()
+            .withf(|_, _, files, caption| {
+                files.len() == 10
+                    && files[0].telegram_file_id == "10"
+                    && files[9].telegram_file_id == "19"
+                    && caption.is_empty()
+            })
+            .times(1)
+            .returning(|_, _, _, _| Ok(()));
+
+        assert!(
+            send_cached_media(&cached, ChatId(123), MessageId(456), &api)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -1325,7 +1450,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_failure_after_download_logs_error() {
+    async fn test_later_album_failure_does_not_store_partial_cache() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
         let mut mock_storage = MockStorage::new();
@@ -1333,33 +1458,48 @@ mod tests {
 
         mock_storage.expect_get_cached_media().returning(|_| None);
 
-        mock_downloader
-            .expect_get_media_metadata()
-            .returning(|_| Ok(create_test_info()));
+        mock_downloader.expect_get_media_metadata().returning(|_| {
+            let mut info = create_test_info();
+            info.entries = Some(vec![create_test_info(); 11]);
+            Ok(info)
+        });
 
         mock_downloader.expect_download_media().returning(|_, _| {
-            Ok(DownloadedMedia::Single(DownloadedItem {
-                filepath: PathBuf::from("/tmp/video.mp4"),
-                media_type: MediaType::Video,
-                thumbnail_filepath: None,
-            }))
+            Ok(DownloadedMedia::Group(
+                (0..11)
+                    .map(|i| DownloadedItem {
+                        filepath: PathBuf::from(format!("/tmp/item_{i}.mp4")),
+                        media_type: MediaType::Video,
+                        thumbnail_filepath: None,
+                    })
+                    .collect(),
+            ))
         });
 
         mock_telegram_api
-            .expect_send_video()
+            .expect_send_media_group()
             .times(1)
-            .returning(|_, _, _, _, _| {
+            .returning(|_, _, _| {
+                Ok((0..6)
+                    .map(|i| SentMedia {
+                        file_id: i.to_string(),
+                        media_type: MediaType::Video,
+                    })
+                    .collect())
+            });
+        mock_telegram_api
+            .expect_send_media_group()
+            .times(1)
+            .returning(|_, _, _| {
                 Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
                     "Request Entity Too Large".to_string(),
                 )))
             });
 
-        // send_single_item sends error text on failure
         mock_telegram_api
             .expect_send_text_message()
             .returning(|_, _, _| Ok(()));
 
-        // No cache store when send fails
         mock_storage.expect_store_cached_media().times(0);
 
         mock_storage
