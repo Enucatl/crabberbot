@@ -8,6 +8,7 @@ repository = "https://github.com/Enucatl/crabberbot"
 
 [dependencies]
 async-trait = "0.1"
+axum = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 dashmap = "6.1.0"
 indoc = "2"

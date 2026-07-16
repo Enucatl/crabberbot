@@ -84,5 +84,8 @@ EXPOSE 8080
 # Mount point for downloaded media
 VOLUME ["/downloads"]
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()"
+
 # Set the command to run the bot
 CMD ["./crabberbot"]

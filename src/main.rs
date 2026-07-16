@@ -1,3 +1,4 @@
+use axum::{http::StatusCode, routing::get};
 use log::LevelFilter;
 use std::collections::HashSet;
 use std::io::Write;
@@ -8,6 +9,7 @@ use reqwest::Client;
 use sqlx::postgres::PgPoolOptions;
 use teloxide::prelude::*;
 use teloxide::types::MessageKind;
+use teloxide::update_listeners::UpdateListener;
 use teloxide::utils::command::BotCommands;
 use url::Url;
 
@@ -348,12 +350,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = config.webhook_url.clone();
 
     log::info!("Setting webhook {}", url);
-    let listener = teloxide::update_listeners::webhooks::axum(
+    let (mut listener, stop_flag, app) = teloxide::update_listeners::webhooks::axum_to_router(
         bot.clone(),
         teloxide::update_listeners::webhooks::Options::new(addr, url.clone()),
     )
     .await
     .expect("Failed to set webhook");
+    let stop_token = listener.stop_token();
+    let app = app.route(
+        "/healthz",
+        get({
+            let pool = pool.clone();
+            move || {
+                let pool = pool.clone();
+                async move {
+                    match sqlx::query("SELECT 1").execute(&pool).await {
+                        Ok(_) => StatusCode::NO_CONTENT,
+                        Err(error) => {
+                            log::warn!("Healthcheck database query failed: {}", error);
+                            StatusCode::SERVICE_UNAVAILABLE
+                        }
+                    }
+                }
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let tcp_listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .inspect_err(|_| stop_token.stop())
+            .expect("Couldn't bind to the address");
+        axum::serve(tcp_listener, app)
+            .with_graceful_shutdown(stop_flag)
+            .await
+            .inspect_err(|_| stop_token.stop())
+            .expect("Axum server error");
+    });
     log::info!("Successfully set webhook {}", url);
 
     bot.set_my_commands(Command::bot_commands())
