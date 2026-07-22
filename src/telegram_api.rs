@@ -337,6 +337,7 @@ impl TeloxideApi {
 struct TelegramRequestLimiter {
     global_next: Mutex<Instant>,
     chat_next: DashMap<i64, Arc<Mutex<Instant>>>,
+    last_prune: Mutex<Instant>,
 }
 
 impl TelegramRequestLimiter {
@@ -344,10 +345,12 @@ impl TelegramRequestLimiter {
         Self {
             global_next: Mutex::new(Instant::now()),
             chat_next: DashMap::new(),
+            last_prune: Mutex::new(Instant::now()),
         }
     }
 
     async fn wait(&self, chat_id: Option<ChatId>) {
+        self.prune_idle().await;
         wait_slot(&self.global_next, Duration::from_millis(34)).await;
         if let Some(chat_id) = chat_id {
             let chat_mutex = self
@@ -357,6 +360,20 @@ impl TelegramRequestLimiter {
                 .clone();
             wait_slot(&chat_mutex, Duration::from_millis(1_100)).await;
         }
+    }
+
+    async fn prune_idle(&self) {
+        let now = Instant::now();
+        let mut last_prune = self.last_prune.lock().await;
+        if now.duration_since(*last_prune) < Duration::from_secs(60) {
+            return;
+        }
+        *last_prune = now;
+        self.chat_next.retain(|_, next| {
+            next.try_lock().map_or(true, |slot| {
+                now.duration_since(*slot) < Duration::from_secs(600)
+            })
+        });
     }
 }
 
@@ -833,5 +850,18 @@ mod tests {
         assert!(std::fs::metadata(&prepared).unwrap().len() < 200_000);
         assert_eq!(prepared.extension().unwrap(), "jpg");
         std::fs::remove_file(prepared).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prunes_only_idle_chat_limiters() {
+        let limiter = TelegramRequestLimiter::new();
+        let old = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(601)));
+        let current = Arc::new(Mutex::new(Instant::now()));
+        limiter.chat_next.insert(1, old);
+        limiter.chat_next.insert(2, current);
+        *limiter.last_prune.lock().await = Instant::now() - Duration::from_secs(61);
+        limiter.prune_idle().await;
+        assert!(!limiter.chat_next.contains_key(&1));
+        assert!(limiter.chat_next.contains_key(&2));
     }
 }

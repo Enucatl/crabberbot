@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::StatusCode;
 use std::time::Duration;
 use thiserror::Error;
@@ -140,7 +141,18 @@ impl GeminiSummarizer {
         };
 
         let status = response.status();
-        let text = response.text().await?;
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if body.len() + chunk.len() > 1024 * 1024 {
+                return Err(SummarizationError::ApiError(
+                    "response exceeded 1 MiB".to_string(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8_lossy(&body).into_owned();
         log::debug!("Gemini response status={} body={}", status, text);
 
         if !status.is_success() {
@@ -226,6 +238,7 @@ mod tests {
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 #[async_trait]
 impl Summarizer for GeminiSummarizer {
     async fn summarize(

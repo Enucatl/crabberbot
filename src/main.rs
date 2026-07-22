@@ -114,6 +114,7 @@ async fn handle_owner_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_url(
     _bot: Bot,
     downloader: Arc<dyn Downloader>,
@@ -509,13 +510,12 @@ async fn cleanup_audio_cache(pool: &sqlx::PgPool, audio_cache_dir: &std::path::P
                 if referenced.contains(path_str.as_ref()) {
                     continue; // live cache entry — leave it alone
                 }
-                if let Ok(metadata) = entry.metadata().await {
-                    if let Ok(modified) = metadata.modified() {
-                        if modified.elapsed().unwrap_or_default() > Duration::from_secs(7200) {
-                            let _ = tokio::fs::remove_file(&path).await;
-                            log::info!("Removed orphaned audio cache: {:?}", path);
-                        }
-                    }
+                if let Ok(metadata) = entry.metadata().await
+                    && let Ok(modified) = metadata.modified()
+                    && modified.elapsed().unwrap_or_default() > Duration::from_secs(7200)
+                {
+                    let _ = tokio::fs::remove_file(&path).await;
+                    log::info!("Removed orphaned audio cache: {:?}", path);
                 }
             }
             Ok(None) => break,

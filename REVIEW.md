@@ -191,14 +191,6 @@ Location: `src/premium/audio_extractor.rs:56`.
 
 Recommendation: Add timeouts and child termination with `kill_on_drop`.
 
-### M8. Pin build and runtime inputs
-
-Base images, production images, `yt-dlp` fallback, apt packages, and Python packages use mutable tags/ranges.
-
-Locations: `Dockerfile:2`, `docker-compose.yml:6`.
-
-Recommendation: Pin deployed images by digest, require a `yt-dlp` commit, and lock Python packages with hashes.
-
 ### M9. Protect Terraform secret export
 
 The helper writes Vault values through `tee`, exposing them on stdout and creating the file under the caller’s umask.

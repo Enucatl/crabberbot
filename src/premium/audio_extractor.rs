@@ -7,6 +7,8 @@ use tokio::sync::Semaphore;
 
 #[derive(Debug, Error)]
 pub enum AudioExtractionError {
+    #[error("audio tool timed out after {0} seconds")]
+    Timeout(u64),
     #[error("ffprobe failed: {0}")]
     FfprobeError(String),
     #[error("ffmpeg failed: {0}")]
@@ -56,19 +58,25 @@ impl AudioExtractor for FfmpegAudioExtractor {
         let _permit = self.semaphore.acquire().await.expect("semaphore closed");
 
         // Step 1: ffprobe to get duration
-        let ffprobe_output = tokio::process::Command::new("ffprobe")
-            .args([
-                "-v",
-                "quiet",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "json",
-            ])
-            .arg(video_path)
-            .output()
-            .await
-            .map_err(|e| AudioExtractionError::FfprobeError(e.to_string()))?;
+        let mut ffprobe = tokio::process::Command::new("ffprobe");
+        ffprobe.kill_on_drop(true);
+        let ffprobe_output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            ffprobe
+                .args([
+                    "-v",
+                    "quiet",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "json",
+                ])
+                .arg(video_path)
+                .output(),
+        )
+        .await
+        .map_err(|_| AudioExtractionError::Timeout(30))?
+        .map_err(|e| AudioExtractionError::FfprobeError(e.to_string()))?;
 
         if !ffprobe_output.status.success() {
             let stderr = String::from_utf8_lossy(&ffprobe_output.stderr).to_string();
@@ -92,6 +100,7 @@ impl AudioExtractor for FfmpegAudioExtractor {
 
         const MAX_TAG_LEN: usize = 255;
         let mut cmd = tokio::process::Command::new("ffmpeg");
+        cmd.kill_on_drop(true);
         cmd.args(["-i"]).arg(video_path).args([
             "-vn",
             "-acodec",
@@ -111,12 +120,21 @@ impl AudioExtractor for FfmpegAudioExtractor {
         }
         cmd.args(["-y"]).arg(&audio_path);
 
-        let ffmpeg_output = cmd
-            .output()
-            .await
-            .map_err(|e| AudioExtractionError::FfmpegError(e.to_string()))?;
+        let ffmpeg_output =
+            match tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await {
+                Ok(Ok(output)) => output,
+                Ok(Err(e)) => {
+                    let _ = tokio::fs::remove_file(&audio_path).await;
+                    return Err(AudioExtractionError::FfmpegError(e.to_string()));
+                }
+                Err(_) => {
+                    let _ = tokio::fs::remove_file(&audio_path).await;
+                    return Err(AudioExtractionError::Timeout(300));
+                }
+            };
 
         if !ffmpeg_output.status.success() {
+            let _ = tokio::fs::remove_file(&audio_path).await;
             let stderr = String::from_utf8_lossy(&ffmpeg_output.stderr).to_string();
             return Err(AudioExtractionError::FfmpegError(stderr));
         }

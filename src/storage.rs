@@ -29,6 +29,13 @@ pub struct CachedFile {
     pub media_type: MediaType,
 }
 
+/// The exact credit split removed before an AI action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuotaReservation {
+    pub monthly_seconds: i32,
+    pub topup_seconds: i32,
+}
+
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait Storage: Send + Sync {
@@ -66,6 +73,8 @@ pub trait Storage: Send + Sync {
 
     // AI Seconds tracking
     async fn consume_ai_seconds(&self, user_id: i64, seconds: i32);
+    async fn reserve_ai_seconds(&self, user_id: i64, seconds: i32) -> Option<QuotaReservation>;
+    async fn release_ai_seconds(&self, user_id: i64, reservation: QuotaReservation);
     async fn add_topup_seconds(&self, user_id: i64, seconds: i32);
     async fn record_premium_usage(
         &self,
@@ -136,10 +145,10 @@ impl PostgresStorage {
                     r.rows_affected()
                 );
                 for path in expired_audio.into_iter().filter_map(|(p,)| p) {
-                    if let Err(e) = tokio::fs::remove_file(&path).await {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            log::warn!("Failed to delete expired audio file {}: {}", path, e);
-                        }
+                    if let Err(e) = tokio::fs::remove_file(&path).await
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        log::warn!("Failed to delete expired audio file {}: {}", path, e);
                     }
                 }
             }
@@ -481,6 +490,57 @@ impl Storage for PostgresStorage {
         }
     }
 
+    async fn reserve_ai_seconds(&self, user_id: i64, seconds: i32) -> Option<QuotaReservation> {
+        if seconds <= 0 {
+            return None;
+        }
+        let row: Option<(i32, i32)> = sqlx::query_as(
+            "WITH reservation AS ( \
+               SELECT user_id, \
+                 LEAST($2, CASE WHEN tier <> 'free' AND expires_at > NOW() THEN GREATEST(ai_seconds_limit - ai_seconds_used, 0) ELSE 0 END) AS monthly, \
+                 GREATEST($2 - LEAST($2, CASE WHEN tier <> 'free' AND expires_at > NOW() THEN GREATEST(ai_seconds_limit - ai_seconds_used, 0) ELSE 0 END), 0) AS topup \
+               FROM subscriptions \
+               WHERE user_id = $1 AND \
+                 (CASE WHEN tier <> 'free' AND expires_at > NOW() THEN GREATEST(ai_seconds_limit - ai_seconds_used, 0) ELSE 0 END) + \
+                   CASE WHEN last_topup_at IS NULL OR last_topup_at > NOW() - INTERVAL '365 days' \
+                     THEN topup_seconds_available ELSE 0 END >= $2 \
+               FOR UPDATE \
+             ) \
+             UPDATE subscriptions s SET ai_seconds_used = s.ai_seconds_used + r.monthly, \
+                 topup_seconds_available = s.topup_seconds_available - r.topup, updated_at = NOW() \
+             FROM reservation r WHERE s.user_id = r.user_id \
+             RETURNING r.monthly, r.topup",
+        )
+        .bind(user_id)
+        .bind(seconds)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        row.map(|(monthly_seconds, topup_seconds)| QuotaReservation {
+            monthly_seconds,
+            topup_seconds,
+        })
+    }
+
+    async fn release_ai_seconds(&self, user_id: i64, reservation: QuotaReservation) {
+        if reservation.monthly_seconds <= 0 && reservation.topup_seconds <= 0 {
+            return;
+        }
+        if let Err(e) = sqlx::query(
+            "UPDATE subscriptions SET ai_seconds_used = GREATEST(ai_seconds_used - $2, 0), \
+             topup_seconds_available = topup_seconds_available + $3, updated_at = NOW() WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(reservation.monthly_seconds)
+        .bind(reservation.topup_seconds)
+        .execute(&self.pool)
+        .await
+        {
+            log::error!("Failed to release AI reservation for {}: {}", user_id, e);
+        }
+    }
+
     async fn add_topup_seconds(&self, user_id: i64, seconds: i32) {
         if let Err(e) = sqlx::query(
             "INSERT INTO subscriptions (user_id, tier, topup_seconds_available, last_topup_at, updated_at) \
@@ -778,7 +838,7 @@ impl Storage for PostgresStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::{PostgresStorage, Storage};
+    use super::{PostgresStorage, QuotaReservation, Storage};
     use crate::subscription::{PRODUCT_SUB_BASIC, PRODUCT_TOPUP_60, TOPUP_SECONDS};
     use sqlx::PgPool;
 
@@ -843,6 +903,53 @@ mod tests {
 
         assert_eq!(payment_count, 1);
         assert_eq!(topup_seconds, TOPUP_SECONDS);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn concurrent_reservations_do_not_overspend(pool: PgPool) {
+        let storage = std::sync::Arc::new(PostgresStorage::new(pool));
+        storage
+            .fulfill_payment(1, "reserve-charge", "provider", PRODUCT_SUB_BASIC, 50)
+            .await;
+        let first = storage.clone();
+        let second = storage.clone();
+        let (left, right) = tokio::join!(
+            async move { first.reserve_ai_seconds(1, 2_400).await },
+            async move { second.reserve_ai_seconds(1, 2_400).await },
+        );
+        assert_eq!(
+            usize::from(left.is_some()) + usize::from(right.is_some()),
+            1
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn reservation_release_restores_the_original_split(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+        sqlx::query("INSERT INTO subscriptions (user_id, tier, ai_seconds_limit, topup_seconds_available, expires_at) VALUES (1, 'basic', 100, 50, NOW() + INTERVAL '1 day')")
+            .execute(&pool).await.unwrap();
+        let reservation = storage.reserve_ai_seconds(1, 120).await.unwrap();
+        assert_eq!(
+            reservation,
+            QuotaReservation {
+                monthly_seconds: 100,
+                topup_seconds: 20
+            }
+        );
+        storage.release_ai_seconds(1, reservation).await;
+        let row: (i32, i32) = sqlx::query_as(
+            "SELECT ai_seconds_used, topup_seconds_available FROM subscriptions WHERE user_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, (0, 50));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn quota_constraints_reject_invalid_rows(pool: PgPool) {
+        assert!(sqlx::query("INSERT INTO subscriptions (user_id, tier, ai_seconds_limit) VALUES (1, 'invalid', 0)").execute(&pool).await.is_err());
+        assert!(sqlx::query("INSERT INTO payments (user_id, telegram_payment_charge_id, provider_payment_charge_id, product, amount) VALUES (1, 'charge', 'provider', 'topup_60', 0)").execute(&pool).await.is_err());
     }
 
     #[sqlx::test(migrations = "./migrations")]

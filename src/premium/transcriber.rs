@@ -2,6 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::StatusCode;
 use thiserror::Error;
 
@@ -79,7 +80,7 @@ impl Transcriber for DeepgramTranscriber {
             .check()
             .await
             .map_err(TranscriptionError::ApiError)?;
-        let audio_bytes = tokio::fs::read(audio_path).await?;
+        let audio_bytes = bytes::Bytes::from(tokio::fs::read(audio_path).await?);
         log::debug!(
             "Deepgram: sending {} bytes from {:?}",
             audio_bytes.len(),
@@ -131,7 +132,18 @@ impl Transcriber for DeepgramTranscriber {
         };
 
         let status = response.status();
-        let body = response.text().await?;
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if body.len() + chunk.len() > 1024 * 1024 {
+                return Err(TranscriptionError::ApiError(
+                    "response exceeded 1 MiB".to_string(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let body = String::from_utf8_lossy(&body).into_owned();
         log::debug!("Deepgram response status={} body={}", status, body);
 
         if !status.is_success() {

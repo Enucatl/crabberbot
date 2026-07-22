@@ -129,57 +129,26 @@ async fn log_reply_failure(
     result: Result<(), teloxide::RequestError>,
     chat_id: ChatId,
     action: &str,
-) {
-    if let Err(e) = result {
-        log::error!(
-            "Telegram reply failed: action={} chat_id={} error={:?}",
-            action,
-            chat_id,
-            e
-        );
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            log::error!(
+                "Telegram reply failed: action={} chat_id={} error={:?}",
+                action,
+                chat_id,
+                e
+            );
+            false
+        }
     }
 }
 
-/// Creates a normalized URL for use as a cache key:
-/// - strips fragment and query params (preserving YouTube `v=` param)
-/// - removes `www.` prefix
-/// - removes trailing slash from path
+/// Removes only fragments, which are never sent to the source server.
 #[must_use]
 fn cleanup_url(original_url: &Url) -> Url {
     let mut cleaned_url = original_url.clone();
     cleaned_url.set_fragment(None);
-
-    // Normalize www. prefix so e.g. www.instagram.com and instagram.com share a cache entry
-    if let Some(host) = cleaned_url.host_str() {
-        if let Some(stripped) = host.strip_prefix("www.") {
-            let normalized = stripped.to_owned();
-            let _ = cleaned_url.set_host(Some(&normalized));
-        }
-    }
-
-    let is_youtube = cleaned_url
-        .host_str()
-        .is_some_and(|h| h.ends_with("youtube.com") || h == "youtu.be");
-
-    if is_youtube {
-        if let Some(video_id) = original_url
-            .query_pairs()
-            .find(|(key, _)| key == "v")
-            .map(|(_, value)| value)
-        {
-            cleaned_url.set_query(Some(&format!("v={}", video_id)));
-        } else {
-            cleaned_url.set_query(None);
-        }
-    } else {
-        cleaned_url.set_query(None);
-    }
-
-    // Remove trailing slash from path (e.g. /p/ABC123/ -> /p/ABC123)
-    let path = cleaned_url.path().to_owned();
-    if path.len() > 1 && path.ends_with('/') {
-        let _ = cleaned_url.set_path(path.trim_end_matches('/'));
-    }
 
     cleaned_url
 }
@@ -729,29 +698,32 @@ pub async fn send_long_text(
     message_id: MessageId,
     text: &str,
     api: &dyn TelegramApi,
-) {
+) -> bool {
     const MAX_LEN: usize = 4000;
     if text.len() <= MAX_LEN {
-        log_reply_failure(
+        return log_reply_failure(
             api.send_text_message(chat_id, message_id, text).await,
             chat_id,
             "long_text_chunk",
         )
         .await;
-        return;
     }
     let mut start = 0;
     while start < text.len() {
         let end = text.floor_char_boundary((start + MAX_LEN).min(text.len()));
         let chunk = &text[start..end];
-        log_reply_failure(
+        if !log_reply_failure(
             api.send_text_message(chat_id, message_id, chunk).await,
             chat_id,
             "long_text_chunk",
         )
-        .await;
+        .await
+        {
+            return false;
+        }
         start = end;
     }
+    true
 }
 
 /// Store a callback context and attach premium action buttons to the sent video message.

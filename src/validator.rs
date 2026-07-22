@@ -21,7 +21,6 @@ pub enum ValidationError {
     TooManyItems { found: usize, limit: usize },
 }
 
-#[must_use]
 pub fn validate_media_metadata(info: &MediaInfo) -> Result<(), ValidationError> {
     if let Some(entries) = &info.entries {
         if entries.is_empty() {

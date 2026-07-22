@@ -137,7 +137,11 @@ impl SubscriptionInfo {
     /// Pro tier: unlimited, no cost (always true).
     /// Everyone else: requires enough seconds in their balance (monthly or top-up).
     pub fn can_extract_audio(&self, duration_secs: i32) -> bool {
-        if self.tier.has_audio_extraction() {
+        if self.tier.has_audio_extraction()
+            && self
+                .expires_at
+                .is_some_and(|expires_at| expires_at > chrono::Utc::now())
+        {
             true
         } else {
             self.total_available_seconds() >= duration_secs
@@ -338,6 +342,21 @@ mod tests {
         };
         // Pro always gets audio extraction regardless of remaining minutes
         assert!(sub.can_extract_audio(99999));
+    }
+
+    #[test]
+    fn test_expired_pro_does_not_get_unlimited_audio() {
+        let mut sub = SubscriptionInfo {
+            tier: SubscriptionTier::Pro,
+            ai_seconds_used: 12_000,
+            ai_seconds_limit: 12_000,
+            topup_seconds_available: 0,
+            last_topup_at: None,
+            expires_at: Some(chrono::Utc::now() - chrono::TimeDelta::days(1)),
+        };
+        assert!(!sub.can_extract_audio(1));
+        sub.topup_seconds_available = 60;
+        assert!(sub.can_extract_audio(60));
     }
 
     #[test]

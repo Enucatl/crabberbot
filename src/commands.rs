@@ -12,7 +12,7 @@ use crate::premium::{
     GEMINI_INPUT_COST_PER_MILLION_TOKENS, GEMINI_OUTPUT_COST_PER_MILLION_TOKENS,
     MAX_PREMIUM_FILE_DURATION_SECS,
 };
-use crate::storage::Storage;
+use crate::storage::{QuotaReservation, Storage};
 use crate::subscription::{
     PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_PRICE_STARS,
 };
@@ -116,7 +116,7 @@ pub async fn handle_grant(
     }
 
     const USAGE: &str = "Usage:\n/grant [user_id] &lt;tier&gt; [days]  (tier: basic, pro, ultra, free)\n/grant [user_id] topup &lt;minutes&gt;";
-    let parts: Vec<&str> = args.trim().split_whitespace().collect();
+    let parts: Vec<&str> = args.split_whitespace().collect();
     let self_uid = || {
         message
             .from
@@ -286,7 +286,7 @@ Note: <b>Telegram support and BotFather cannot help with purchases made through 
             .from
             .as_ref()
             .and_then(|u| u.username.as_deref())
-            .map(|u| format!("@{u}"))
+            .map(|u| format!("@{}", teloxide::utils::html::escape(u)))
             .unwrap_or_else(|| "(no username)".to_string());
         let from_user_id = message
             .from
@@ -321,8 +321,9 @@ Note: <b>Telegram support and BotFather cannot help with purchases made through 
             "[Support] from {username} (user_id: <code>{from_user_id}</code>, chat_id: <code>{chat_id}</code>)\n\
              {sub_line}\n\
              {charge_lines}\n\n\
-             {text}\n\n\
+             {}\n\n\
              Reply: <code>/reply {chat_id} your message here</code>",
+            teloxide::utils::html::escape(&text),
         );
         log_telegram_failure(
             api.send_text_no_reply(ChatId(owner_chat_id), &relay).await,
@@ -364,7 +365,10 @@ pub async fn handle_reply(
             return Ok(());
         }
     };
-    let text = format!("<b>Support reply:</b>\n{}", reply_text.trim());
+    let text = format!(
+        "<b>Support reply:</b>\n{}",
+        teloxide::utils::html::escape(reply_text.trim())
+    );
     log_telegram_failure(
         api.send_text_no_reply(ChatId(target), &text).await,
         ChatId(target),
@@ -463,7 +467,7 @@ pub async fn handle_refund(
     }
     // Usage: /refund <user_id> [<telegram_charge_id>]
     // With just a user_id, shows the 5 most recent charges ready to copy-paste.
-    let parts: Vec<&str> = args.trim().split_whitespace().collect();
+    let parts: Vec<&str> = args.split_whitespace().collect();
 
     // /refund <user_id> — list recent charges
     if let [user_id_str] = parts.as_slice() {
@@ -971,9 +975,28 @@ async fn handle_audio_extraction(
     api: &dyn TelegramApi,
     storage: &dyn Storage,
 ) -> ResponseResult<()> {
-    let sub = storage.get_subscription(user_id).await;
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
-    if !sub.can_extract_audio(duration_secs) {
+    if duration_secs <= 0 {
+        log_telegram_failure(
+            api.send_text_message(chat_id, message_id, "Audio duration is unavailable.")
+                .await,
+            chat_id,
+            "audio_invalid_duration",
+        )
+        .await;
+        return Ok(());
+    }
+    let sub = storage.get_subscription(user_id).await;
+    let unlimited = sub.tier.has_audio_extraction()
+        && sub
+            .expires_at
+            .is_some_and(|expires_at| expires_at > chrono::Utc::now());
+    let reservation = if unlimited {
+        None
+    } else {
+        storage.reserve_ai_seconds(user_id, duration_secs).await
+    };
+    if !unlimited && reservation.is_none() {
         let msg = if sub.total_available_seconds() == 0 {
             "Audio extraction requires a subscription or top-up credits. Use /subscribe to get started.".to_string()
         } else {
@@ -995,6 +1018,9 @@ async fn handle_audio_extraction(
 
     let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
     if let Err(e) = api.send_audio(chat_id, message_id, &audio_path).await {
+        if let Some(reservation) = reservation {
+            storage.release_ai_seconds(user_id, reservation).await;
+        }
         log::error!("Failed to send audio: {}", e);
         log_telegram_failure(
             api.send_text_message(chat_id, message_id, "Sorry, failed to send the audio.")
@@ -1004,10 +1030,6 @@ async fn handle_audio_extraction(
         )
         .await;
         return Ok(());
-    }
-    // Pro gets unlimited free extraction; everyone else consumes their AI Video Minutes.
-    if sub.tier != SubscriptionTier::Pro {
-        storage.consume_ai_seconds(user_id, duration_secs).await;
     }
     storage
         .record_premium_usage(
@@ -1022,6 +1044,7 @@ async fn handle_audio_extraction(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_transcription(
     context_id: i32,
     ctx: &CallbackContext,
@@ -1034,18 +1057,19 @@ async fn handle_transcription(
     summarizer: &dyn Summarizer,
 ) -> ResponseResult<()> {
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
-    let Some((raw_transcript, detected_language, deepgram_usage)) = prepare_ai_action(
-        context_id,
-        ctx,
-        user_id,
-        chat_id,
-        message_id,
-        api,
-        storage,
-        transcriber,
-        "transcription",
-    )
-    .await?
+    let Some((raw_transcript, detected_language, deepgram_usage, _reservation)) =
+        prepare_ai_action(
+            context_id,
+            ctx,
+            user_id,
+            chat_id,
+            message_id,
+            api,
+            storage,
+            transcriber,
+            "transcription",
+        )
+        .await?
     else {
         return Ok(());
     };
@@ -1065,7 +1089,10 @@ async fn handle_transcription(
         }
     };
 
-    send_long_text(chat_id, message_id, &correction.text, api).await;
+    if !send_long_text(chat_id, message_id, &correction.text, api).await {
+        storage.release_ai_seconds(user_id, _reservation).await;
+        return Ok(());
+    }
 
     record_ai_action_usage(
         storage,
@@ -1080,6 +1107,7 @@ async fn handle_transcription(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_summarization(
     context_id: i32,
     ctx: &CallbackContext,
@@ -1092,7 +1120,7 @@ async fn handle_summarization(
     summarizer: &dyn Summarizer,
 ) -> ResponseResult<()> {
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
-    let Some((raw_transcript, detected_language, deepgram_usage)) = prepare_ai_action(
+    let Some((raw_transcript, detected_language, deepgram_usage, reservation)) = prepare_ai_action(
         context_id,
         ctx,
         user_id,
@@ -1114,6 +1142,7 @@ async fn handle_summarization(
     {
         Ok(result) => result,
         Err(e) => {
+            storage.release_ai_seconds(user_id, reservation).await;
             log::error!("Summarization failed: {}", e);
             log_telegram_failure(
                 api.send_text_message(
@@ -1130,7 +1159,10 @@ async fn handle_summarization(
         }
     };
 
-    send_long_text(chat_id, message_id, &summary.text, api).await;
+    if !send_long_text(chat_id, message_id, &summary.text, api).await {
+        storage.release_ai_seconds(user_id, reservation).await;
+        return Ok(());
+    }
 
     record_ai_action_usage(
         storage,
@@ -1145,6 +1177,7 @@ async fn handle_summarization(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prepare_ai_action(
     context_id: i32,
     ctx: &CallbackContext,
@@ -1155,11 +1188,18 @@ async fn prepare_ai_action(
     storage: &dyn Storage,
     transcriber: &dyn Transcriber,
     action: &str,
-) -> ResponseResult<Option<(String, Option<String>, Option<DeepgramUsage>)>> {
+) -> ResponseResult<
+    Option<(
+        String,
+        Option<String>,
+        Option<DeepgramUsage>,
+        QuotaReservation,
+    )>,
+> {
     let sub = storage.get_subscription(user_id).await;
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
 
-    if duration_secs > MAX_PREMIUM_FILE_DURATION_SECS {
+    if duration_secs <= 0 || duration_secs > MAX_PREMIUM_FILE_DURATION_SECS {
         log_telegram_failure(
             api.send_text_message(
                 chat_id,
@@ -1177,7 +1217,7 @@ async fn prepare_ai_action(
         return Ok(None);
     }
 
-    if !sub.can_use_ai(duration_secs) {
+    let Some(reservation) = storage.reserve_ai_seconds(user_id, duration_secs).await else {
         log_telegram_failure(
             api.send_text_message(
                 chat_id,
@@ -1193,7 +1233,7 @@ async fn prepare_ai_action(
         )
         .await;
         return Ok(None);
-    }
+    };
 
     api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
         .await?;
@@ -1203,6 +1243,7 @@ async fn prepare_ai_action(
             cached.clone(),
             ctx.transcript_language.clone(),
             None::<DeepgramUsage>,
+            reservation,
         )));
     }
 
@@ -1216,9 +1257,15 @@ async fn prepare_ai_action(
                 billed_duration_secs: t.billed_duration_secs,
                 cost_usd: t.cost_usd,
             };
-            Ok(Some((t.transcript, t.detected_language, Some(usage))))
+            Ok(Some((
+                t.transcript,
+                t.detected_language,
+                Some(usage),
+                reservation,
+            )))
         }
         Err(e) => {
+            storage.release_ai_seconds(user_id, reservation).await;
             log::error!("Transcription failed: {}", e);
             log_telegram_failure(
                 api.send_text_message(
@@ -1245,7 +1292,6 @@ async fn record_ai_action_usage(
     usage: Option<DeepgramUsage>,
 ) {
     let (units, cost_usd) = usage.map_or((0.0, 0.0), |dg| (dg.billed_duration_secs, dg.cost_usd));
-    storage.consume_ai_seconds(user_id, duration_secs).await;
     storage
         .record_premium_usage(
             user_id,
@@ -1763,6 +1809,9 @@ mod tests {
         mock_storage
             .expect_get_subscription()
             .returning(|_| SubscriptionInfo::free_default());
+        mock_storage
+            .expect_reserve_ai_seconds()
+            .returning(|_, _| None);
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -1907,9 +1956,14 @@ mod tests {
             .returning(|_, _, _| Ok(()));
 
         mock_storage
-            .expect_consume_ai_seconds()
+            .expect_reserve_ai_seconds()
             .times(1)
-            .returning(|_, _| ());
+            .returning(|_, _| {
+                Some(crate::storage::QuotaReservation {
+                    monthly_seconds: 600,
+                    topup_seconds: 0,
+                })
+            });
         mock_storage
             .expect_record_premium_usage()
             .withf(|_, feature, _, _, _, _| feature == "transcribe")
@@ -1983,10 +2037,14 @@ mod tests {
             .returning(|_, _, _| Ok(()));
 
         mock_storage
-            .expect_consume_ai_seconds()
-            .withf(|user_id, seconds| *user_id == 200 && *seconds == 600)
+            .expect_reserve_ai_seconds()
             .times(1)
-            .returning(|_, _| ());
+            .returning(|_, _| {
+                Some(crate::storage::QuotaReservation {
+                    monthly_seconds: 600,
+                    topup_seconds: 0,
+                })
+            });
         mock_storage
             .expect_record_premium_usage()
             .withf(|user_id, feature, _, duration, units, cost| {
@@ -2046,6 +2104,9 @@ mod tests {
         mock_storage
             .expect_get_subscription()
             .returning(|_| SubscriptionInfo::free_default()); // 0 seconds
+        mock_storage
+            .expect_reserve_ai_seconds()
+            .returning(|_, _| None);
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -2164,9 +2225,14 @@ mod tests {
             .returning(|_, _, _| Ok(()));
 
         mock_storage
-            .expect_consume_ai_seconds()
+            .expect_reserve_ai_seconds()
             .times(1)
-            .returning(|_, _| ());
+            .returning(|_, _| {
+                Some(crate::storage::QuotaReservation {
+                    monthly_seconds: 600,
+                    topup_seconds: 0,
+                })
+            });
         mock_storage
             .expect_record_premium_usage()
             .withf(|_, feature, _, _, _, _| feature == "summarize")
@@ -2239,10 +2305,14 @@ mod tests {
             .returning(|_, _, _| Ok(()));
 
         mock_storage
-            .expect_consume_ai_seconds()
-            .withf(|user_id, seconds| *user_id == 200 && *seconds == 600)
+            .expect_reserve_ai_seconds()
             .times(1)
-            .returning(|_, _| ());
+            .returning(|_, _| {
+                Some(crate::storage::QuotaReservation {
+                    monthly_seconds: 600,
+                    topup_seconds: 0,
+                })
+            });
         mock_storage
             .expect_record_premium_usage()
             .withf(|user_id, feature, _, duration, units, cost| {

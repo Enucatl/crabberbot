@@ -1,8 +1,7 @@
-/// Single source of truth for all Terms of Service text and policy constants.
-///
-/// Every place that displays terms to users — the /terms command, the pre-purchase
-/// confirmation, and the /subscribe screen — must pull from this module. This guarantees
-/// the text shown during a purchase is always identical to what /terms displays.
+//! Single source of truth for all Terms of Service text and policy constants.
+//!
+//! Every place that displays terms to users — the /terms command, the pre-purchase
+//! confirmation, and the /subscribe screen — must pull from this module.
 
 /// How many days top-up credits remain valid after the most recent top-up purchase.
 /// Each new top-up purchase resets this window for the entire top-up balance.
