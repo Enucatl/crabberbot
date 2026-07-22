@@ -55,19 +55,12 @@ pub fn validate_media_metadata(info: &MediaInfo) -> Result<(), ValidationError> 
 
 fn validate_single_item(info: &MediaInfo) -> Result<(), ValidationError> {
     match info.filesize {
-        Some(0) | None => return Err(ValidationError::InvalidMetadata),
+        Some(0) => return Err(ValidationError::InvalidMetadata),
         Some(filesize) => validate_filesize(filesize)?,
+        None => {}
     }
 
-    if info.media_type.as_deref() == Some("image") {
-        validate_optional_duration(info.duration)
-    } else {
-        validate_optional_duration(info.duration)?;
-        if info.duration.is_none() {
-            return Err(ValidationError::InvalidMetadata);
-        }
-        Ok(())
-    }
+    validate_optional_duration(info.duration)
 }
 
 fn validate_optional_metadata(info: &MediaInfo) -> Result<(), ValidationError> {
@@ -257,19 +250,20 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_or_missing_item_metadata_is_rejected() {
+    fn test_invalid_item_metadata_is_rejected_but_missing_fields_are_allowed() {
         let mut info = create_test_info();
         info.media_type = Some("video".to_string());
-        for filesize in [None, Some(0)] {
-            info.filesize = filesize;
-            info.duration = Some(0.0);
-            assert_eq!(
-                validate_media_metadata(&info),
-                Err(ValidationError::InvalidMetadata)
-            );
-        }
+        info.filesize = Some(0);
+        info.duration = Some(0.0);
+        assert_eq!(
+            validate_media_metadata(&info),
+            Err(ValidationError::InvalidMetadata)
+        );
+        info.filesize = None;
+        info.duration = None;
+        assert!(validate_media_metadata(&info).is_ok());
         info.filesize = Some(1);
-        for duration in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+        for duration in [Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
             info.duration = duration;
             assert_eq!(
                 validate_media_metadata(&info),
