@@ -12,6 +12,8 @@ use tokio::sync::Semaphore;
 use url::Url;
 use uuid::Uuid;
 
+use crate::validator::MAX_FILESIZE_BYTES;
+
 const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -468,6 +470,8 @@ impl Downloader for YtDlpDownloader {
             .arg("--print-json")
             .arg("-S")
             .arg("vcodec:h264,res,acodec:m4a")
+            .arg("--max-filesize")
+            .arg(MAX_FILESIZE_BYTES.to_string())
             .arg("-o")
             .arg(&filename_template);
 
@@ -613,6 +617,8 @@ impl Downloader for YtDlpDownloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use url::Url;
 
     #[test]
@@ -800,5 +806,52 @@ mod tests {
         assert!(!target_video.exists());
         assert!(!target_part.exists());
         assert!(other_video.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_download_passes_size_limit_and_cleans_failed_artifacts() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let script = temp_dir.path().join("fake-yt-dlp");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$previous\" = --max-filesize ]; then echo \"$arg\" > max-filesize; fi\n  if [ \"$previous\" = -o ]; then output=$arg; fi\n  previous=$arg\ndone\nuuid=${output%%.*}\ntouch \"$uuid.media.mp4.part\"\necho 'Maximum file size exceeded' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let downloader = YtDlpDownloader {
+            yt_dlp_path: script.to_string_lossy().into_owned(),
+            download_dir: temp_dir.path().to_path_buf(),
+            session_limiter: Arc::new(Semaphore::new(1)),
+        };
+        let info = MediaInfo {
+            id: "media".to_string(),
+            media_type: Some("video".to_string()),
+            duration: Some(1.0),
+            filesize: Some(1),
+            ..Default::default()
+        };
+
+        let result = downloader
+            .download_media(&info, &Url::parse("https://example.com/video").unwrap())
+            .await;
+
+        assert!(matches!(result, Err(DownloadError::CommandFailed(_))));
+        assert_eq!(
+            std::fs::read_to_string(temp_dir.path().join("max-filesize"))
+                .unwrap()
+                .trim(),
+            MAX_FILESIZE_BYTES.to_string()
+        );
+        assert!(std::fs::read_dir(temp_dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".part")
+        }));
     }
 }

@@ -1463,7 +1463,10 @@ mod tests {
 
         mock_downloader.expect_get_media_metadata().returning(|_| {
             let mut info = create_test_info();
-            info.entries = Some(vec![create_test_info(); 11]);
+            let mut image = create_test_info();
+            image.media_type = Some("image".to_string());
+            image.duration = None;
+            info.entries = Some(vec![image; 11]);
             Ok(info)
         });
 
