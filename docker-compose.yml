@@ -18,6 +18,7 @@ services:
       - POSTGRES_ACQUIRE_TIMEOUT_SECS=5
       - DEEPGRAM_API_KEY
       - GEMINI_API_KEY
+      - MAX_YT_DLP_SESSIONS=${MAX_YT_DLP_SESSIONS:-4}
       - DOWNLOADS_DIR=/downloads
       - AUDIO_CACHE_DIR=/downloads/audio_cache
       - TMPDIR=/downloads/tmp

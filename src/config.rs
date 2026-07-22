@@ -18,6 +18,7 @@ pub struct AppConfig {
     pub port: u16,
     pub webhook_url: Url,
     pub yt_dlp_path: String,
+    pub max_yt_dlp_sessions: usize,
     pub downloads_dir: PathBuf,
     pub audio_cache_dir: PathBuf,
 }
@@ -62,6 +63,13 @@ impl AppConfig {
                 value: std::env::var("WEBHOOK_URL").unwrap_or_default(),
             })?;
         let yt_dlp_path = std::env::var("YT_DLP_PATH").unwrap_or_else(|_| "yt-dlp".to_string());
+        let max_yt_dlp_sessions = parse_env("MAX_YT_DLP_SESSIONS", 4usize)?;
+        if max_yt_dlp_sessions == 0 {
+            return Err(ConfigError::Invalid {
+                name: "MAX_YT_DLP_SESSIONS",
+                value: "0".to_string(),
+            });
+        }
         let downloads_dir = PathBuf::from(
             std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/downloads".to_string()),
         );
@@ -86,6 +94,7 @@ impl AppConfig {
             port,
             webhook_url,
             yt_dlp_path,
+            max_yt_dlp_sessions,
             downloads_dir,
             audio_cache_dir,
         })

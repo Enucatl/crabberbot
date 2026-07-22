@@ -85,6 +85,9 @@ TUNNEL_TOKEN=your_tunnel_token_here
 
 # Optional: Set verbosity for the local Telegram API server (0-4)
 TELEGRAM_VERBOSITY=1
+
+# Optional: Maximum simultaneous yt-dlp subprocesses (default: 4)
+MAX_YT_DLP_SESSIONS=4
 ```
 
 ### 3. Run the Stack

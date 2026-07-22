@@ -330,7 +330,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bot = Bot::from_env_with_client(client.clone());
 
     let downloader: Arc<dyn Downloader> = Arc::new(
-        YtDlpDownloader::new(config.yt_dlp_path.clone(), config.downloads_dir.clone()).await,
+        YtDlpDownloader::new(
+            config.yt_dlp_path.clone(),
+            config.downloads_dir.clone(),
+            config.max_yt_dlp_sessions,
+        )
+        .await,
     );
     let api: Arc<dyn TelegramApi> = Arc::new(TeloxideApi::new(bot.clone()));
     let download_limiter = Arc::new(ConcurrencyLimiter::new());

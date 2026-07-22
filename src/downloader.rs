@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use thiserror::Error;
+use tokio::sync::Semaphore;
 use url::Url;
 use uuid::Uuid;
 
@@ -190,10 +192,11 @@ pub trait Downloader: Send + Sync {
 pub struct YtDlpDownloader {
     yt_dlp_path: String,
     download_dir: PathBuf,
+    session_limiter: Arc<Semaphore>,
 }
 
 impl YtDlpDownloader {
-    pub async fn new(yt_dlp_path: String, download_dir: PathBuf) -> Self {
+    pub async fn new(yt_dlp_path: String, download_dir: PathBuf, max_sessions: usize) -> Self {
         log::info!("Using yt-dlp executable at: {}", yt_dlp_path);
         log::info!("Using download directory: {}", download_dir.display());
 
@@ -236,6 +239,7 @@ impl YtDlpDownloader {
         Self {
             yt_dlp_path,
             download_dir,
+            session_limiter: Arc::new(Semaphore::new(max_sessions)),
         }
     }
 
@@ -412,6 +416,11 @@ impl Downloader for YtDlpDownloader {
         let mut command = self.build_base_command();
         command.arg("--dump-single-json").arg(url.as_str());
 
+        let _permit = self
+            .session_limiter
+            .acquire()
+            .await
+            .expect("yt-dlp session limiter closed");
         let output = tokio::time::timeout(METADATA_TIMEOUT, command.output())
             .await
             .map_err(|_| DownloadError::Timeout(METADATA_TIMEOUT.as_secs()))?
@@ -471,6 +480,11 @@ impl Downloader for YtDlpDownloader {
 
         command.arg(url.as_str());
 
+        let _permit = self
+            .session_limiter
+            .acquire()
+            .await
+            .expect("yt-dlp session limiter closed");
         let output = match tokio::time::timeout(DOWNLOAD_TIMEOUT, command.output()).await {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
@@ -652,6 +666,7 @@ mod tests {
         let downloader = YtDlpDownloader {
             yt_dlp_path: "/path/to/a/nonexistent/yt-dlp-binary".to_string(),
             download_dir: PathBuf::from("/downloads"),
+            session_limiter: Arc::new(Semaphore::new(4)),
         };
 
         let url = Url::parse("https://example.com").unwrap();
@@ -666,6 +681,23 @@ mod tests {
             }
             _ => panic!("Expected CommandFailed error, but got something else."),
         }
+    }
+
+    #[test]
+    fn test_yt_dlp_session_limiter_uses_configured_permits() {
+        let downloader = YtDlpDownloader {
+            yt_dlp_path: "yt-dlp".to_string(),
+            download_dir: PathBuf::from("/downloads"),
+            session_limiter: Arc::new(Semaphore::new(2)),
+        };
+
+        let first = downloader.session_limiter.try_acquire().unwrap();
+        let second = downloader.session_limiter.try_acquire().unwrap();
+        assert!(downloader.session_limiter.try_acquire().is_err());
+
+        drop(first);
+        assert!(downloader.session_limiter.try_acquire().is_ok());
+        drop(second);
     }
 
     #[test]
