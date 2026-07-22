@@ -1089,7 +1089,7 @@ async fn handle_transcription(
 
     send_long_text(chat_id, message_id, &correction.text, api).await;
 
-    record_deepgram_usage(
+    record_ai_action_usage(
         storage,
         user_id,
         ctx,
@@ -1154,7 +1154,7 @@ async fn handle_summarization(
 
     send_long_text(chat_id, message_id, &summary.text, api).await;
 
-    record_deepgram_usage(
+    record_ai_action_usage(
         storage,
         user_id,
         ctx,
@@ -1258,7 +1258,7 @@ async fn prepare_ai_action(
     }
 }
 
-async fn record_deepgram_usage(
+async fn record_ai_action_usage(
     storage: &dyn Storage,
     user_id: i64,
     ctx: &CallbackContext,
@@ -1266,19 +1266,18 @@ async fn record_deepgram_usage(
     feature: &str,
     usage: Option<DeepgramUsage>,
 ) {
-    if let Some(dg) = usage {
-        storage.consume_ai_seconds(user_id, duration_secs).await;
-        storage
-            .record_premium_usage(
-                user_id,
-                feature,
-                &ctx.source_url,
-                duration_secs,
-                dg.billed_duration_secs,
-                dg.cost_usd,
-            )
-            .await;
-    }
+    let (units, cost_usd) = usage.map_or((0.0, 0.0), |dg| (dg.billed_duration_secs, dg.cost_usd));
+    storage.consume_ai_seconds(user_id, duration_secs).await;
+    storage
+        .record_premium_usage(
+            user_id,
+            feature,
+            &ctx.source_url,
+            duration_secs,
+            units,
+            cost_usd,
+        )
+        .await;
 }
 
 async fn record_gemini_usage(
@@ -1899,9 +1898,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_transcription_cached_skips_deepgram_no_quota() {
-        // Cached transcript → Deepgram NOT called, quota NOT deducted,
-        // only Gemini correction rows recorded.
+    async fn test_transcription_cached_skips_deepgram_and_charges_quota() {
+        // Cached transcript avoids Deepgram but still consumes quota for the delivered action.
         let mut mock_api = MockTelegramApi::new();
         let mut mock_storage = MockStorage::new();
         let mock_transcriber = MockTranscriber::new(); // no expectations — panics if called
@@ -1929,7 +1927,22 @@ mod tests {
             .times(1)
             .returning(|_, _, _| Ok(()));
 
-        // consume_ai_seconds must NOT be called — no expectations set, panics if invoked
+        mock_storage
+            .expect_consume_ai_seconds()
+            .withf(|user_id, seconds| *user_id == 200 && *seconds == 600)
+            .times(1)
+            .returning(|_, _| ());
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|user_id, feature, _, duration, units, cost| {
+                *user_id == 200
+                    && feature == "transcribe"
+                    && *duration == 600
+                    && *units == 0.0
+                    && *cost == 0.0
+            })
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
             .withf(|_, feature, _, _, _, _| feature == "gemini_correction_input")
@@ -2142,9 +2155,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_summarization_cached_skips_deepgram_no_quota() {
-        // Cached transcript → Deepgram NOT called, quota NOT deducted,
-        // only Gemini summarize rows recorded.
+    async fn test_summarization_cached_skips_deepgram_and_charges_quota() {
+        // Cached transcript avoids Deepgram but still consumes quota for the delivered action.
         let mut mock_api = MockTelegramApi::new();
         let mut mock_storage = MockStorage::new();
         let mock_transcriber = MockTranscriber::new(); // no expectations — panics if called
@@ -2171,7 +2183,22 @@ mod tests {
             .times(1)
             .returning(|_, _, _| Ok(()));
 
-        // consume_ai_seconds must NOT be called
+        mock_storage
+            .expect_consume_ai_seconds()
+            .withf(|user_id, seconds| *user_id == 200 && *seconds == 600)
+            .times(1)
+            .returning(|_, _| ());
+        mock_storage
+            .expect_record_premium_usage()
+            .withf(|user_id, feature, _, duration, units, cost| {
+                *user_id == 200
+                    && feature == "summarize"
+                    && *duration == 600
+                    && *units == 0.0
+                    && *cost == 0.0
+            })
+            .times(1)
+            .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
             .withf(|_, feature, _, _, _, _| feature == "gemini_summarize_input")
