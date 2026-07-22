@@ -603,21 +603,29 @@ pub async fn handle_successful_payment(
     let product = &payment.invoice_payload;
     let amount = payment.total_amount;
 
-    storage
-        .record_payment(
+    if !matches!(
+        product.as_str(),
+        PRODUCT_SUB_BASIC | PRODUCT_SUB_PRO | PRODUCT_TOPUP_60
+    ) {
+        log::warn!("Unknown payment product: {}", product);
+        return Ok(());
+    }
+
+    if !storage
+        .fulfill_payment(
             user_id,
             &payment.telegram_payment_charge_id.0,
             &payment.provider_payment_charge_id,
             product,
             amount as i32,
         )
-        .await;
+        .await
+    {
+        return Ok(());
+    }
 
     match product.as_str() {
         PRODUCT_SUB_BASIC => {
-            storage
-                .upsert_subscription(user_id, SubscriptionTier::Basic, 30)
-                .await;
             api.send_text_message(
                 chat_id,
                 message.id,
@@ -627,9 +635,6 @@ pub async fn handle_successful_payment(
             .await?;
         }
         PRODUCT_SUB_PRO => {
-            storage
-                .upsert_subscription(user_id, SubscriptionTier::Pro, 30)
-                .await;
             api.send_text_message(
                 chat_id,
                 message.id,
@@ -639,7 +644,6 @@ pub async fn handle_successful_payment(
             .await?;
         }
         PRODUCT_TOPUP_60 => {
-            storage.add_topup_seconds(user_id, TOPUP_SECONDS).await;
             api.send_text_message(
                 chat_id,
                 message.id,
@@ -648,9 +652,7 @@ pub async fn handle_successful_payment(
             )
             .await?;
         }
-        _ => {
-            log::warn!("Unknown payment product: {}", product);
-        }
+        _ => unreachable!(),
     }
 
     Ok(())
@@ -1360,14 +1362,10 @@ mod tests {
         let mut mock_storage = MockStorage::new();
 
         mock_storage
-            .expect_record_payment()
+            .expect_fulfill_payment()
+            .withf(|_, _, _, product, amount| product == "sub_basic" && *amount == 50)
             .times(1)
-            .returning(|_, _, _, _, _| ());
-        mock_storage
-            .expect_upsert_subscription()
-            .withf(|_, tier, days| *tier == SubscriptionTier::Basic && *days == 30)
-            .times(1)
-            .returning(|_, _, _| ());
+            .returning(|_, _, _, _, _| true);
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -1394,14 +1392,10 @@ mod tests {
         let mut mock_storage = MockStorage::new();
 
         mock_storage
-            .expect_record_payment()
+            .expect_fulfill_payment()
+            .withf(|_, _, _, product, amount| product == "topup_60" && *amount == 50)
             .times(1)
-            .returning(|_, _, _, _, _| ());
-        mock_storage
-            .expect_add_topup_seconds()
-            .withf(|_, seconds| *seconds == TOPUP_SECONDS)
-            .times(1)
-            .returning(|_, _| ());
+            .returning(|_, _, _, _, _| true);
         mock_api
             .expect_send_text_message()
             .times(1)

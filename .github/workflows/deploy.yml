@@ -37,6 +37,20 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/crabberbot
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: crabberbot
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d crabberbot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

@@ -54,15 +54,16 @@ pub trait Storage: Send + Sync {
     async fn get_subscription(&self, user_id: i64) -> SubscriptionInfo;
     async fn upsert_subscription(&self, user_id: i64, tier: SubscriptionTier, duration_days: i64);
 
-    // Payment recording
-    async fn record_payment(
+    /// Records a charge and grants its product entitlement atomically.
+    /// Returns true only when this charge was fulfilled for the first time.
+    async fn fulfill_payment(
         &self,
         user_id: i64,
         telegram_charge_id: &str,
         provider_charge_id: &str,
         product: &str,
         amount: i32,
-    );
+    ) -> bool;
 
     // AI Seconds tracking
     async fn consume_ai_seconds(&self, user_id: i64, seconds: i32);
@@ -374,28 +375,92 @@ impl Storage for PostgresStorage {
         }
     }
 
-    async fn record_payment(
+    async fn fulfill_payment(
         &self,
         user_id: i64,
         telegram_charge_id: &str,
         provider_charge_id: &str,
         product: &str,
         amount: i32,
-    ) {
-        if let Err(e) = sqlx::query(
+    ) -> bool {
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                log::error!("Failed to begin payment fulfillment for {}: {}", user_id, e);
+                return false;
+            }
+        };
+
+        let inserted: Option<(i32,)> = match sqlx::query_as(
             "INSERT INTO payments (user_id, telegram_payment_charge_id, provider_payment_charge_id, product, amount) \
-             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (telegram_payment_charge_id) DO NOTHING",
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (telegram_payment_charge_id) DO NOTHING RETURNING id",
         )
         .bind(user_id)
         .bind(telegram_charge_id)
         .bind(provider_charge_id)
         .bind(product)
         .bind(amount)
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         {
-            log::error!("Failed to record payment for {}: {}", user_id, e);
+            Ok(inserted) => inserted,
+            Err(e) => {
+                log::error!("Failed to record payment for {}: {}", user_id, e);
+                return false;
+            }
+        };
+        if inserted.is_none() {
+            return false;
         }
+
+        let result = match product {
+            crate::subscription::PRODUCT_SUB_BASIC | crate::subscription::PRODUCT_SUB_PRO => {
+                let tier = if product == crate::subscription::PRODUCT_SUB_BASIC {
+                    SubscriptionTier::Basic
+                } else {
+                    SubscriptionTier::Pro
+                };
+                sqlx::query(
+                    "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, updated_at) \
+                     VALUES ($1, $2, 0, $3, NOW() + make_interval(days => 30), NOW()) \
+                     ON CONFLICT (user_id) DO UPDATE SET \
+                       tier = $2, ai_seconds_used = 0, ai_seconds_limit = $3, \
+                       expires_at = NOW() + make_interval(days => 30), updated_at = NOW()",
+                )
+                .bind(user_id)
+                .bind(tier.to_string())
+                .bind(tier.ai_seconds_limit())
+                .execute(&mut *tx)
+                .await
+            }
+            crate::subscription::PRODUCT_TOPUP_60 => sqlx::query(
+                "INSERT INTO subscriptions (user_id, tier, topup_seconds_available, last_topup_at, updated_at) \
+                 VALUES ($1, 'free', $2, NOW(), NOW()) \
+                 ON CONFLICT (user_id) DO UPDATE SET \
+                   topup_seconds_available = subscriptions.topup_seconds_available + $2, \
+                   last_topup_at = NOW(), updated_at = NOW()",
+            )
+            .bind(user_id)
+            .bind(crate::subscription::TOPUP_SECONDS)
+            .execute(&mut *tx)
+            .await,
+            _ => return false,
+        };
+        if let Err(e) = result {
+            log::error!("Failed to grant payment entitlement for {}: {}", user_id, e);
+            return false;
+        }
+
+        if let Err(e) = tx.commit().await {
+            log::error!(
+                "Failed to commit payment fulfillment for {}: {}",
+                user_id,
+                e
+            );
+            return false;
+        }
+        true
     }
 
     async fn consume_ai_seconds(&self, user_id: i64, seconds: i32) {
@@ -679,5 +744,75 @@ impl Storage for PostgresStorage {
             Ok(r) => log::info!("Expired {} stale top-up balances", r.rows_affected()),
             Err(e) => log::error!("Failed to expire stale top-ups: {}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PostgresStorage, Storage};
+    use crate::subscription::{PRODUCT_SUB_BASIC, PRODUCT_TOPUP_60, TOPUP_SECONDS};
+    use sqlx::PgPool;
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn duplicate_basic_charge_grants_once(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+
+        assert!(
+            storage
+                .fulfill_payment(1, "basic-charge", "provider-charge", PRODUCT_SUB_BASIC, 50)
+                .await
+        );
+        assert!(
+            !storage
+                .fulfill_payment(1, "basic-charge", "provider-charge", PRODUCT_SUB_BASIC, 50)
+                .await
+        );
+
+        let payment_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payments")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (tier, used, limit, expires_at): (String, i32, i32, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as(
+                "SELECT tier, ai_seconds_used, ai_seconds_limit, expires_at \
+                 FROM subscriptions WHERE user_id = 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(payment_count, 1);
+        assert_eq!((tier.as_str(), used, limit), ("basic", 0, 3600));
+        assert!(expires_at > chrono::Utc::now() + chrono::TimeDelta::days(29));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn duplicate_topup_charge_grants_once(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+
+        assert!(
+            storage
+                .fulfill_payment(2, "topup-charge", "provider-charge", PRODUCT_TOPUP_60, 50)
+                .await
+        );
+        assert!(
+            !storage
+                .fulfill_payment(2, "topup-charge", "provider-charge", PRODUCT_TOPUP_60, 50)
+                .await
+        );
+
+        let payment_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payments")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let topup_seconds: i32 = sqlx::query_scalar(
+            "SELECT topup_seconds_available FROM subscriptions WHERE user_id = 2",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(payment_count, 1);
+        assert_eq!(topup_seconds, TOPUP_SECONDS);
     }
 }
