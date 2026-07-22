@@ -3,8 +3,7 @@ use thiserror::Error;
 
 const MAX_DURATION_SECONDS: f64 = 1800.0;
 pub(crate) const MAX_FILESIZE_BYTES: u64 = 500 * 1024 * 1024; // 500 MiB
-const MAX_VIDEO_PLAYLIST_ITEMS: usize = 5;
-const MAX_IMAGE_PLAYLIST_ITEMS: usize = 20;
+const MAX_PLAYLIST_ITEMS: usize = 20;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum ValidationError {
@@ -27,19 +26,10 @@ pub fn validate_media_metadata(info: &MediaInfo) -> Result<(), ValidationError> 
             return Err(ValidationError::InvalidMetadata);
         }
 
-        let limit = if entries
-            .iter()
-            .all(|entry| entry.media_type.as_deref() == Some("image"))
-        {
-            MAX_IMAGE_PLAYLIST_ITEMS
-        } else {
-            MAX_VIDEO_PLAYLIST_ITEMS
-        };
-
-        if entries.len() > limit {
+        if entries.len() > MAX_PLAYLIST_ITEMS {
             return Err(ValidationError::TooManyItems {
                 found: entries.len(),
-                limit,
+                limit: MAX_PLAYLIST_ITEMS,
             });
         }
 
@@ -151,14 +141,14 @@ mod tests {
         video_entry.media_type = Some("video".to_string());
         video_entry.duration = Some(0.0);
         video_entry.filesize = Some(1);
-        info.entries = Some(vec![video_entry; MAX_VIDEO_PLAYLIST_ITEMS]);
+        info.entries = Some(vec![video_entry; MAX_PLAYLIST_ITEMS]);
         assert!(validate_media_metadata(&info).is_ok());
     }
 
     #[test]
-    fn test_video_playlist_too_many_items() {
+    fn test_playlist_too_many_items() {
         let mut info = create_test_info();
-        let n_items = MAX_VIDEO_PLAYLIST_ITEMS + 1;
+        let n_items = MAX_PLAYLIST_ITEMS + 1;
         let mut video_entry = create_test_info();
         video_entry.media_type = Some("video".to_string());
         video_entry.duration = Some(0.0);
@@ -168,7 +158,7 @@ mod tests {
             validate_media_metadata(&info).unwrap_err(),
             ValidationError::TooManyItems {
                 found: n_items,
-                limit: MAX_VIDEO_PLAYLIST_ITEMS,
+                limit: MAX_PLAYLIST_ITEMS,
             }
         );
     }
@@ -176,8 +166,7 @@ mod tests {
     #[test]
     fn test_valid_image_playlist() {
         let mut info = create_test_info();
-        let n_items = MAX_IMAGE_PLAYLIST_ITEMS;
-        assert!(n_items > MAX_VIDEO_PLAYLIST_ITEMS);
+        let n_items = MAX_PLAYLIST_ITEMS;
 
         let mut image_entry = create_test_info();
         image_entry.media_type = Some("image".to_string());
@@ -190,7 +179,7 @@ mod tests {
     #[test]
     fn test_image_playlist_too_many_items() {
         let mut info = create_test_info();
-        let n_items = MAX_IMAGE_PLAYLIST_ITEMS + 1;
+        let n_items = MAX_PLAYLIST_ITEMS + 1;
         let mut image_entry = create_test_info();
         image_entry.media_type = Some("image".to_string());
         image_entry.filesize = Some(1);
@@ -199,15 +188,15 @@ mod tests {
             validate_media_metadata(&info).unwrap_err(),
             ValidationError::TooManyItems {
                 found: n_items,
-                limit: MAX_IMAGE_PLAYLIST_ITEMS,
+                limit: MAX_PLAYLIST_ITEMS,
             }
         );
     }
 
     #[test]
-    fn test_unknown_playlist_type_uses_video_limit() {
+    fn test_unknown_playlist_type_uses_shared_limit() {
         let mut info = create_test_info();
-        let n_items = MAX_VIDEO_PLAYLIST_ITEMS + 1;
+        let n_items = MAX_PLAYLIST_ITEMS + 1;
         let mut untyped_entry = create_test_info();
         untyped_entry.media_type = None;
         untyped_entry.duration = Some(0.0);
@@ -218,18 +207,18 @@ mod tests {
             validate_media_metadata(&info).unwrap_err(),
             ValidationError::TooManyItems {
                 found: n_items,
-                limit: MAX_VIDEO_PLAYLIST_ITEMS,
+                limit: MAX_PLAYLIST_ITEMS,
             }
         );
     }
 
     #[test]
-    fn test_mixed_playlist_uses_video_limit() {
+    fn test_mixed_playlist_uses_shared_limit() {
         let mut info = create_test_info();
         let mut image_entry = create_test_info();
         image_entry.media_type = Some("image".to_string());
         image_entry.duration = None;
-        let entries = (0..MAX_VIDEO_PLAYLIST_ITEMS + 1)
+        let entries = (0..MAX_PLAYLIST_ITEMS + 1)
             .map(|index| {
                 if index == 0 {
                     create_test_info()
@@ -243,8 +232,8 @@ mod tests {
         assert_eq!(
             validate_media_metadata(&info).unwrap_err(),
             ValidationError::TooManyItems {
-                found: MAX_VIDEO_PLAYLIST_ITEMS + 1,
-                limit: MAX_VIDEO_PLAYLIST_ITEMS,
+                found: MAX_PLAYLIST_ITEMS + 1,
+                limit: MAX_PLAYLIST_ITEMS,
             }
         );
     }
