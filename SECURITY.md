@@ -1,5 +1,13 @@
 # Security Notes
 
+## Runtime boundaries
+
+The Rust application does not contain `yt-dlp` or `ffmpeg`. It sends downloader and audio-extraction requests over a Unix socket to `downloader-worker`. That worker is attached only to the internal downloader network and reaches external media URLs through `egress-proxy`; it cannot directly reach the application, PostgreSQL, or the Internet.
+
+The webhook listener uses teloxide's webhook secret validation. PostgreSQL is reachable only on the internal backend network. Premium callback contexts are owned by the requesting Telegram user, and payment fulfilment, quota reservations, and refunds are persisted transactionally.
+
+All Compose services use the shared `docker-compose-security-baseline` hardening profile. Keep image tags and the baseline under regular review; compose configuration is the source of truth for deployed network and container settings.
+
 ## Cargo Audit
 
 Local pre-push hooks run:

@@ -6,160 +6,125 @@
 [![Made with Rust](https://img.shields.io/badge/made%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-CrabberBot is your friendly and powerful Telegram bot for downloading videos, photos, and galleries from a wide variety of websites. Built with Rust for performance and reliability, it leverages the power of `yt-dlp` to offer extensive platform support.
+CrabberBot is a Telegram bot that downloads videos, photos, and galleries from sites supported by [`yt-dlp`](https://github.com/yt-dlp/yt-dlp).
 
-**➡️ [Try CrabberBot now!](https://t.me/crabberbot) ⬅️**
+**[Try CrabberBot](https://t.me/crabberbot)**
 
----
+## Features
 
-## ✨ Features
+- Downloads supported videos, photos, galleries, and short playlists.
+- Validates duration, file size, and playlist length before downloading.
+- Caches Telegram uploads and audio so repeated requests avoid duplicate work.
+- Offers optional audio extraction, transcription, and summarization through Telegram Stars subscriptions and top-ups.
+- Uses a local Telegram Bot API server for uploads larger than the public Bot API limit.
 
--   **Wide Platform Support**: Downloads media from YouTube (including Shorts), Instagram (Posts, Reels, Stories), TikTok, Twitter/X, and virtually any other site supported by `yt-dlp`.
--   **Handles Galleries & Playlists**: Seamlessly processes multi-image/video posts (like Instagram galleries) and sends them as a clean media group. It can also handle short video playlists.
--   **Intelligent Captioning**: Automatically generates a concise and informative caption, including a link to the original source and the uploader's name, while respecting Telegram's character limits (1024).
--   **Pre-Download Validation**: Protects against abuse and saves time by checking media duration, file size, and playlist length *before* downloading. You'll be notified if the media is too large or long.
--   **High-Performance & Concurrent**: Built in Rust with an asynchronous architecture, it can handle multiple requests efficiently. It also includes a per-user lock to prevent you from accidentally spamming requests.
--   **Large File Support**: Utilizes a local Telegram Bot API server to bypass the standard 50MB upload limit, allowing for larger video downloads.
--   **Privacy & Automatic Cleanup**: Ensures link identifiers are removed before downloading and sharing, and temporary media files are securely and automatically deleted from the server after being sent.
+## Commands
 
-## 🚀 How to Use
+- `/start` — usage guide
+- `/version` — running version
+- `/subscribe` — plans and top-ups
+- `/terms` — Terms of Service
+- `/support <message>` — contact support
+- `/refundme` — request a refund for the most recent eligible purchase
 
-Using CrabberBot is as simple as it gets:
+## Architecture
 
-1.  **Open a chat with the bot**: [@crabberbot](https://t.me/crabberbot)
-2.  **Send a link**: Paste the URL of the video, photo, or post you want to download.
-3.  **Receive your media**: The bot will process the link, download the content, and send it back to you directly in the chat!
+Docker Compose runs the following services:
 
-### Supported Commands
+| Service | Responsibility | Network access |
+| --- | --- | --- |
+| `crabberbot` | Rust webhook application, PostgreSQL access, Telegram uploads, and premium APIs | `backend`, `internet` |
+| `downloader-worker` | `yt-dlp`, `ffmpeg`, and `ffprobe` behind a Unix socket | `downloader` only |
+| `egress-proxy` | The worker's sole Internet path | `downloader`, `internet` |
+| `telegram-bot-api` | Local Telegram Bot API server for large uploads | `backend`, `internet` |
+| `cloudflared` | Cloudflare Tunnel for Telegram webhooks | `backend`, `internet` |
+| `postgres` | Media cache, requests, billing, and callback state | `backend` only |
 
--   `/start` - Displays a welcome message and a guide on how to use the bot.
--   `/version` - Shows the current running version of the bot.
+The app and downloader communicate through `/downloader/downloader.sock`; the app image contains no `yt-dlp` or `ffmpeg` fallback. The worker passes all `yt-dlp` traffic through `egress-proxy`, so it cannot directly reach either the backend network or the Internet. The proxy is intentionally deployed as part of the stack, not as an optional application setting.
 
-## 🏗️ Technical Architecture
+The app exposes `GET /healthz`, returning `204` only when PostgreSQL accepts `SELECT 1`; Docker uses it as the application health check.
 
-![CrabberBot architecture diagram](architecture.png)
+## Premium features
 
-The bot is composed of several services that work together, all managed by Docker Compose.
+After a supported video download, the bot can offer:
 
-1.  **`crabberbot` (Rust Application)**: Handles Telegram, storage, validation, and uploads. It contains neither `yt-dlp` nor `ffmpeg` and has no local downloader fallback.
-2.  **`downloader-worker`**: Runs `yt-dlp` and `ffmpeg` behind a Unix socket. It shares only the downloads and socket volumes with the app.
-3.  **`egress-proxy`**: The worker's only network egress, using Smokescreen. The backend network is internal; the worker cannot reach it.
-3.  **`telegram-bot-api` (Local Server)**: A local instance of the Telegram Bot API. **This is crucial for uploading files larger than 50MB**. By running our own API server, we bypass the standard file size limit imposed on bots using Telegram's public API.
-4.  **`cloudflared` (Webhook Tunnel)**: Creates a secure tunnel from a public Cloudflare URL to the bot running on your local machine. This allows Telegram's servers to send webhook updates to the bot without you needing to configure firewalls or port forwarding.
+- **Extract Audio** — cached MP3 produced by the worker.
+- **Transcribe** — Deepgram transcription of the cached audio.
+- **Summarize** — Deepgram transcription followed by Gemini summarization.
 
----
+The public products are Basic (50 Stars/month, 60 AI Video Minutes), Pro (150 Stars/month, 200 AI Video Minutes plus unlimited audio extraction), and a 60-minute top-up (50 Stars). AI Video Minutes are charged by video duration. Top-ups work without a subscription and expire 365 days after the latest top-up purchase. The bot's `/terms` command is the authoritative customer-facing policy.
 
-## 🛠️ Self-Hosting Guide for Developers
+Premium callback contexts are bound to the Telegram user who requested the download. Quota reservations, payment fulfilment, and refunds are persisted in PostgreSQL to prevent duplicate charges or delivery.
 
-You can easily run your own instance of CrabberBot using Docker and Docker Compose. This is for users who want to run a private instance or contribute to development.
+## Self-hosting
 
-### 1. Prerequisites
+### Prerequisites
 
--   **Docker** and **Docker Compose**
--   **Telegram Bot Token**: Get one from [@BotFather](https://t.me/BotFather) on Telegram.
--   **Telegram API Credentials**: Get `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org). This is for the local API server to handle large files.
--   **Cloudflare Account** and **Tunnel Token**: To expose your local bot to the internet for Telegram Webhooks. You can get a token from the Cloudflare Zero Trust dashboard. ### 1. Clone the Repository
+- Docker Compose
+- Telegram bot token from [@BotFather](https://t.me/BotFather)
+- Telegram API ID and hash from [my.telegram.org](https://my.telegram.org)
+- Cloudflare Tunnel token and public webhook URL
+
+Clone the repository:
+
 ```bash
 git clone https://github.com/Enucatl/crabberbot.git
 cd crabberbot
 ```
 
-### 2. Configure Environment Variables
+Create `secrets/tunnel_token` containing the Cloudflare Tunnel token, then create `.env`:
 
-Create a `.env` file in the root of the project. You can copy `docker-compose.override.yml` for local build arguments, but you'll need to create the main `.env` for secrets used by `docker-compose.yml`.
-
-Example `.env` file:
 ```dotenv
-# Your Telegram Bot Token from @BotFather
 TELOXIDE_TOKEN=123456:ABC-DEF1234567890
-
-# The public URL for Telegram webhooks (provided by your Cloudflare Tunnel)
-# Example: https://your-tunnel-name.trycloudflare.com
-WEBHOOK_URL=https://your-tunnel-url.trycloudflare.com
-
-# Your Telegram App credentials from my.telegram.org for the local API server
+WEBHOOK_URL=https://your-tunnel.example.com
+POSTGRES_PASSWORD=change-me
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=your_api_hash_here
 
-# Your Cloudflare Tunnel Token
-TUNNEL_TOKEN=your_tunnel_token_here
-
-# Optional: Set verbosity for the local Telegram API server (0-4)
+# Optional
 TELEGRAM_VERBOSITY=1
-
-# Optional: Maximum simultaneous worker yt-dlp subprocesses (default: 4)
+DEEPGRAM_API_KEY=
+GEMINI_API_KEY=
+OWNER_CHAT_ID=
 MAX_YT_DLP_SESSIONS=4
 ```
 
-### 3. Run the Stack
+`DEEPGRAM_API_KEY` and `GEMINI_API_KEY` are required only for transcription and summarization. `OWNER_CHAT_ID` enables owner-only grants, support replies, and refunds.
 
-Build and test locally:
-```bash
-CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/\./') cargo build
-CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/\./') cargo test
+Start the stack:
 
-With your `.env` file configured, start the entire application stack with a single command:
-```
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
-This will:
--   Pull the pre-built images for the bot, API server, and tunnel.
--   Start all three services.
+### Development
 
-Your bot instance is now live!
+Run formatting and the test suite. SQLx storage tests need a disposable PostgreSQL database:
 
-### 4. Local Development & Testing
+```bash
+cargo fmt --all --check
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/crabberbot cargo test --verbose
+```
 
-The provided `docker-compose.override.yml` makes local development easy.
+For a local Compose build, use the supplied override and test environment:
 
--   **To install local Git hooks**:
-    ```bash
-    cargo install cargo-audit --locked
-    uv tool install pre-commit
-    pre-commit install
-    pre-commit install --hook-type pre-push
-    ```
-    The pre-commit hook runs `cargo fmt --all`; the pre-push hook runs `cargo audit --deny warnings` with narrow advisory ignores. See [SECURITY.md](SECURITY.md) for the ignored advisory rationale.
+```bash
+CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/./') \
+  docker compose --env-file .env.test up --build
+```
 
--   **To build and run a local version of the bot (instead of pulling from GHCR)**:
-    ```bash
-    CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/\./') docker compose --env-file .env.test up --build
-    ```
--   **To run the test suite inside a Docker container**:
-    ```bash
-    # This uses the 'test' profile defined in the override file
-    CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/\./') docker compose --profile test run --build --rm test-runner
-    ```
-
-### 5. Rebuilding yt-dlp
-
-`yt-dlp` is built from source into the worker image only. Docker caches this layer, so it is **not** rebuilt on every `docker compose up --build` unless something changes.
-
-To rebuild yt-dlp only when there is actually a new upstream commit, resolve the current remote HEAD before building:
+The worker builds `yt-dlp` from source. To refresh that Docker layer only when upstream changes, provide the current commit hash:
 
 ```bash
 YT_DLP_COMMIT_HASH=$(git ls-remote https://github.com/Enucatl/yt-dlp.git refs/heads/master | cut -f1) \
-CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/\./') \
-docker compose --profile test run --build --rm test-runner
+  CARGO_PACKAGE_VERSION=$(git describe --long | sed 's/-/./') \
+  docker compose build downloader-worker
 ```
 
-Docker uses `YT_DLP_COMMIT_HASH` as part of the layer cache key. If the hash is unchanged, the cached layer is reused. If a new commit has been pushed to the upstream repo, the yt-dlp build step is invalidated and yt-dlp is rebuilt from the new source.
+## Security
 
-If `YT_DLP_COMMIT_HASH` is not set, the build falls back to `master`.
+The Compose services extend the shared [docker-compose-security-baseline](https://github.com/Enucatl/docker-compose-security-baseline) for non-root execution, reduced capabilities, no-new-privileges, and memory, swap, and PID limits. See [SECURITY.md](SECURITY.md) for dependency-audit exceptions.
 
+## Contributing
 
-## ❤️ Contributing
-
-Contributions are welcome! If you have a feature request, bug report, or pull request, please feel free to open an issue or submit a PR.
-
-1.  Fork the repository.
-2.  Create a new feature branch (`git checkout -b feature/your-feature`).
-3.  Commit your changes (`git commit -am 'Add some feature'`).
-4.  Push to the branch (`git push origin feature/your-feature`).
-5.  Open a new Pull Request.
-
-## Security baseline
-
-This compose project uses the shared [docker-compose-security-baseline](https://github.com/Enucatl/docker-compose-security-baseline) for common container hardening defaults, including capabilities, no-new-privileges, memory/swap, and PID limits.
+Contributions are welcome. Please format the code and run the test suite before opening a pull request.
