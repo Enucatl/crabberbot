@@ -62,16 +62,33 @@ impl GeminiSummarizer {
         }
     }
 
+    fn generate_content_url(&self) -> String {
+        format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            self.model
+        )
+    }
+
+    fn generate_content_request(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> reqwest::RequestBuilder {
+        self.client
+            .post(url)
+            .timeout(Duration::from_secs(45))
+            .header("Content-Type", "application/json")
+            .header("x-goog-api-key", &self.api_key)
+            .json(body)
+    }
+
     /// Returns `(text, prompt_tokens, output_tokens)`.
     async fn call_gemini(&self, prompt: &str) -> Result<(String, u64, u64), SummarizationError> {
         self.cooldown
             .check()
             .await
             .map_err(SummarizationError::ApiError)?;
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, self.api_key
-        );
+        let url = self.generate_content_url();
 
         let body = serde_json::json!({
             "contents": [{"parts": [{"text": prompt}]}],
@@ -89,14 +106,7 @@ impl GeminiSummarizer {
         let response_result = retry_async(
             &self.retry_policy,
             || async {
-                let response = self
-                    .client
-                    .post(&url)
-                    .timeout(Duration::from_secs(45))
-                    .header("Content-Type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await?;
+                let response = self.generate_content_request(&url, &body).send().await?;
                 let status = response.status();
                 if retryable_status(status) {
                     return Err(SummarizationError::RetryableApi {
@@ -162,6 +172,57 @@ impl GeminiSummarizer {
             .unwrap_or(0);
 
         Ok((result, prompt_tokens, output_tokens))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use super::*;
+
+    const SENTINEL_API_KEY: &str = "sentinel-gemini-api-key";
+
+    #[test]
+    fn gemini_request_sends_api_key_in_header() {
+        let summarizer = GeminiSummarizer::new(
+            reqwest::Client::new(),
+            SENTINEL_API_KEY.to_string(),
+            "test-model".to_string(),
+        );
+        let url = summarizer.generate_content_url();
+        let request = summarizer
+            .generate_content_request(&url, &serde_json::json!({}))
+            .build()
+            .unwrap();
+
+        assert!(request.url().query_pairs().all(|(name, _)| name != "key"));
+        assert!(!request.url().as_str().contains(SENTINEL_API_KEY));
+        assert_eq!(
+            request.headers().get("x-goog-api-key").unwrap(),
+            SENTINEL_API_KEY
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_connection_error_does_not_expose_api_key() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address: SocketAddr = listener.local_addr().unwrap();
+        drop(listener);
+        let client = reqwest::Client::builder()
+            .resolve("generativelanguage.googleapis.com", address)
+            .build()
+            .unwrap();
+        let mut summarizer = GeminiSummarizer::new(
+            client,
+            SENTINEL_API_KEY.to_string(),
+            "test-model".to_string(),
+        );
+        summarizer.retry_policy.max_attempts = 1;
+
+        let error = summarizer.call_gemini("test").await.unwrap_err();
+
+        assert!(!error.to_string().contains(SENTINEL_API_KEY));
     }
 }
 
