@@ -125,11 +125,12 @@ async fn handle_url(
     url: Url,
 ) -> ResponseResult<()> {
     let chat_id = message.chat.id;
+    let user_id = message.from.as_ref().map(|user| user.id.0 as i64);
     log::info!(
         "request_context action=url update_message_id={} chat_id={} user_id={:?} url={}",
         message.id,
         chat_id,
-        message.from.as_ref().map(|user| user.id.0),
+        user_id,
         url
     );
 
@@ -195,8 +196,8 @@ async fn handle_url(
     api.set_message_reaction(chat_id, message.id, None).await?;
 
     // Send premium buttons if we have a download context with video + cached audio
-    if let Some(ctx) = download_ctx {
-        maybe_send_premium_buttons(chat_id, ctx, &*api, &*storage).await;
+    if let (Some(ctx), Some(user_id)) = (download_ctx, user_id) {
+        maybe_send_premium_buttons(chat_id, user_id, ctx, &*api, &*storage).await;
     }
 
     Ok(())

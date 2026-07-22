@@ -528,11 +528,12 @@ impl Storage for PostgresStorage {
 
     async fn store_callback_context(&self, ctx: &CallbackContext) -> i32 {
         let result: Result<(i32,), _> = sqlx::query_as(
-            "INSERT INTO callback_contexts (source_url, chat_id, has_video, media_duration_secs, audio_cache_path) \
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            "INSERT INTO callback_contexts (source_url, chat_id, user_id, has_video, media_duration_secs, audio_cache_path) \
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         )
         .bind(&ctx.source_url)
         .bind(ctx.chat_id)
+        .bind(ctx.user_id)
         .bind(ctx.has_video)
         .bind(ctx.media_duration_secs)
         .bind(&ctx.audio_cache_path)
@@ -552,13 +553,14 @@ impl Storage for PostgresStorage {
         let row: Option<(
             String,
             i64,
+            i64,
             bool,
             Option<i32>,
             Option<String>,
             Option<String>,
             Option<String>,
         )> = sqlx::query_as(
-            "SELECT source_url, chat_id, has_video, media_duration_secs, audio_cache_path, \
+            "SELECT source_url, chat_id, user_id, has_video, media_duration_secs, audio_cache_path, \
              transcript, transcript_language \
              FROM callback_contexts WHERE id = $1",
         )
@@ -576,6 +578,7 @@ impl Storage for PostgresStorage {
             |(
                 source_url,
                 chat_id,
+                user_id,
                 has_video,
                 media_duration_secs,
                 audio_cache_path,
@@ -585,6 +588,7 @@ impl Storage for PostgresStorage {
                 CallbackContext {
                     source_url,
                     chat_id,
+                    user_id,
                     has_video,
                     media_duration_secs,
                     audio_cache_path,

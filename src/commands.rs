@@ -820,6 +820,10 @@ pub async fn handle_callback_query(
         }
     };
 
+    if ctx.chat_id != chat_id.0 || ctx.user_id != user_id {
+        return Ok(());
+    }
+
     // Check audio cache file exists
     let audio_path = match &ctx.audio_cache_path {
         Some(p) => PathBuf::from(p),
@@ -1341,6 +1345,30 @@ mod tests {
         })
     }
 
+    fn callback_query(chat_id: i64, user_id: u64) -> CallbackQuery {
+        serde_json::from_value(serde_json::json!({
+            "id": "callback_1",
+            "from": {"id": user_id, "is_bot": false, "first_name": "Test"},
+            "chat_instance": "instance_1",
+            "data": "audio:42",
+            "message": base_message_json(chat_id, user_id)
+        }))
+        .expect("valid callback query JSON")
+    }
+
+    fn callback_context(chat_id: i64, user_id: i64) -> CallbackContext {
+        CallbackContext {
+            source_url: "https://example.com/video".to_string(),
+            chat_id,
+            user_id,
+            has_video: true,
+            media_duration_secs: Some(60),
+            audio_cache_path: None,
+            transcript: None,
+            transcript_language: None,
+        }
+    }
+
     fn active_pro_sub() -> SubscriptionInfo {
         SubscriptionInfo {
             tier: SubscriptionTier::Pro,
@@ -1350,6 +1378,89 @@ mod tests {
             last_topup_at: None,
             expires_at: Some(chrono::Utc::now() + chrono::TimeDelta::days(30)),
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // handle_callback_query
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_callback_query_valid_context_continues() {
+        let mut api = MockTelegramApi::new();
+        let mut storage = MockStorage::new();
+        api.expect_answer_callback_query()
+            .times(1)
+            .returning(|_, _| Ok(()));
+        api.expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        storage
+            .expect_get_callback_context()
+            .withf(|id| *id == 42)
+            .times(1)
+            .returning(|_| Some(callback_context(100, 200)));
+
+        handle_callback_query(
+            teloxide::Bot::new("fake_token"),
+            Arc::new(api),
+            Arc::new(storage),
+            Arc::new(ConcurrencyLimiter::new()),
+            Arc::new(MockTranscriber::new()),
+            Arc::new(MockSummarizer::new()),
+            callback_query(100, 200),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_callback_query_wrong_chat_stops_after_acknowledgement() {
+        let mut api = MockTelegramApi::new();
+        let mut storage = MockStorage::new();
+        api.expect_answer_callback_query()
+            .times(1)
+            .returning(|_, _| Ok(()));
+        storage
+            .expect_get_callback_context()
+            .times(1)
+            .returning(|_| Some(callback_context(101, 200)));
+
+        handle_callback_query(
+            teloxide::Bot::new("fake_token"),
+            Arc::new(api),
+            Arc::new(storage),
+            Arc::new(ConcurrencyLimiter::new()),
+            Arc::new(MockTranscriber::new()),
+            Arc::new(MockSummarizer::new()),
+            callback_query(100, 200),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_callback_query_wrong_user_stops_after_acknowledgement() {
+        let mut api = MockTelegramApi::new();
+        let mut storage = MockStorage::new();
+        api.expect_answer_callback_query()
+            .times(1)
+            .returning(|_, _| Ok(()));
+        storage
+            .expect_get_callback_context()
+            .times(1)
+            .returning(|_| Some(callback_context(100, 201)));
+
+        handle_callback_query(
+            teloxide::Bot::new("fake_token"),
+            Arc::new(api),
+            Arc::new(storage),
+            Arc::new(ConcurrencyLimiter::new()),
+            Arc::new(MockTranscriber::new()),
+            Arc::new(MockSummarizer::new()),
+            callback_query(100, 200),
+        )
+        .await
+        .unwrap();
     }
 
     // ---------------------------------------------------------------------------
@@ -1606,6 +1717,7 @@ mod tests {
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
             chat_id: 100,
+            user_id: 200,
             has_video: true,
             media_duration_secs: Some(300), // 5 minutes, no quota
             audio_cache_path: Some("/tmp/fake_audio.mp3".to_string()),
@@ -1652,6 +1764,7 @@ mod tests {
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
             chat_id: 100,
+            user_id: 200,
             has_video: true,
             media_duration_secs: Some(600), // 10 minutes — over monthly quota
             audio_cache_path: Some(path),
@@ -1762,6 +1875,7 @@ mod tests {
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
             chat_id: 100,
+            user_id: 200,
             has_video: true,
             media_duration_secs: Some(600),
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
@@ -1830,6 +1944,7 @@ mod tests {
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
             chat_id: 100,
+            user_id: 200,
             has_video: true,
             media_duration_secs: Some(600),
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
@@ -1871,6 +1986,7 @@ mod tests {
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
             chat_id: 100,
+            user_id: 200,
             has_video: true,
             media_duration_secs: Some(600),
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
@@ -1912,6 +2028,7 @@ mod tests {
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
             chat_id: 100,
+            user_id: 200,
             has_video: true,
             media_duration_secs: Some(MAX_PREMIUM_FILE_DURATION_SECS + 1),
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
@@ -2001,6 +2118,7 @@ mod tests {
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
             chat_id: 100,
+            user_id: 200,
             has_video: true,
             media_duration_secs: Some(600),
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
@@ -2068,6 +2186,7 @@ mod tests {
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
             chat_id: 100,
+            user_id: 200,
             has_video: true,
             media_duration_secs: Some(600),
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),

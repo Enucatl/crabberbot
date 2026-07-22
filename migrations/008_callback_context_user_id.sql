@@ -1,0 +1,1 @@
+ALTER TABLE callback_contexts ADD COLUMN user_id BIGINT NOT NULL DEFAULT 0;

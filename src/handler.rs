@@ -33,6 +33,7 @@ fn telegram_album_chunks<T>(items: &[T]) -> impl Iterator<Item = &[T]> {
 pub struct CallbackContext {
     pub source_url: String,
     pub chat_id: i64,
+    pub user_id: i64,
     pub has_video: bool,
     pub media_duration_secs: Option<i32>,
     pub audio_cache_path: Option<String>,
@@ -756,6 +757,7 @@ pub async fn send_long_text(
 /// Store a callback context and attach premium action buttons to the sent video message.
 pub async fn maybe_send_premium_buttons(
     chat_id: ChatId,
+    user_id: i64,
     ctx: DownloadContext,
     api: &dyn TelegramApi,
     storage: &dyn Storage,
@@ -775,6 +777,7 @@ pub async fn maybe_send_premium_buttons(
     let callback_ctx = CallbackContext {
         source_url: ctx.source_url.to_string(),
         chat_id: chat_id.0,
+        user_id,
         has_video: ctx.has_video,
         media_duration_secs: ctx.media_duration_secs,
         audio_cache_path: ctx
@@ -2021,7 +2024,7 @@ mod tests {
         let storage = MockStorage::new();
         let ctx = make_download_ctx(false, Some(PathBuf::from("/tmp/audio.mp3")));
 
-        maybe_send_premium_buttons(ChatId(1), ctx, &api, &storage).await;
+        maybe_send_premium_buttons(ChatId(1), 2, ctx, &api, &storage).await;
     }
 
     #[tokio::test]
@@ -2030,7 +2033,7 @@ mod tests {
         let storage = MockStorage::new();
         let ctx = make_download_ctx(true, None);
 
-        maybe_send_premium_buttons(ChatId(1), ctx, &api, &storage).await;
+        maybe_send_premium_buttons(ChatId(1), 2, ctx, &api, &storage).await;
     }
 
     #[tokio::test]
@@ -2043,7 +2046,7 @@ mod tests {
             .returning(|_| 0);
 
         let ctx = make_download_ctx(true, Some(PathBuf::from("/tmp/audio.mp3")));
-        maybe_send_premium_buttons(ChatId(1), ctx, &api, &storage).await;
+        maybe_send_premium_buttons(ChatId(1), 2, ctx, &api, &storage).await;
     }
 
     #[tokio::test]
@@ -2052,6 +2055,7 @@ mod tests {
         storage
             .expect_store_callback_context()
             .times(1)
+            .withf(|ctx| ctx.chat_id == 1 && ctx.user_id == 2)
             .returning(|_| 42);
 
         let mut api = MockTelegramApi::new();
@@ -2079,6 +2083,6 @@ mod tests {
             .returning(|_, _, _| Ok(()));
 
         let ctx = make_download_ctx(true, Some(PathBuf::from("/tmp/audio.mp3")));
-        maybe_send_premium_buttons(ChatId(1), ctx, &api, &storage).await;
+        maybe_send_premium_buttons(ChatId(1), 2, ctx, &api, &storage).await;
     }
 }
