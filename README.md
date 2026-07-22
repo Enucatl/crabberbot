@@ -41,8 +41,9 @@ Using CrabberBot is as simple as it gets:
 
 The bot is composed of several services that work together, all managed by Docker Compose.
 
-1.  **`crabberbot` (Rust Application)**: The core of the bot. It's written in Rust using the `teloxide` framework. It handles incoming messages, parses URLs, interacts with `yt-dlp`, validates media, and sends files back to the user.
-2.  **`yt-dlp`**: The workhorse for downloading. It's built from source within the `Dockerfile` to ensure the latest features and fixes. The bot executes `yt-dlp` as a command-line process.
+1.  **`crabberbot` (Rust Application)**: Handles Telegram, storage, validation, and uploads. It contains neither `yt-dlp` nor `ffmpeg` and has no local downloader fallback.
+2.  **`downloader-worker`**: Runs `yt-dlp` and `ffmpeg` behind a Unix socket. It shares only the downloads and socket volumes with the app.
+3.  **`egress-proxy`**: The worker's only network egress, using Smokescreen. The backend network is internal; the worker cannot reach it.
 3.  **`telegram-bot-api` (Local Server)**: A local instance of the Telegram Bot API. **This is crucial for uploading files larger than 50MB**. By running our own API server, we bypass the standard file size limit imposed on bots using Telegram's public API.
 4.  **`cloudflared` (Webhook Tunnel)**: Creates a secure tunnel from a public Cloudflare URL to the bot running on your local machine. This allows Telegram's servers to send webhook updates to the bot without you needing to configure firewalls or port forwarding.
 
@@ -86,7 +87,7 @@ TUNNEL_TOKEN=your_tunnel_token_here
 # Optional: Set verbosity for the local Telegram API server (0-4)
 TELEGRAM_VERBOSITY=1
 
-# Optional: Maximum simultaneous yt-dlp subprocesses (default: 4)
+# Optional: Maximum simultaneous worker yt-dlp subprocesses (default: 4)
 MAX_YT_DLP_SESSIONS=4
 ```
 
@@ -134,7 +135,7 @@ The provided `docker-compose.override.yml` makes local development easy.
 
 ### 5. Rebuilding yt-dlp
 
-`yt-dlp` is built from source inside the Docker image. Docker caches this layer, so it is **not** rebuilt on every `docker compose up --build` unless something changes.
+`yt-dlp` is built from source into the worker image only. Docker caches this layer, so it is **not** rebuilt on every `docker compose up --build` unless something changes.
 
 To rebuild yt-dlp only when there is actually a new upstream commit, resolve the current remote HEAD before building:
 

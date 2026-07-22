@@ -12,14 +12,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: app
       args:
         *common_build_args
+
+  downloader-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: downloader-worker
+      args: *common_build_args
 
   # This service will ONLY be activated when the 'test' profile is enabled.
   test-runner:
     profiles: ["test"] # Assign this service to the 'test' profile
     networks:
-      - crabberbot
+      - backend
     build:
       context: .
       dockerfile: Dockerfile

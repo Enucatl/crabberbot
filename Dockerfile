@@ -1,91 +1,48 @@
-# ---- Build Stage: Compile the application and build yt-dlp ----
 FROM rust:1-slim-trixie AS builder
 
-# Install system dependencies for Rust compilation and for building yt-dlp
-# We now need 'make' in addition to 'git'.
-RUN apt update && apt install -y \
-    build-essential \
-    git \
-    libssl-dev \
-    make \
-    pkg-config \
-    python3 \
-    zip \
+RUN apt update && apt install -y build-essential git libssl-dev make pkg-config python3 zip \
     && rm -rf /var/lib/apt/lists/*
 
-# Build yt-dlp from source.
-# We do a shallow clone, build the binary, move it to a standard location,
-# and clean up the source code to keep this layer smaller.
 ARG YT_DLP_REPO_URL="https://github.com/Enucatl/yt-dlp.git"
 ARG YT_DLP_COMMIT_HASH="master"
-RUN set -eux; \
-    git init /tmp/yt-dlp; \
-    cd /tmp/yt-dlp; \
-    git remote add origin "${YT_DLP_REPO_URL}"; \
-    git fetch --depth 1 origin "${YT_DLP_COMMIT_HASH}"; \
-    git checkout --detach FETCH_HEAD; \
-    git rev-parse HEAD; \
-    make yt-dlp && \
-    mv yt-dlp /usr/local/bin/yt-dlp && \
-    rm -rf /tmp/yt-dlp
+RUN set -eux; git init /tmp/yt-dlp; cd /tmp/yt-dlp; git remote add origin "${YT_DLP_REPO_URL}"; \
+    git fetch --depth 1 origin "${YT_DLP_COMMIT_HASH}"; git checkout --detach FETCH_HEAD; \
+    make yt-dlp; mv yt-dlp /usr/local/bin/yt-dlp; rm -rf /tmp/yt-dlp
 
 WORKDIR /usr/src/crabberbot
-
-# Copy manifests and pre-build dependencies to leverage Docker layer caching.
 COPY Cargo.toml Cargo.lock ./
-# Create a dummy project to build only dependencies.
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release && cargo test --no-run
-RUN rm -rf src target/release/deps/crabberbot*
-
-# Copy the actual source code and build files
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src target/release/deps/crabberbot*
 COPY src ./src
 COPY build.rs ./build.rs
 COPY migrations ./migrations
-
 ARG CARGO_PACKAGE_VERSION
 ENV CARGO_PACKAGE_VERSION=${CARGO_PACKAGE_VERSION}
+RUN cargo build --release && cargo test --no-run
 
-# Build the application
-RUN echo "building release ${CARGO_PACKAGE_VERSION}" && \
-    cargo build --release && \
-    cargo test --no-run
-
-
-# ---- Runtime Stage: Create the final, smaller image ----
-FROM python:3.14-slim-trixie AS runtime
-
-# The yt-dlp binary is a zipapp that requires the python3 interpreter to run.
-# Use the fixed 0.15.x line for curl_cffi to avoid CVE-2026-33752.
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates \
-    ffmpeg \
+FROM debian:trixie-slim AS app
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir "curl_cffi>=0.15,<0.16" requests brotli
-
-# Create a non-root user for security best practices
-RUN useradd --create-home --shell /bin/bash appuser \
-  && mkdir /downloads \
-  && chown -R appuser:appuser /downloads
-
+    && useradd --uid 1000 --create-home --shell /bin/bash appuser \
+    && mkdir /downloads /downloader && chown appuser:appuser /downloads /downloader
 USER appuser
 WORKDIR /home/appuser
-
-# Copy the compiled Rust binary from the builder stage
 COPY --from=builder /usr/src/crabberbot/target/release/crabberbot .
-
-# Copy the yt-dlp binary that was built in the builder stage
-COPY --from=builder /usr/local/bin/yt-dlp /usr/local/bin/
-
-# Expose the port the bot listens on for webhooks
 EXPOSE 8080
-
-# Mount point for downloaded media
-VOLUME ["/downloads"]
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()"
-
-# Set the command to run the bot
+VOLUME ["/downloads", "/downloader"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["curl", "-fsS", "http://127.0.0.1:8080/healthz"]
 CMD ["./crabberbot"]
+
+FROM python:3.14-slim-trixie AS downloader-worker
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir "curl_cffi>=0.15,<0.16" requests brotli \
+    && useradd --uid 1000 --create-home --shell /bin/bash appuser \
+    && mkdir /downloads /downloader && chown appuser:appuser /downloads /downloader
+USER appuser
+WORKDIR /home/appuser
+COPY --from=builder /usr/src/crabberbot/target/release/downloader-worker .
+COPY --from=builder /usr/local/bin/yt-dlp /usr/local/bin/
+VOLUME ["/downloads", "/downloader"]
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 CMD ["test", "-S", "/downloader/downloader.sock"]
+CMD ["./downloader-worker"]

@@ -21,9 +21,9 @@ use crabberbot::commands::{
 };
 use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::config::AppConfig;
-use crabberbot::downloader::{Downloader, YtDlpDownloader, cleanup_orphaned_downloads};
+use crabberbot::downloader::{Downloader, SocketDownloader};
 use crabberbot::handler::{maybe_send_premium_buttons, process_download_request};
-use crabberbot::premium::audio_extractor::{AudioExtractor, FfmpegAudioExtractor};
+use crabberbot::premium::audio_extractor::{AudioExtractor, SocketAudioExtractor};
 use crabberbot::premium::summarizer::{GeminiSummarizer, Summarizer};
 use crabberbot::premium::transcriber::{DeepgramTranscriber, Transcriber};
 use crabberbot::storage::{PostgresStorage, Storage};
@@ -292,14 +292,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.postgres_acquire_timeout
     );
 
-    let removed_orphans = cleanup_orphaned_downloads(&config.downloads_dir).await;
-    if removed_orphans > 0 {
-        log::info!(
-            "Startup cleanup removed {} orphaned download artifact(s)",
-            removed_orphans
-        );
-    }
-
     let pool = PgPoolOptions::new()
         .max_connections(config.postgres_max_connections)
         .min_connections(config.postgres_min_connections)
@@ -330,19 +322,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
     let bot = Bot::from_env_with_client(client.clone());
 
-    let downloader: Arc<dyn Downloader> = Arc::new(
-        YtDlpDownloader::new(
-            config.yt_dlp_path.clone(),
-            config.downloads_dir.clone(),
-            config.max_yt_dlp_sessions,
-        )
-        .await,
-    );
+    let downloader: Arc<dyn Downloader> =
+        Arc::new(SocketDownloader::new(config.downloader_socket.clone()));
     let api: Arc<dyn TelegramApi> = Arc::new(TeloxideApi::new(bot.clone()));
     let download_limiter = Arc::new(ConcurrencyLimiter::new());
     let premium_limiter = Arc::new(ConcurrencyLimiter::new());
     let audio_extractor: Arc<dyn AudioExtractor> =
-        Arc::new(FfmpegAudioExtractor::new(3, config.audio_cache_dir.clone()));
+        Arc::new(SocketAudioExtractor::new(config.downloader_socket.clone()));
     let transcriber: Arc<dyn Transcriber> = Arc::new(DeepgramTranscriber::new(
         client.clone(),
         config.deepgram_api_key.clone(),

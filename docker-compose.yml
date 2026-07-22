@@ -5,8 +5,7 @@ services:
       service: hardened-medium
     image: ghcr.io/enucatl/crabberbot:latest
     cpu_shares: 512
-    networks:
-      - crabberbot
+    networks: [backend, internet]
     environment:
       - RUST_LOG=info,crabberbot=info
       - TELOXIDE_API_URL=http://telegram-bot-api:8081
@@ -18,34 +17,59 @@ services:
       - POSTGRES_ACQUIRE_TIMEOUT_SECS=5
       - DEEPGRAM_API_KEY
       - GEMINI_API_KEY
-      - MAX_YT_DLP_SESSIONS=${MAX_YT_DLP_SESSIONS:-4}
-      - DOWNLOADS_DIR=/downloads
-      - AUDIO_CACHE_DIR=/downloads/audio_cache
-      - TMPDIR=/downloads/tmp
-      - XDG_CACHE_HOME=/downloads/.cache
+      - DOWNLOADER_SOCKET=/downloader/downloader.sock
       - GEMINI_MODEL=gemini-3.1-flash-lite
       - OWNER_CHAT_ID
     depends_on:
+      downloader-worker:
+        condition: service_healthy
       telegram-bot-api:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    labels:
-      - "checkmk_monitor=true"
+    labels: ["checkmk_monitor=true"]
     volumes:
       - downloads:/downloads
+      - downloader_socket:/downloader:ro
+
+  downloader-worker:
+    extends:
+      file: ../compose-security-baseline/hardening.yml
+      service: hardened-medium
+    image: ghcr.io/enucatl/crabberbot-worker:latest
+    command: ["./downloader-worker"]
+    networks: [downloader]
+    environment:
+      - RUST_LOG=info,crabberbot=info
+      - DOWNLOADER_SOCKET=/downloader/downloader.sock
+      - DOWNLOADS_DIR=/downloads
+      - AUDIO_CACHE_DIR=/downloads/audio_cache
+      - MAX_YT_DLP_SESSIONS=${MAX_YT_DLP_SESSIONS:-4}
+      - TMPDIR=/downloads/tmp
+      - XDG_CACHE_HOME=/downloads/.cache
+    depends_on:
+      egress-proxy:
+        condition: service_started
+    volumes:
+      - downloads:/downloads
+      - downloader_socket:/downloader
+
+  egress-proxy:
+    extends:
+      file: ../compose-security-baseline/hardening.yml
+      service: hardened-small
+    image: pretix/smokescreen:latest
+    command: ["--listen-port", "3128"]
+    networks: [downloader, internet]
 
   cloudflared:
     extends:
       file: ../compose-security-baseline/hardening.yml
       service: hardened-small
     image: cloudflare/cloudflared:latest
-    networks:
-      - crabberbot
-    environment:
-      - TUNNEL_TOKEN_FILE=/run/secrets/tunnel_token
-    secrets:
-      - tunnel_token
+    networks: [backend, internet]
+    environment: [TUNNEL_TOKEN_FILE=/run/secrets/tunnel_token]
+    secrets: [tunnel_token]
     command: tunnel run
 
   telegram-bot-api:
@@ -53,12 +77,9 @@ services:
       file: ../compose-security-baseline/hardening.yml
       service: hardened-xlarge
     image: ghcr.io/enucatl/telegram-bot-api:latest
-    tmpfs:
-      - "/tmp/telegram-bot-api:rw,noexec,uid=101,gid=101,mode=0755,size=2g"
-    volumes:
-      - telegram-bot-api-data:/var/lib/telegram-bot-api
-    networks:
-      - crabberbot
+    tmpfs: ["/tmp/telegram-bot-api:rw,noexec,uid=101,gid=101,mode=0755,size=2g"]
+    volumes: [telegram-bot-api-data:/var/lib/telegram-bot-api]
+    networks: [backend, internet]
     environment:
       - TELEGRAM_API_HASH
       - TELEGRAM_API_ID
@@ -71,24 +92,25 @@ services:
       service: postgres
     image: postgres:18
     cpu_shares: 1024
-    networks:
-      - crabberbot
+    networks: [backend]
     environment:
       POSTGRES_DB: crabberbot
       POSTGRES_USER: crabberbot
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - pgdata:/var/lib/postgresql
+    volumes: [pgdata:/var/lib/postgresql]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U crabberbot"]
 
 networks:
-  crabberbot:
-    name: crabberbot
-    enable_ipv6: true
+  backend:
+    internal: true
+  downloader:
+    internal: true
+  internet:
 
 volumes:
   downloads:
+  downloader_socket:
   pgdata:
   telegram-bot-api-data:
 

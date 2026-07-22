@@ -6,14 +6,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
+use tokio::net::UnixStream;
 use tokio::sync::Semaphore;
 use url::Url;
 use uuid::Uuid;
 
 use crate::validator::MAX_FILESIZE_BYTES;
+use crate::worker_protocol::{Request, Response, ResultData, read_frame, write_frame};
 
 const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -29,7 +31,8 @@ pub enum DownloadError {
     Timeout(u64),
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MediaType {
     Video,
     Photo,
@@ -67,7 +70,7 @@ impl FromStr for MediaType {
 }
 
 /// Pre-download metadata returned by yt-dlp's `--dump-single-json`.
-#[derive(Debug, Deserialize, PartialEq, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
 pub struct MediaInfo {
     pub id: String,
     #[serde(default)]
@@ -193,6 +196,91 @@ pub trait Downloader: Send + Sync {
     ) -> Result<DownloadedMedia, DownloadError>;
 }
 
+pub struct SocketDownloader {
+    socket_path: PathBuf,
+}
+
+impl SocketDownloader {
+    #[must_use]
+    pub fn new(socket_path: PathBuf) -> Self {
+        Self { socket_path }
+    }
+
+    async fn request(&self, request: Request) -> Result<ResultData, DownloadError> {
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .await
+            .map_err(|error| {
+                DownloadError::CommandFailed(format!("downloader worker unavailable: {error}"))
+            })?;
+        write_frame(&mut stream, &request)
+            .await
+            .map_err(DownloadError::CommandFailed)?;
+        let frame = read_frame(&mut stream)
+            .await
+            .map_err(DownloadError::CommandFailed)?;
+        match serde_json::from_slice::<Response>(&frame)
+            .map_err(|error| DownloadError::ParsingFailed(error.to_string()))?
+        {
+            Response::Ok { result } => Ok(result),
+            Response::Error { kind, message } if kind == "timeout" => Err(message
+                .parse()
+                .map(DownloadError::Timeout)
+                .unwrap_or(DownloadError::CommandFailed(message))),
+            Response::Error { kind, message } if kind == "parsing" => {
+                Err(DownloadError::ParsingFailed(message))
+            }
+            Response::Error { message, .. } => Err(DownloadError::CommandFailed(message)),
+        }
+    }
+}
+
+#[async_trait]
+impl Downloader for SocketDownloader {
+    async fn get_media_metadata(&self, url: &Url) -> Result<MediaInfo, DownloadError> {
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(DownloadError::CommandFailed(
+                "only HTTP(S) URLs are supported".to_string(),
+            ));
+        }
+        match self
+            .request(Request::Metadata {
+                url: url.to_string(),
+            })
+            .await?
+        {
+            ResultData::Metadata { info } => Ok(info),
+            _ => Err(DownloadError::ParsingFailed(
+                "unexpected downloader response".to_string(),
+            )),
+        }
+    }
+
+    async fn download_media(
+        &self,
+        info: &MediaInfo,
+        url: &Url,
+    ) -> Result<DownloadedMedia, DownloadError> {
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(DownloadError::CommandFailed(
+                "only HTTP(S) URLs are supported".to_string(),
+            ));
+        }
+        match self
+            .request(Request::Download {
+                info: info.clone(),
+                url: url.to_string(),
+            })
+            .await?
+        {
+            ResultData::Download { media } => DownloadedMedia::try_from(media)
+                .map_err(|error| DownloadError::ParsingFailed(error.to_string())),
+            _ => Err(DownloadError::ParsingFailed(
+                "unexpected downloader response".to_string(),
+            )),
+        }
+    }
+}
+
 pub struct YtDlpDownloader {
     yt_dlp_path: String,
     download_dir: PathBuf,
@@ -251,7 +339,9 @@ impl YtDlpDownloader {
             .arg("--no-warnings")
             .arg("--ignore-config")
             .arg("--impersonate")
-            .arg("chrome");
+            .arg("chrome")
+            .arg("--proxy")
+            .arg("http://egress-proxy:3128");
         command.kill_on_drop(true);
         command
     }
@@ -838,6 +928,18 @@ mod tests {
         drop(first);
         assert!(downloader.session_limiter.try_acquire().is_ok());
         drop(second);
+    }
+
+    #[tokio::test]
+    async fn socket_downloader_rejects_non_http_urls_before_connecting() {
+        let downloader = SocketDownloader::new(PathBuf::from("/no/worker.sock"));
+        let error = downloader
+            .get_media_metadata(&Url::parse("file:///tmp/video").unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, DownloadError::CommandFailed(message) if message.contains("HTTP(S)"))
+        );
     }
 
     #[test]

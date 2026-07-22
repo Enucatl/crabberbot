@@ -10,6 +10,7 @@ pub mod subscription;
 pub mod telegram_api;
 pub mod terms;
 pub mod validator;
+pub mod worker_protocol;
 
 pub use downloader::{DownloadError, Downloader};
 pub use handler::{maybe_send_premium_buttons, process_download_request, send_long_text};

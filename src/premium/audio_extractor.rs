@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
+use crate::worker_protocol::{Request, Response, ResultData, read_frame, write_frame};
+
 #[derive(Debug, Error)]
 pub enum AudioExtractionError {
     #[error("audio tool timed out after {0} seconds")]
@@ -31,6 +33,71 @@ pub trait AudioExtractor: Send + Sync {
         title: Option<String>,
         author: Option<String>,
     ) -> Result<AudioExtractionResult, AudioExtractionError>;
+}
+
+pub struct SocketAudioExtractor {
+    socket_path: PathBuf,
+}
+
+impl SocketAudioExtractor {
+    #[must_use]
+    pub fn new(socket_path: PathBuf) -> Self {
+        Self { socket_path }
+    }
+}
+
+#[async_trait]
+impl AudioExtractor for SocketAudioExtractor {
+    async fn extract_audio(
+        &self,
+        video_path: &Path,
+        title: Option<String>,
+        author: Option<String>,
+    ) -> Result<AudioExtractionResult, AudioExtractionError> {
+        let mut stream = tokio::net::UnixStream::connect(&self.socket_path)
+            .await
+            .map_err(|error| {
+                AudioExtractionError::FfmpegError(format!("downloader worker unavailable: {error}"))
+            })?;
+        write_frame(
+            &mut stream,
+            &Request::ExtractAudio {
+                video_path: video_path.to_string_lossy().into_owned(),
+                title,
+                author,
+            },
+        )
+        .await
+        .map_err(AudioExtractionError::FfmpegError)?;
+        let frame = read_frame(&mut stream)
+            .await
+            .map_err(AudioExtractionError::FfmpegError)?;
+        match serde_json::from_slice::<Response>(&frame)
+            .map_err(|error| AudioExtractionError::ParseError(error.to_string()))?
+        {
+            Response::Ok {
+                result:
+                    ResultData::Audio {
+                        audio_path,
+                        duration_secs,
+                    },
+            } => Ok(AudioExtractionResult {
+                audio_path: PathBuf::from(audio_path),
+                duration_secs,
+            }),
+            Response::Error { kind, message } if kind == "timeout" => Err(message
+                .parse()
+                .map(AudioExtractionError::Timeout)
+                .unwrap_or(AudioExtractionError::FfmpegError(message))),
+            Response::Error { kind, message } if kind == "parse" => {
+                Err(AudioExtractionError::ParseError(message))
+            }
+            Response::Error { message, .. } => Err(AudioExtractionError::FfmpegError(message)),
+            _ => Err(AudioExtractionError::ParseError(
+                "unexpected downloader response".to_string(),
+            )),
+        }
+    }
 }
 
 pub struct FfmpegAudioExtractor {

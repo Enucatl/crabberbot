@@ -2,8 +2,8 @@
 
 ## Status
 
-Deferred. This is a complete SSRF boundary for `yt-dlp`, but is more
-infrastructure than the project needs right now.
+Implemented. The `downloader-worker` owns `yt-dlp`, `ffmpeg`, and all media
+subprocess limits; the application has no local downloader fallback.
 
 ## Why a proxy beside the current app is insufficient
 
@@ -31,13 +31,18 @@ Postgres / local Telegram API         yt-dlp + ffmpeg
                                                 Internet network
 ```
 
+- The app, Postgres, and local Telegram API use the internal backend network.
 - The worker is attached only to the internal downloader network.
 - The proxy is attached to that network and to an Internet-facing network.
+- The app and worker exchange one capped (1 MiB), length-prefixed JSON job per
+  Unix-socket connection. The app mounts the socket volume read-only.
 - The worker invokes `yt-dlp` with `--proxy http://egress-proxy:3128`.
 - The worker has no direct route to the Internet or the app's private services;
   a downloader that ignores proxy settings fails closed.
 - Downloads remain in the existing shared downloads volume for the app to
   upload.
+
+`egress-proxy` uses `pretix/smokescreen:latest`.
 
 ## Proxy policy
 

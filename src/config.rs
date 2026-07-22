@@ -17,9 +17,7 @@ pub struct AppConfig {
     pub owner_chat_id: i64,
     pub port: u16,
     pub webhook_url: Url,
-    pub yt_dlp_path: String,
-    pub max_yt_dlp_sessions: usize,
-    pub downloads_dir: PathBuf,
+    pub downloader_socket: PathBuf,
     pub audio_cache_dir: PathBuf,
 }
 
@@ -29,11 +27,6 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("Invalid value for {name}: {value}")]
     Invalid { name: &'static str, value: String },
-    #[error("Failed to create directory {path}: {source}")]
-    Directory {
-        path: String,
-        source: std::io::Error,
-    },
 }
 
 impl AppConfig {
@@ -62,24 +55,11 @@ impl AppConfig {
                 name: "WEBHOOK_URL",
                 value: std::env::var("WEBHOOK_URL").unwrap_or_default(),
             })?;
-        let yt_dlp_path = std::env::var("YT_DLP_PATH").unwrap_or_else(|_| "yt-dlp".to_string());
-        let max_yt_dlp_sessions = parse_env("MAX_YT_DLP_SESSIONS", 4usize)?;
-        if max_yt_dlp_sessions == 0 {
-            return Err(ConfigError::Invalid {
-                name: "MAX_YT_DLP_SESSIONS",
-                value: "0".to_string(),
-            });
-        }
-        let downloads_dir = PathBuf::from(
-            std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/downloads".to_string()),
+        let downloader_socket = PathBuf::from(
+            std::env::var("DOWNLOADER_SOCKET")
+                .unwrap_or_else(|_| "/downloader/downloader.sock".to_string()),
         );
-        let audio_cache_dir = PathBuf::from(
-            std::env::var("AUDIO_CACHE_DIR")
-                .unwrap_or_else(|_| downloads_dir.join("audio_cache").to_string_lossy().into()),
-        );
-
-        ensure_dir(&downloads_dir)?;
-        ensure_dir(&audio_cache_dir)?;
+        let audio_cache_dir = PathBuf::from("/downloads/audio_cache");
 
         Ok(Self {
             execution_environment,
@@ -93,9 +73,7 @@ impl AppConfig {
             owner_chat_id,
             port,
             webhook_url,
-            yt_dlp_path,
-            max_yt_dlp_sessions,
-            downloads_dir,
+            downloader_socket,
             audio_cache_dir,
         })
     }
@@ -115,11 +93,4 @@ where
             .map_err(|_| ConfigError::Invalid { name, value }),
         Err(_) => Ok(default),
     }
-}
-
-fn ensure_dir(path: &std::path::Path) -> Result<(), ConfigError> {
-    std::fs::create_dir_all(path).map_err(|source| ConfigError::Directory {
-        path: path.display().to_string(),
-        source,
-    })
 }
