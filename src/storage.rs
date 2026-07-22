@@ -9,7 +9,6 @@ use crate::subscription::{SubscriptionInfo, SubscriptionTier};
 #[derive(Debug, Clone)]
 pub struct PaymentRecord {
     pub telegram_charge_id: String,
-    pub product: String,
     pub amount: i32,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -83,13 +82,12 @@ pub trait Storage: Send + Sync {
     async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext>;
     async fn cache_transcript(&self, context_id: i32, transcript: &str, language: Option<String>);
 
-    // Subscription downgrade (for refunds)
-    async fn revoke_subscription(&self, user_id: i64);
-    /// Reduce top-up balance by `seconds` (clamped to 0). Used when a top-up purchase is refunded.
-    async fn revoke_topup(&self, user_id: i64, seconds: i32);
-    /// Returns the most recent payment for a user, if any.
+    /// Records a payment refund and revokes its entitlement atomically.
+    /// Returns true only when the stored charge was refunded for the first time.
+    async fn refund_payment(&self, user_id: i64, telegram_charge_id: &str) -> bool;
+    /// Returns the most recent unrefunded payment for a user, if any.
     async fn get_latest_payment(&self, user_id: i64) -> Option<PaymentRecord>;
-    /// Returns the most recent `limit` payments for a user (for owner tooling).
+    /// Returns the most recent `limit` unrefunded payments for a user (for owner tooling).
     async fn get_recent_payments(&self, user_id: i64, limit: i64) -> Vec<PaymentRecord>;
     /// Returns true if the user has any premium_usage rows recorded after `since`.
     async fn has_ai_usage_since(&self, user_id: i64, since: chrono::DateTime<chrono::Utc>) -> bool;
@@ -617,39 +615,72 @@ impl Storage for PostgresStorage {
         }
     }
 
-    async fn revoke_subscription(&self, user_id: i64) {
-        if let Err(e) = sqlx::query(
-            "UPDATE subscriptions SET tier = 'free', ai_seconds_limit = 0, \
-             expires_at = NULL, updated_at = NOW() WHERE user_id = $1",
+    async fn refund_payment(&self, user_id: i64, telegram_charge_id: &str) -> bool {
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                log::error!("Failed to begin payment refund for {}: {}", user_id, e);
+                return false;
+            }
+        };
+        let product: Option<(String,)> = match sqlx::query_as(
+            "UPDATE payments SET refunded_at = NOW() \
+             WHERE user_id = $1 AND telegram_payment_charge_id = $2 AND refunded_at IS NULL \
+             RETURNING product",
         )
         .bind(user_id)
-        .execute(&self.pool)
+        .bind(telegram_charge_id)
+        .fetch_optional(&mut *tx)
         .await
         {
-            log::error!("Failed to revoke subscription for {}: {}", user_id, e);
-        }
-    }
+            Ok(product) => product,
+            Err(e) => {
+                log::error!("Failed to record payment refund for {}: {}", user_id, e);
+                return false;
+            }
+        };
+        let Some((product,)) = product else {
+            return false;
+        };
 
-    async fn revoke_topup(&self, user_id: i64, seconds: i32) {
-        if let Err(e) = sqlx::query(
-            "UPDATE subscriptions SET \
-               topup_seconds_available = GREATEST(topup_seconds_available - $2, 0), \
-               updated_at = NOW() \
-             WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .bind(seconds)
-        .execute(&self.pool)
-        .await
-        {
-            log::error!("Failed to revoke topup for {}: {}", user_id, e);
+        let result = match product.as_str() {
+            crate::subscription::PRODUCT_SUB_BASIC | crate::subscription::PRODUCT_SUB_PRO => {
+                sqlx::query(
+                    "UPDATE subscriptions SET tier = 'free', ai_seconds_limit = 0, \
+                     expires_at = NULL, updated_at = NOW() WHERE user_id = $1",
+                )
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+            }
+            crate::subscription::PRODUCT_TOPUP_60 => {
+                sqlx::query(
+                    "UPDATE subscriptions SET \
+                   topup_seconds_available = GREATEST(topup_seconds_available - $2, 0), \
+                   updated_at = NOW() WHERE user_id = $1",
+                )
+                .bind(user_id)
+                .bind(crate::subscription::TOPUP_SECONDS)
+                .execute(&mut *tx)
+                .await
+            }
+            _ => Ok(sqlx::postgres::PgQueryResult::default()),
+        };
+        if let Err(e) = result {
+            log::error!("Failed to revoke refunded payment for {}: {}", user_id, e);
+            return false;
         }
+        if let Err(e) = tx.commit().await {
+            log::error!("Failed to commit payment refund for {}: {}", user_id, e);
+            return false;
+        }
+        true
     }
 
     async fn get_latest_payment(&self, user_id: i64) -> Option<PaymentRecord> {
-        let row: Option<(String, String, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT telegram_payment_charge_id, product, amount, created_at \
-             FROM payments WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+        let row: Option<(String, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT telegram_payment_charge_id, amount, created_at \
+             FROM payments WHERE user_id = $1 AND refunded_at IS NULL ORDER BY created_at DESC LIMIT 1",
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
@@ -661,21 +692,18 @@ impl Storage for PostgresStorage {
         .ok()
         .flatten();
 
-        row.map(
-            |(telegram_charge_id, product, amount, created_at)| PaymentRecord {
-                telegram_charge_id,
-                product,
-                amount,
-                created_at,
-            },
-        )
+        row.map(|(telegram_charge_id, amount, created_at)| PaymentRecord {
+            telegram_charge_id,
+            amount,
+            created_at,
+        })
     }
 
     async fn get_recent_payments(&self, user_id: i64, limit: i64) -> Vec<PaymentRecord> {
-        let rows: Result<Vec<(String, String, i32, chrono::DateTime<chrono::Utc>)>, _> =
+        let rows: Result<Vec<(String, i32, chrono::DateTime<chrono::Utc>)>, _> =
             sqlx::query_as(
-                "SELECT telegram_payment_charge_id, product, amount, created_at \
-                 FROM payments WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
+                "SELECT telegram_payment_charge_id, amount, created_at \
+                 FROM payments WHERE user_id = $1 AND refunded_at IS NULL ORDER BY created_at DESC LIMIT $2",
             )
             .bind(user_id)
             .bind(limit)
@@ -685,14 +713,11 @@ impl Storage for PostgresStorage {
         match rows {
             Ok(rows) => rows
                 .into_iter()
-                .map(
-                    |(telegram_charge_id, product, amount, created_at)| PaymentRecord {
-                        telegram_charge_id,
-                        product,
-                        amount,
-                        created_at,
-                    },
-                )
+                .map(|(telegram_charge_id, amount, created_at)| PaymentRecord {
+                    telegram_charge_id,
+                    amount,
+                    created_at,
+                })
                 .collect(),
             Err(e) => {
                 log::error!("Failed to get recent payments for {}: {}", user_id, e);
@@ -818,5 +843,82 @@ mod tests {
 
         assert_eq!(payment_count, 1);
         assert_eq!(topup_seconds, TOPUP_SECONDS);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn refund_subscription_once_marks_payment(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+        assert!(
+            storage
+                .fulfill_payment(1, "basic-charge", "provider-charge", PRODUCT_SUB_BASIC, 50)
+                .await
+        );
+
+        assert!(storage.refund_payment(1, "basic-charge").await);
+        assert!(!storage.refund_payment(1, "basic-charge").await);
+
+        let (refunded_at, tier, limit): (Option<chrono::DateTime<chrono::Utc>>, String, i32) =
+            sqlx::query_as(
+                "SELECT p.refunded_at, s.tier, s.ai_seconds_limit FROM payments p \
+                 JOIN subscriptions s ON s.user_id = p.user_id WHERE p.telegram_payment_charge_id = 'basic-charge'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(refunded_at.is_some());
+        assert_eq!((tier.as_str(), limit), ("free", 0));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn refund_topup_once_and_rejects_wrong_charge_owner(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+        assert!(
+            storage
+                .fulfill_payment(1, "topup-a", "provider-a", PRODUCT_TOPUP_60, 50)
+                .await
+        );
+        assert!(
+            storage
+                .fulfill_payment(1, "topup-b", "provider-b", PRODUCT_TOPUP_60, 50)
+                .await
+        );
+
+        assert!(!storage.refund_payment(2, "topup-a").await);
+        assert!(!storage.refund_payment(1, "unknown-charge").await);
+        assert!(storage.refund_payment(1, "topup-a").await);
+        assert!(!storage.refund_payment(1, "topup-a").await);
+
+        let topup_seconds: i32 = sqlx::query_scalar(
+            "SELECT topup_seconds_available FROM subscriptions WHERE user_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(topup_seconds, TOPUP_SECONDS);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn latest_payment_skips_refunded_charges(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+        assert!(
+            storage
+                .fulfill_payment(1, "older", "provider-a", PRODUCT_SUB_BASIC, 50)
+                .await
+        );
+        assert!(
+            storage
+                .fulfill_payment(1, "newer", "provider-b", PRODUCT_TOPUP_60, 50)
+                .await
+        );
+        assert!(storage.refund_payment(1, "newer").await);
+
+        assert_eq!(
+            storage
+                .get_latest_payment(1)
+                .await
+                .map(|payment| payment.telegram_charge_id),
+            Some("older".to_string())
+        );
+        assert_eq!(storage.get_recent_payments(1, 5).await.len(), 1);
     }
 }

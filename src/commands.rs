@@ -15,7 +15,6 @@ use crate::premium::{
 use crate::storage::Storage;
 use crate::subscription::{
     PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_PRICE_STARS,
-    TOPUP_SECONDS,
 };
 use crate::telegram_api::TelegramApi;
 use crate::terms;
@@ -311,8 +310,8 @@ Note: <b>Telegram support and BotFather cannot help with purchases made through 
             for p in &payments {
                 let date = p.created_at.format("%Y-%m-%d %H:%M UTC");
                 s.push_str(&format!(
-                    "\n<code>/refund {from_user_id} {} {}</code>  {}⭐ ({date})",
-                    p.telegram_charge_id, p.product, p.amount,
+                    "\n<code>/refund {from_user_id} {}</code>  {}⭐ ({date})",
+                    p.telegram_charge_id, p.amount,
                 ));
             }
             s.trim_start_matches('\n').to_string()
@@ -435,21 +434,11 @@ pub async fn handle_refundme(
         return Ok(());
     }
 
-    // Revoke access
-    match payment.product.as_str() {
-        PRODUCT_SUB_BASIC | PRODUCT_SUB_PRO => {
-            storage.revoke_subscription(user_id).await;
-        }
-        PRODUCT_TOPUP_60 => {
-            storage.revoke_topup(user_id, TOPUP_SECONDS).await;
-        }
-        _ => {
-            log::warn!(
-                "Unknown product in /refundme for user {}: {}",
-                user_id,
-                payment.product
-            );
-        }
+    if !storage
+        .refund_payment(user_id, &payment.telegram_charge_id)
+        .await
+    {
+        return Ok(());
     }
 
     api.send_text_message(
@@ -472,9 +461,9 @@ pub async fn handle_refund(
     if message.chat.id.0 != owner_chat_id {
         return Ok(());
     }
-    // Usage: /refund <user_id> [<telegram_charge_id> <product>]
+    // Usage: /refund <user_id> [<telegram_charge_id>]
     // With just a user_id, shows the 5 most recent charges ready to copy-paste.
-    let parts: Vec<&str> = args.trim().splitn(3, char::is_whitespace).collect();
+    let parts: Vec<&str> = args.trim().split_whitespace().collect();
 
     // /refund <user_id> — list recent charges
     if let [user_id_str] = parts.as_slice() {
@@ -499,8 +488,8 @@ pub async fn handle_refund(
             for p in &payments {
                 let date = p.created_at.format("%Y-%m-%d %H:%M UTC");
                 lines.push_str(&format!(
-                    "\n<code>/refund {uid} {} {}</code>  — {}⭐ ({date})",
-                    p.telegram_charge_id, p.product, p.amount,
+                    "\n<code>/refund {uid} {}</code>  — {}⭐ ({date})",
+                    p.telegram_charge_id, p.amount,
                 ));
             }
             api.send_text_message(message.chat.id, message.id, &lines)
@@ -509,15 +498,14 @@ pub async fn handle_refund(
         return Ok(());
     }
 
-    let (user_id_str, charge_id, product) = match parts.as_slice() {
-        [u, ch, p] => (*u, *ch, *p),
+    let (user_id_str, charge_id) = match parts.as_slice() {
+        [u, ch] => (*u, *ch),
         _ => {
             api.send_text_message(
                 message.chat.id,
                 message.id,
-                "Usage: /refund &lt;user_id&gt; [&lt;charge_id&gt; &lt;product&gt;]\n\
-                 /refund &lt;user_id&gt; alone shows recent charges.\n\
-                 product: sub_basic | sub_pro | topup_60",
+                "Usage: /refund &lt;user_id&gt; [&lt;charge_id&gt;]\n\
+                 /refund &lt;user_id&gt; alone shows recent charges.",
             )
             .await?;
             return Ok(());
@@ -542,17 +530,14 @@ pub async fn handle_refund(
         return Ok(());
     }
 
-    // Revoke access based on what was refunded
-    match product {
-        PRODUCT_SUB_BASIC | PRODUCT_SUB_PRO => {
-            storage.revoke_subscription(target_user_id).await;
-        }
-        PRODUCT_TOPUP_60 => {
-            storage.revoke_topup(target_user_id, TOPUP_SECONDS).await;
-        }
-        _ => {
-            log::warn!("Unknown product in /refund: {}", product);
-        }
+    if !storage.refund_payment(target_user_id, charge_id).await {
+        api.send_text_message(
+            message.chat.id,
+            message.id,
+            "Telegram refunded the charge, but no stored payment was newly deactivated.",
+        )
+        .await?;
+        return Ok(());
     }
 
     // Notify the user. For private chats user_id == chat_id; for groups we send to user_id directly.
@@ -679,23 +664,16 @@ pub async fn handle_refunded_payment(
         .as_ref()
         .map(|u| u.id.0 as i64)
         .unwrap_or(chat_id.0);
-    let product = &refund.invoice_payload;
     log::info!(
-        "Refunded payment: user_id={} product={} charge_id={}",
+        "Refunded payment: user_id={} charge_id={}",
         user_id,
-        product,
         refund.telegram_payment_charge_id.0
     );
-    match product.as_str() {
-        PRODUCT_SUB_BASIC | PRODUCT_SUB_PRO => {
-            storage.revoke_subscription(user_id).await;
-        }
-        PRODUCT_TOPUP_60 => {
-            storage.revoke_topup(user_id, TOPUP_SECONDS).await;
-        }
-        _ => {
-            log::warn!("Unknown product in refunded_payment: {}", product);
-        }
+    if !storage
+        .refund_payment(user_id, &refund.telegram_payment_charge_id.0)
+        .await
+    {
+        return Ok(());
     }
     api.send_text_message(
         chat_id,
@@ -1322,7 +1300,7 @@ mod tests {
     use super::*;
     use crate::premium::summarizer::MockSummarizer;
     use crate::premium::transcriber::{MockTranscriber, TranscriptionResult};
-    use crate::storage::MockStorage;
+    use crate::storage::{MockStorage, PaymentRecord};
     use crate::subscription::{SubscriptionInfo, SubscriptionTier};
     use crate::telegram_api::MockTelegramApi;
     use teloxide::types::{ChatId, MessageId};
@@ -1531,14 +1509,15 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_handle_refunded_payment_revokes_subscription() {
+    async fn test_handle_refunded_payment_uses_stored_charge() {
         let mut mock_api = MockTelegramApi::new();
         let mut mock_storage = MockStorage::new();
 
         mock_storage
-            .expect_revoke_subscription()
+            .expect_refund_payment()
+            .withf(|user_id, charge_id| *user_id == 200 && charge_id == "tg_charge_123")
             .times(1)
-            .returning(|_| ());
+            .returning(|_, _| true);
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -1548,7 +1527,7 @@ mod tests {
         msg_json["refunded_payment"] = serde_json::json!({
             "currency": "XTR",
             "total_amount": 50,
-            "invoice_payload": "sub_basic",
+            "invoice_payload": "forged_product",
             "telegram_payment_charge_id": "tg_charge_123"
         });
         let message = make_message(msg_json);
@@ -1556,6 +1535,48 @@ mod tests {
         handle_refunded_payment(Arc::new(mock_api), Arc::new(mock_storage), message)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handle_refundme_uses_stored_charge() {
+        let mut mock_api = MockTelegramApi::new();
+        let mut mock_storage = MockStorage::new();
+        mock_storage
+            .expect_get_latest_payment()
+            .times(1)
+            .returning(|_| {
+                Some(PaymentRecord {
+                    telegram_charge_id: "tg_charge_123".to_string(),
+                    amount: 50,
+                    created_at: chrono::Utc::now(),
+                })
+            });
+        mock_storage
+            .expect_has_ai_usage_since()
+            .times(1)
+            .returning(|_, _| false);
+        mock_api
+            .expect_refund_star_payment()
+            .withf(|user_id, charge_id| *user_id == 200 && charge_id == "tg_charge_123")
+            .times(1)
+            .returning(|_, _| Ok(()));
+        mock_storage
+            .expect_refund_payment()
+            .withf(|user_id, charge_id| *user_id == 200 && charge_id == "tg_charge_123")
+            .times(1)
+            .returning(|_, _| true);
+        mock_api
+            .expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        handle_refundme(
+            Arc::new(mock_api),
+            Arc::new(mock_storage),
+            make_message(base_message_json(100, 200)),
+        )
+        .await
+        .unwrap();
     }
 
     // ---------------------------------------------------------------------------
@@ -1689,8 +1710,42 @@ mod tests {
             Arc::new(mock_api),
             Arc::new(mock_storage),
             message,
-            "200 charge_id sub_basic".to_string(),
+            "200 charge_id".to_string(),
             999, // owner_chat_id is 999, message is from chat 100
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handle_refund_uses_stored_charge() {
+        let mut mock_api = MockTelegramApi::new();
+        let mut mock_storage = MockStorage::new();
+        mock_api
+            .expect_refund_star_payment()
+            .withf(|user_id, charge_id| *user_id == 200 && charge_id == "tg_charge_123")
+            .times(1)
+            .returning(|_, _| Ok(()));
+        mock_storage
+            .expect_refund_payment()
+            .withf(|user_id, charge_id| *user_id == 200 && charge_id == "tg_charge_123")
+            .times(1)
+            .returning(|_, _| true);
+        mock_api
+            .expect_send_text_no_reply()
+            .times(1)
+            .returning(|_, _| Ok(()));
+        mock_api
+            .expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        handle_refund(
+            Arc::new(mock_api),
+            Arc::new(mock_storage),
+            make_message(base_message_json(999, 999)),
+            "200 tg_charge_123".to_string(),
+            999,
         )
         .await
         .unwrap();

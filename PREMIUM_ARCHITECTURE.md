@@ -392,7 +392,7 @@ Per Telegram Stars terms, the bot must implement:
 | `/support <text>` | `handle_support` | General support; relays to owner via `send_text_no_reply` |
 | `/paysupport <text>` | `handle_support` | Payment support; same relay + includes subscription status |
 | `/reply <chat_id> <msg>` | `handle_reply` (owner-only, hidden) | Owner replies to support request through bot |
-| `/refund <chat_id> <charge_id> <product>` | `handle_refund` (owner-only, hidden) | Issues Telegram refund + revokes access |
+| `/refund <user_id> <charge_id>` | `handle_refund` (owner-only, hidden) | Issues Telegram refund + revokes access |
 
 The `/reply` and `/refund` commands are hidden (no `description` attribute) and silently ignored for non-owners.
 
@@ -400,10 +400,13 @@ The `/reply` and `/refund` commands are hidden (no `description` attribute) and 
 
 **No refund once AI features have been used.** This is stated in the Terms of Service displayed before every purchase. Refunds are only processed for delivery failures (subscription didn't activate, features broken).
 
-When a refund is issued:
-- `sub_basic`/`sub_pro`: `revoke_subscription()` — tier set to Free, `expires_at` cleared
-- `topup_60`: `revoke_topup(chat_id, 3600)` — reduces `topup_seconds_available` by 3600 (clamped to 0)
+When a stored payment is refunded for the first time:
+- `sub_basic`/`sub_pro`: tier is set to Free and `expires_at` cleared
+- `topup_60`: `topup_seconds_available` is reduced by 3600 (clamped to 0)
 - Telegram `refund_star_payment` API is called to return Stars to the user
+
+`payments.refunded_at` makes the entitlement revocation idempotent; unknown, wrong-user, and
+duplicate charges do not change access.
 
 The `handle_refunded_payment` handler fires if Telegram sends a `RefundedPayment` message (e.g. via a dispute), performing the same revocation.
 
