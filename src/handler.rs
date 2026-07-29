@@ -144,11 +144,25 @@ async fn log_reply_failure(
     }
 }
 
-/// Removes only fragments, which are never sent to the source server.
+/// Removes fragments and query parameters, except YouTube's required `v` parameter.
 #[must_use]
 fn cleanup_url(original_url: &Url) -> Url {
     let mut cleaned_url = original_url.clone();
     cleaned_url.set_fragment(None);
+    let video_id = cleaned_url
+        .host_str()
+        .filter(|host| host.ends_with("youtube.com") || *host == "youtu.be")
+        .and_then(|_| {
+            original_url
+                .query_pairs()
+                .find(|(key, _)| key == "v")
+                .map(|(_, value)| value.into_owned())
+        });
+    cleaned_url.set_query(None);
+
+    if let Some(video_id) = video_id {
+        cleaned_url.query_pairs_mut().append_pair("v", &video_id);
+    }
 
     cleaned_url
 }
@@ -834,6 +848,19 @@ mod tests {
             );
             assert_eq!(chunks.concat(), items);
         }
+    }
+
+    #[test]
+    fn cleanup_url_strips_tracking_but_keeps_youtube_video_id() {
+        let youtube =
+            Url::parse("https://www.youtube.com/watch?v=video-id&utm_source=test#frag").unwrap();
+        let other = Url::parse("https://example.com/video?utm_source=test#frag").unwrap();
+
+        assert_eq!(
+            cleanup_url(&youtube).as_str(),
+            "https://www.youtube.com/watch?v=video-id"
+        );
+        assert_eq!(cleanup_url(&other).as_str(), "https://example.com/video");
     }
 
     #[tokio::test]
