@@ -34,7 +34,7 @@ CMD ["./crabberbot"]
 
 FROM python:3.14-slim-trixie AS downloader-worker
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg libexpat1 \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir "curl_cffi>=0.15,<0.16" requests brotli \
     && useradd --uid 1000 --create-home --shell /bin/bash appuser \
