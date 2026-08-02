@@ -72,15 +72,18 @@ git clone https://github.com/Enucatl/crabberbot.git
 cd crabberbot
 ```
 
-Create `secrets/tunnel_token` containing the Cloudflare Tunnel token, then create `.env`:
+Create these secret files:
+
+- `secrets/telegram_api_id`
+- `secrets/telegram_api_hash`
+- `secrets/tunnel_token`
+
+Then create `.env`:
 
 ```dotenv
 TELOXIDE_TOKEN=123456:ABC-DEF1234567890
 WEBHOOK_URL=https://your-tunnel.example.com
 POSTGRES_PASSWORD=change-me
-TELEGRAM_API_ID=12345678
-TELEGRAM_API_HASH=your_api_hash_here
-
 # Optional
 TELEGRAM_VERBOSITY=1
 DEEPGRAM_API_KEY=
@@ -88,6 +91,8 @@ GEMINI_API_KEY=
 OWNER_CHAT_ID=
 MAX_YT_DLP_SESSIONS=4
 ```
+
+Compose mounts the Telegram API ID and hash files under `/run/secrets`; they aren't exposed in the Telegram Bot API container environment.
 
 `DEEPGRAM_API_KEY` and `GEMINI_API_KEY` are required only for transcription and summarization. `OWNER_CHAT_ID` enables owner-only grants, support replies, and refunds.
 

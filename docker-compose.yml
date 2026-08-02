@@ -81,10 +81,11 @@ services:
     volumes: [telegram-bot-api-data:/var/lib/telegram-bot-api]
     networks: [backend, internet]
     environment:
-      - TELEGRAM_API_HASH
-      - TELEGRAM_API_ID
+      - TELEGRAM_API_HASH_FILE=/run/secrets/telegram_api_hash
+      - TELEGRAM_API_ID_FILE=/run/secrets/telegram_api_id
       - TELEGRAM_LOCAL=1
       - TELEGRAM_VERBOSITY
+    secrets: [telegram_api_hash, telegram_api_id]
 
   postgres:
     extends:
@@ -115,5 +116,9 @@ volumes:
   telegram-bot-api-data:
 
 secrets:
+  telegram_api_hash:
+    file: ./secrets/telegram_api_hash
+  telegram_api_id:
+    file: ./secrets/telegram_api_id
   tunnel_token:
     file: ./secrets/tunnel_token
