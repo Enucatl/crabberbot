@@ -258,6 +258,18 @@ enum OwnerCommand {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(4))
+            .build()?
+            .get("http://127.0.0.1:8080/healthz")
+            .send()
+            .await?
+            .error_for_status()?;
+        return Ok(());
+    }
+
     let mut builder = pretty_env_logger::formatted_builder();
 
     builder.filter_level(LevelFilter::Info);

@@ -1,7 +1,8 @@
 FROM rust:1-slim-trixie AS builder
 
-RUN apt update && apt install -y build-essential git libssl-dev make pkg-config python3 zip \
+RUN apt update && apt install -y build-essential git libssl-dev make musl-tools pkg-config python3 zip \
     && rm -rf /var/lib/apt/lists/*
+RUN rustup target add x86_64-unknown-linux-musl
 
 ARG YT_DLP_REPO_URL="https://github.com/Enucatl/yt-dlp.git"
 ARG YT_DLP_COMMIT_HASH="master"
@@ -11,25 +12,27 @@ RUN set -eux; git init /tmp/yt-dlp; cd /tmp/yt-dlp; git remote add origin "${YT_
 
 WORKDIR /usr/src/crabberbot
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src target/release/deps/crabberbot*
+RUN mkdir src && echo 'fn main() {}' > src/main.rs \
+    && cargo build --release --target x86_64-unknown-linux-musl \
+    && rm -rf src target/x86_64-unknown-linux-musl/release/deps/crabberbot*
 COPY src ./src
 COPY build.rs ./build.rs
 COPY migrations ./migrations
 ARG CARGO_PACKAGE_VERSION
 ENV CARGO_PACKAGE_VERSION=${CARGO_PACKAGE_VERSION}
-RUN cargo build --release && cargo test --no-run
+RUN cargo build --release --target x86_64-unknown-linux-musl \
+    && cargo test --no-run --target x86_64-unknown-linux-musl
+RUN mkdir -p /runtime/downloads /runtime/downloader
 
-FROM debian:trixie-slim AS app
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 1000 --create-home --shell /bin/bash appuser \
-    && mkdir /downloads /downloader && chown appuser:appuser /downloads /downloader
-USER appuser
-WORKDIR /home/appuser
-COPY --from=builder /usr/src/crabberbot/target/release/crabberbot .
+FROM gcr.io/distroless/static-debian13:nonroot AS app
+USER 1000:1000
+WORKDIR /app
+COPY --chown=1000:1000 --from=builder /usr/src/crabberbot/target/x86_64-unknown-linux-musl/release/crabberbot .
+COPY --chown=1000:1000 --from=builder /runtime/downloads /downloads
+COPY --chown=1000:1000 --from=builder /runtime/downloader /downloader
 EXPOSE 8080
 VOLUME ["/downloads", "/downloader"]
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["./crabberbot", "healthcheck"]
 CMD ["./crabberbot"]
 
 FROM python:3.14-slim-trixie AS downloader-worker
@@ -41,7 +44,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get upgrade -y \
     && mkdir /downloads /downloader && chown appuser:appuser /downloads /downloader
 USER appuser
 WORKDIR /home/appuser
-COPY --from=builder /usr/src/crabberbot/target/release/downloader-worker .
+COPY --from=builder /usr/src/crabberbot/target/x86_64-unknown-linux-musl/release/downloader-worker .
 COPY --from=builder /usr/local/bin/yt-dlp /usr/local/bin/
 VOLUME ["/downloads", "/downloader"]
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 CMD ["test", "-S", "/downloader/downloader.sock"]
