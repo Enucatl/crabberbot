@@ -1,0 +1,6 @@
+# pip's bundled CycloneDX inventory describes its vendored build tooling,
+# not the Python distributions installed in the worker image. Trivy otherwise
+# reports those inventory entries alongside the actual site-packages metadata.
+scan:
+  skip-files:
+    - usr/local/lib/python3.14/site-packages/pip/_vendor/bom.cdx.json

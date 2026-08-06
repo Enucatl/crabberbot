@@ -39,7 +39,8 @@ FROM python:3.14-slim-trixie AS downloader-worker
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir "curl_cffi>=0.15,<0.16" requests brotli \
+    && pip install --no-cache-dir "setuptools>=78.1.1" "msgpack>=1.2.1" \
+        "curl_cffi>=0.15,<0.16" requests brotli \
     && useradd --uid 1000 --create-home --shell /bin/bash appuser \
     && mkdir /downloads /downloader && chown appuser:appuser /downloads /downloader
 USER appuser
