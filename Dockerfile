@@ -36,7 +36,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["./c
 CMD ["./crabberbot"]
 
 FROM python:3.14-slim-trixie AS downloader-worker
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get upgrade -y \
+RUN DEBIAN_FRONTEND=noninteractive apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir "setuptools>=78.1.1" "msgpack>=1.2.1" \
