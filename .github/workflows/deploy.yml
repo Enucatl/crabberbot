@@ -83,7 +83,8 @@ jobs:
       build_args: |
         CARGO_PACKAGE_VERSION=${{ needs.prepare.outputs.version }}
         YT_DLP_COMMIT_HASH=${{ needs.prepare.outputs.yt_dlp_commit_hash }}
-    secrets: inherit
+    secrets:
+      registry_token: ${{ secrets.GITHUB_TOKEN }}
 
   downloader-worker:
     needs:
@@ -105,4 +106,5 @@ jobs:
       build_args: |
         CARGO_PACKAGE_VERSION=${{ needs.prepare.outputs.version }}
         YT_DLP_COMMIT_HASH=${{ needs.prepare.outputs.yt_dlp_commit_hash }}
-    secrets: inherit
+    secrets:
+      registry_token: ${{ secrets.GITHUB_TOKEN }}
