@@ -5,6 +5,7 @@ services:
       service: hardened-medium
     image: ghcr.io/enucatl/crabberbot:latest
     cpu_shares: 512
+    tmpfs: ["/tmp:rw,noexec,uid=1000,gid=1000,mode=0700,size=256m"]
     networks: [backend, internet]
     environment:
       - RUST_LOG=info,crabberbot=info
