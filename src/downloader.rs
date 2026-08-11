@@ -300,32 +300,6 @@ impl YtDlpDownloader {
             log::info!("yt-dlp version: {}", version.trim());
         }
 
-        // Log available impersonate targets to verify curl_cffi is working
-        let mut targets_command = tokio::process::Command::new(&yt_dlp_path);
-        targets_command
-            .arg("--list-impersonate-targets")
-            .kill_on_drop(true);
-        match Self::run_command(targets_command, METADATA_TIMEOUT).await {
-            Ok((status, stdout, stderr)) => {
-                if status.success() {
-                    let targets = String::from_utf8_lossy(&stdout);
-                    log::info!(
-                        "yt-dlp impersonate targets available (curl_cffi working):\n{}",
-                        targets.trim()
-                    );
-                } else {
-                    let stderr = String::from_utf8_lossy(&stderr);
-                    log::warn!(
-                        "yt-dlp --list-impersonate-targets failed (curl_cffi may not be installed): {}",
-                        stderr.trim()
-                    );
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to check impersonate targets: {}", e);
-            }
-        }
-
         Self {
             yt_dlp_path,
             download_dir,
@@ -338,8 +312,6 @@ impl YtDlpDownloader {
         command
             .arg("--no-warnings")
             .arg("--ignore-config")
-            .arg("--impersonate")
-            .arg("chrome")
             .arg("--proxy")
             .arg("http://egress-proxy:3128");
         command.kill_on_drop(true);
