@@ -23,6 +23,8 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum DownloadError {
+    #[error("media unavailable: {0}")]
+    MediaUnavailable(String),
     #[error("yt-dlp command failed: {0}")]
     CommandFailed(String),
     #[error("Failed to parse yt-dlp output: {0}")]
@@ -228,6 +230,9 @@ impl SocketDownloader {
                 .unwrap_or(DownloadError::CommandFailed(message))),
             Response::Error { kind, message } if kind == "parsing" => {
                 Err(DownloadError::ParsingFailed(message))
+            }
+            Response::Error { kind, message } if kind == "unavailable" => {
+                Err(DownloadError::MediaUnavailable(message))
             }
             Response::Error { message, .. } => Err(DownloadError::CommandFailed(message)),
         }
@@ -618,12 +623,12 @@ impl Downloader for YtDlpDownloader {
 
         if !status.success() {
             let stderr = String::from_utf8_lossy(&stderr);
-            log::error!(
+            log::warn!(
                 "yt-dlp --dump-single-json failed for url {}: {}",
                 url,
                 stderr
             );
-            return Err(DownloadError::CommandFailed(stderr.to_string()));
+            return Err(DownloadError::MediaUnavailable(stderr.to_string()));
         }
 
         let stdout_str = String::from_utf8_lossy(&stdout);
@@ -687,9 +692,9 @@ impl Downloader for YtDlpDownloader {
 
         if !status.success() {
             let stderr = String::from_utf8_lossy(&stderr);
-            log::error!("yt-dlp failed for url {}: {}", url, stderr);
+            log::warn!("yt-dlp rejected url {}: {}", url, stderr);
             Self::cleanup_download_artifacts(&download_dir, &uuid).await;
-            return Err(DownloadError::CommandFailed(stderr.to_string()));
+            return Err(DownloadError::MediaUnavailable(stderr.to_string()));
         }
 
         let stdout_str = String::from_utf8_lossy(&stdout);
@@ -1055,7 +1060,7 @@ mod tests {
             .download_media(&info, &Url::parse("https://example.com/video").unwrap())
             .await;
 
-        assert!(matches!(result, Err(DownloadError::CommandFailed(_))));
+        assert!(matches!(result, Err(DownloadError::MediaUnavailable(_))));
         assert_eq!(
             std::fs::read_to_string(temp_dir.path().join("max-filesize"))
                 .unwrap()

@@ -23,6 +23,7 @@ fn response_error(kind: &str, message: impl ToString) -> Response {
 fn download_error(download_error: DownloadError) -> Response {
     match download_error {
         DownloadError::Timeout(seconds) => response_error("timeout", seconds),
+        DownloadError::MediaUnavailable(message) => response_error("unavailable", message),
         DownloadError::ParsingFailed(message) => response_error("parsing", message),
         DownloadError::CommandFailed(message) => response_error("command", message),
     }

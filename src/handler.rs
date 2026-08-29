@@ -198,7 +198,11 @@ async fn pre_download_validation(
             }
         }
         Err(e) => {
-            log::error!("Pre-download metadata fetch failed for {}: {}", url, e);
+            if matches!(e, crate::downloader::DownloadError::MediaUnavailable(_)) {
+                log::warn!("Pre-download metadata fetch rejected for {}: {}", url, e);
+            } else {
+                log::error!("Pre-download metadata fetch failed for {}: {}", url, e);
+            }
             log_reply_failure(
                 telegram_api.send_text_message(
                     chat_id,
@@ -227,7 +231,11 @@ async fn download_step(
     match downloader.download_media(info, url).await {
         Ok(media) => Ok(media),
         Err(e) => {
-            log::error!("Download failed for {}: {}", url, e);
+            if matches!(e, crate::downloader::DownloadError::MediaUnavailable(_)) {
+                log::warn!("Download rejected for {}: {}", url, e);
+            } else {
+                log::error!("Download failed for {}: {}", url, e);
+            }
             let user_message = if matches!(e, crate::downloader::DownloadError::Timeout(_)) {
                 "Sorry, the download is taking too long. Please try a shorter video."
             } else {
