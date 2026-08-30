@@ -37,8 +37,8 @@ CMD ["./crabberbot"]
 
 FROM python:3.14-slim-trixie AS downloader-worker
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
-        libssl3t64 openssl openssl-provider-legacy \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir "setuptools>=78.1.1" "msgpack>=1.2.1" \
         requests brotli \
