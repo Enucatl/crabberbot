@@ -28,7 +28,6 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    labels: ["checkmk_monitor=true"]
     volumes:
       - downloads:/downloads
       - downloader_socket:/downloader:ro
