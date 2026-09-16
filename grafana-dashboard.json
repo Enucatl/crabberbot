@@ -354,8 +354,39 @@
     },
 
     {
+      "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "validation_error_pct"},
+            "properties": [{"id": "unit", "value": "percent"}]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
+      "id": 18,
+      "options": {
+        "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false},
+        "showHeader": true
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  regexp_replace(source_url, '^https?://([^/?#]+).*$', '\\1') AS domain,\n  count(*) FILTER (WHERE status IN ('error', 'validation_error')) AS errors,\n  count(*) FILTER (WHERE status = 'validation_error') AS validation_errors,\n  count(*) AS total_requests,\n  ROUND(100.0 * count(*) FILTER (WHERE status = 'validation_error') / NULLIF(count(*), 0), 1) AS validation_error_pct\nFROM requests\nWHERE $__timeFilter(created_at)\nGROUP BY 1\nHAVING count(*) >= 10\n  AND count(*) FILTER (WHERE status IN ('error', 'validation_error')) > 0\nORDER BY validation_error_pct DESC, errors DESC\nLIMIT 15",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Errors by Requested Domain",
+      "type": "table"
+    },
+
+    {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 28},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 36},
       "id": 9,
       "title": "Premium AI Features",
       "type": "row"
@@ -373,7 +404,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 29},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 37},
       "id": 10,
       "options": {
         "colorMode": "value",
@@ -408,7 +439,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 29},
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 37},
       "id": 11,
       "options": {
         "colorMode": "value",
@@ -449,7 +480,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 29},
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 37},
       "id": 12,
       "options": {
         "colorMode": "value",
@@ -504,7 +535,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 33},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 41},
       "id": 13,
       "options": {
         "legend": {"calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true},
@@ -551,7 +582,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 33},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 41},
       "id": 14,
       "options": {
         "legend": {"calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true},
@@ -599,7 +630,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 41},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 49},
       "id": 15,
       "options": {
         "legend": {"calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true},
@@ -623,7 +654,7 @@
         "defaults": {"color": {"mode": "palette-classic"}, "mappings": [], "unit": "currencyUSD", "decimals": 5},
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 41},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 49},
       "id": 16,
       "options": {
         "displayLabels": ["name", "percent"],
@@ -689,7 +720,7 @@
           }
         ]
       },
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 49},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 57},
       "id": 17,
       "options": {
         "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false},
