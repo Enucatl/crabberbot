@@ -19,7 +19,7 @@ use crate::worker_protocol::{Request, Response, ResultData, read_frame, write_fr
 
 const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
-const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_COMMAND_OUTPUT_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum DownloadError {
@@ -499,7 +499,7 @@ fn command_output_error(
 ) -> DownloadError {
     match result {
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::FileTooLarge => {
-            DownloadError::CommandFailed("yt-dlp output exceeded 1 MiB".to_string())
+            DownloadError::CommandFailed("yt-dlp output exceeded 5 MiB".to_string())
         }
         Ok(Err(e)) => DownloadError::CommandFailed(e.to_string()),
         Err(e) => DownloadError::CommandFailed(e.to_string()),
