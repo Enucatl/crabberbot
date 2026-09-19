@@ -546,7 +546,7 @@
           "datasource": {"type": "postgres", "uid": "afep0vq6cfls0c"},
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  date_trunc('day', created_at) AS time,\n  SUM(estimated_cost_usd) FILTER (WHERE feature IN ('transcribe', 'summarize')) AS \"Deepgram\",\n  SUM(estimated_cost_usd) FILTER (WHERE feature LIKE 'gemini_%_input') AS \"Gemini Input\",\n  SUM(estimated_cost_usd) FILTER (WHERE feature LIKE 'gemini_%_output') AS \"Gemini Output\"\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nGROUP BY 1\nORDER BY 1",
+          "rawSql": "SELECT\n  date_trunc('day', created_at) AS time,\n  SUM(estimated_cost_usd) FILTER (WHERE feature IN ('transcribe', 'summarize')) AS \"Deepgram\",\n  SUM(estimated_cost_usd) FILTER (WHERE feature LIKE '%_input') AS \"AI Input\",\n  SUM(estimated_cost_usd) FILTER (WHERE feature LIKE '%_output') AS \"AI Output\"\nFROM premium_usage\nWHERE $__timeFilter(created_at)\nGROUP BY 1\nORDER BY 1",
           "refId": "A"
         }
       ],
@@ -645,7 +645,7 @@
           "refId": "A"
         }
       ],
-      "title": "Gemini Tokens per Day",
+      "title": "AI Tokens per Day",
       "type": "timeseries"
     },
     {

@@ -105,7 +105,7 @@
         },
         {
           "uid": "crabberbot-gemini-volume",
-          "title": "Gemini Token Spike",
+          "title": "AI Token Spike",
           "condition": "C",
           "data": [
             {
@@ -115,7 +115,7 @@
               "model": {
                 "format": "table",
                 "rawQuery": true,
-                "rawSql": "SELECT COALESCE(SUM(units), 0) AS value FROM premium_usage WHERE feature LIKE 'gemini_%' AND created_at > NOW() - INTERVAL '1 hour'"
+                "rawSql": "SELECT COALESCE(SUM(units), 0) AS value FROM premium_usage WHERE (feature LIKE '%_input' OR feature LIKE '%_output') AND created_at > NOW() - INTERVAL '1 hour'"
               }
             },
             {
@@ -132,7 +132,7 @@
           "noDataState": "OK",
           "execErrState": "Error",
           "for": "5m",
-          "annotations": {"summary": "Gemini token usage is above the expected hourly volume."},
+          "annotations": {"summary": "AI token usage is above the expected hourly volume."},
           "labels": {"service": "crabberbot", "severity": "warning"}
         },
         {
