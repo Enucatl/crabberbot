@@ -25,7 +25,6 @@ pub enum SummarizationError {
 #[derive(Debug)]
 pub struct OpenRouterResult {
     pub language: String,
-    pub speaker_count: u32,
     pub transcript: String,
     pub summary: String,
     pub prompt_tokens: u64,
@@ -40,7 +39,6 @@ pub trait Summarizer: Send + Sync {
         &self,
         transcript: &str,
         language: Option<String>,
-        speaker_count: u32,
     ) -> Result<OpenRouterResult, SummarizationError>;
 }
 
@@ -95,6 +93,7 @@ impl OpenRouterSummarizer {
             "messages": [{"role": "user", "content": prompt}],
             "max_completion_tokens": 32768,
             "reasoning_effort": "medium",
+            "provider": {"require_parameters": true},
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -288,7 +287,6 @@ impl Summarizer for OpenRouterSummarizer {
         &self,
         transcript: &str,
         language: Option<String>,
-        speaker_count: u32,
     ) -> Result<OpenRouterResult, SummarizationError> {
         let prompt = format!(
             "You are a multilingual transcript editor.\n\n\
@@ -363,7 +361,6 @@ impl Summarizer for OpenRouterSummarizer {
         );
         Ok(OpenRouterResult {
             language: language.unwrap_or_else(|| "und".to_string()),
-            speaker_count,
             transcript: corrected_transcript,
             summary,
             prompt_tokens,

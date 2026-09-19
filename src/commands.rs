@@ -1208,25 +1208,24 @@ async fn prepare_ai_action(
     api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
         .await?;
 
-    if let Some(cached) = &ctx.transcript {
-        if let Some(summary) = &ctx.summary {
-            return Ok(Some((
-                OpenRouterResult {
-                    language: ctx
-                        .transcript_language
-                        .clone()
-                        .unwrap_or_else(|| "und".to_string()),
-                    speaker_count: ctx.speaker_count.unwrap_or(1) as u32,
-                    transcript: cached.clone(),
-                    summary: summary.clone(),
-                    prompt_tokens: 0,
-                    output_tokens: 0,
-                    cost_usd: 0.0,
-                },
-                None,
-                reservation,
-            )));
-        }
+    if let Some(cached) = &ctx.transcript
+        && let Some(summary) = &ctx.summary
+    {
+        return Ok(Some((
+            OpenRouterResult {
+                language: ctx
+                    .transcript_language
+                    .clone()
+                    .unwrap_or_else(|| "und".to_string()),
+                transcript: cached.clone(),
+                summary: summary.clone(),
+                prompt_tokens: 0,
+                output_tokens: 0,
+                cost_usd: 0.0,
+            },
+            None,
+            reservation,
+        )));
     }
 
     let cached_raw_transcript = ctx.raw_transcript.as_ref().or(ctx.transcript.as_ref());
@@ -1282,12 +1281,9 @@ async fn prepare_ai_action(
             }
         };
 
+    let speaker_count = speaker_count.unwrap_or(1);
     let result = match summarizer
-        .generate_transcript_and_summary(
-            &raw_transcript,
-            detected_language,
-            speaker_count.unwrap_or(1),
-        )
+        .generate_transcript_and_summary(&raw_transcript, detected_language)
         .await
     {
         Ok(result) => result,
@@ -1315,7 +1311,7 @@ async fn prepare_ai_action(
             &result.transcript,
             &result.language,
             &result.summary,
-            result.speaker_count as i32,
+            speaker_count as i32,
         )
         .await;
     Ok(Some((result, deepgram_usage, reservation)))
@@ -1998,10 +1994,9 @@ mod tests {
         mock_summarizer
             .expect_generate_transcript_and_summary()
             .times(1)
-            .returning(|_, _, _| {
+            .returning(|_, _| {
                 Ok(crate::premium::summarizer::OpenRouterResult {
                     language: "en".to_string(),
-                    speaker_count: 1,
                     transcript: "Corrected transcript.".to_string(),
                     summary: "A summary.".to_string(),
                     prompt_tokens: 1000,
@@ -2263,10 +2258,9 @@ mod tests {
         mock_summarizer
             .expect_generate_transcript_and_summary()
             .times(1)
-            .returning(|_, _, _| {
+            .returning(|_, _| {
                 Ok(crate::premium::summarizer::OpenRouterResult {
                     language: "it".to_string(),
-                    speaker_count: 1,
                     transcript: "Corrected transcript.".to_string(),
                     summary: "• Point one\n\n• Point two".to_string(),
                     prompt_tokens: 1200,

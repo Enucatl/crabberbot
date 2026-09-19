@@ -89,7 +89,7 @@ defined directly in `docker-compose.yml`.
 
 Compose mounts all sensitive values under `/run/secrets`; they aren't exposed in the application or Telegram Bot API container environments.
 
-`DEEPGRAM_API_KEY` and `OPENROUTER_API_KEY` are required only for transcription and summarization. `OPENROUTER_MODEL` is optional and defaults to `openai/gpt-5.6-luna`; set it to any model ID supported by OpenRouter. `OWNER_CHAT_ID` enables owner-only grants, support replies, and refunds.
+`DEEPGRAM_API_KEY` and `OPENROUTER_API_KEY` are required only for transcription and summarization. `OPENROUTER_MODEL` is optional and defaults to `openai/gpt-5.6-luna`; overrides must select an OpenRouter model with structured-output support. `OWNER_CHAT_ID` enables owner-only grants, support replies, and refunds.
 
 Start the stack:
 
