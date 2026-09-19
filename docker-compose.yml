@@ -10,9 +10,9 @@ services:
     environment:
       - RUST_LOG=info,crabberbot=info
       - TELOXIDE_API_URL=http://telegram-bot-api:8081
-      - WEBHOOK_URL=https://crabberbot.enucatl.com/webhook
+      - WEBHOOK_URL=${WEBHOOK_URL:-https://crabberbot.enucatl.com/webhook}
       - TELOXIDE_TOKEN_FILE=/run/secrets/telegram_bot_token
-      - DATABASE_URL=postgres://crabberbot@crabberbot-postgres-1:5432/crabberbot
+      - DATABASE_URL=${DATABASE_URL:-postgres://crabberbot@crabberbot-postgres-1:5432/crabberbot}
       - DATABASE_PASSWORD_FILE=/run/secrets/postgres_password
       - POSTGRES_MAX_CONNECTIONS=10
       - POSTGRES_MIN_CONNECTIONS=1
@@ -20,7 +20,7 @@ services:
       - DEEPGRAM_API_KEY_FILE=/run/secrets/deepgram_api_key
       - OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key
       - DOWNLOADER_SOCKET=/downloader/downloader.sock
-      - OPENROUTER_MODEL=inception/mercury-2.5
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-inception/mercury-2.5}
       - OWNER_CHAT_ID_FILE=/run/secrets/owner_chat_id
     secrets:
       - telegram_bot_token
@@ -51,7 +51,7 @@ services:
       - DOWNLOADER_SOCKET=/downloader/downloader.sock
       - DOWNLOADS_DIR=/downloads
       - AUDIO_CACHE_DIR=/downloads/audio_cache
-      - MAX_YT_DLP_SESSIONS=4
+      - MAX_YT_DLP_SESSIONS=${MAX_YT_DLP_SESSIONS:-4}
       - TMPDIR=/downloads/tmp
       - XDG_CACHE_HOME=/downloads/.cache
     depends_on:
@@ -99,7 +99,7 @@ services:
       - TELEGRAM_API_HASH_FILE=/run/secrets/telegram_api_hash
       - TELEGRAM_API_ID_FILE=/run/secrets/telegram_api_id
       - TELEGRAM_LOCAL=1
-      - TELEGRAM_VERBOSITY=1
+      - TELEGRAM_VERBOSITY=${TELEGRAM_VERBOSITY:-1}
     secrets: [telegram_api_hash, telegram_api_id]
 
   postgres:
@@ -133,18 +133,18 @@ volumes:
 
 secrets:
   telegram_bot_token:
-    file: ./secrets/telegram_bot_token
+    file: ${TELEGRAM_BOT_TOKEN_SECRET_FILE:-./secrets/telegram_bot_token}
   postgres_password:
-    file: ./secrets/postgres_password
+    file: ${POSTGRES_PASSWORD_SECRET_FILE:-./secrets/postgres_password}
   deepgram_api_key:
-    file: ./secrets/deepgram_api_key
+    file: ${DEEPGRAM_API_KEY_SECRET_FILE:-./secrets/deepgram_api_key}
   openrouter_api_key:
-    file: ./secrets/openrouter_api_key
+    file: ${OPENROUTER_API_KEY_SECRET_FILE:-./secrets/openrouter_api_key}
   owner_chat_id:
-    file: ./secrets/owner_chat_id
+    file: ${OWNER_CHAT_ID_SECRET_FILE:-./secrets/owner_chat_id}
   telegram_api_hash:
-    file: ./secrets/telegram_api_hash
+    file: ${TELEGRAM_API_HASH_SECRET_FILE:-./secrets/telegram_api_hash}
   telegram_api_id:
-    file: ./secrets/telegram_api_id
+    file: ${TELEGRAM_API_ID_SECRET_FILE:-./secrets/telegram_api_id}
   tunnel_token:
-    file: ./secrets/tunnel_token
+    file: ${TUNNEL_TOKEN_SECRET_FILE:-./secrets/tunnel_token}
