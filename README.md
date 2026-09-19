@@ -74,26 +74,20 @@ cd crabberbot
 
 Create these secret files:
 
+- `secrets/telegram_bot_token`
 - `secrets/telegram_api_id`
 - `secrets/telegram_api_hash`
 - `secrets/tunnel_token`
+- `secrets/postgres_password`
+- `secrets/deepgram_api_key`
+- `secrets/openrouter_api_key`
+- `secrets/owner_chat_id`
 
-Then create `.env`:
+Keep an empty `.env` file in the project directory because the Puppet deployment
+wrapper includes it when invoking Compose. Non-sensitive runtime defaults are
+defined directly in `docker-compose.yml`.
 
-```dotenv
-TELOXIDE_TOKEN=123456:ABC-DEF1234567890
-WEBHOOK_URL=https://your-tunnel.example.com
-POSTGRES_PASSWORD=change-me
-# Optional
-TELEGRAM_VERBOSITY=1
-DEEPGRAM_API_KEY=
-OPENROUTER_API_KEY=
-OPENROUTER_MODEL=inception/mercury-2.5
-OWNER_CHAT_ID=
-MAX_YT_DLP_SESSIONS=4
-```
-
-Compose mounts the Telegram API ID and hash files under `/run/secrets`; they aren't exposed in the Telegram Bot API container environment.
+Compose mounts all sensitive values under `/run/secrets`; they aren't exposed in the application or Telegram Bot API container environments.
 
 `DEEPGRAM_API_KEY` and `OPENROUTER_API_KEY` are required only for transcription and summarization. `OPENROUTER_MODEL` is optional and defaults to `inception/mercury-2.5`; set it to any model ID supported by OpenRouter. `OWNER_CHAT_ID` enables owner-only grants, support replies, and refunds.
 

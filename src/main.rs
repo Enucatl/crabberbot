@@ -292,9 +292,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Starting CrabberBot version {}", version);
 
     let config = AppConfig::from_env()?;
-    if config.deepgram_api_key.is_empty() || config.openrouter_api_key.is_empty() {
+    if config.telegram_token.is_empty()
+        || config.deepgram_api_key.is_empty()
+        || config.openrouter_api_key.is_empty()
+    {
         log::warn!(
-            "DEEPGRAM_API_KEY and/or OPENROUTER_API_KEY not set — transcription and summarization will be unavailable"
+            "TELOXIDE_TOKEN, DEEPGRAM_API_KEY, and/or OPENROUTER_API_KEY not set — corresponding features will be unavailable"
         );
     }
     log::info!(
@@ -332,7 +335,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let client = Client::new();
-    let bot = Bot::from_env_with_client(client.clone());
+    let bot = Bot::with_client(config.telegram_token.clone(), client.clone());
 
     let downloader: Arc<dyn Downloader> =
         Arc::new(SocketDownloader::new(config.downloader_socket.clone()));

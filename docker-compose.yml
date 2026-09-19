@@ -10,17 +10,24 @@ services:
     environment:
       - RUST_LOG=info,crabberbot=info
       - TELOXIDE_API_URL=http://telegram-bot-api:8081
-      - TELOXIDE_TOKEN
-      - WEBHOOK_URL
-      - DATABASE_URL=postgres://crabberbot:${POSTGRES_PASSWORD}@crabberbot-postgres-1:5432/crabberbot
+      - WEBHOOK_URL=https://crabberbot.enucatl.com/webhook
+      - TELOXIDE_TOKEN_FILE=/run/secrets/telegram_bot_token
+      - DATABASE_URL=postgres://crabberbot@crabberbot-postgres-1:5432/crabberbot
+      - DATABASE_PASSWORD_FILE=/run/secrets/postgres_password
       - POSTGRES_MAX_CONNECTIONS=10
       - POSTGRES_MIN_CONNECTIONS=1
       - POSTGRES_ACQUIRE_TIMEOUT_SECS=5
-      - DEEPGRAM_API_KEY
-      - OPENROUTER_API_KEY
+      - DEEPGRAM_API_KEY_FILE=/run/secrets/deepgram_api_key
+      - OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key
       - DOWNLOADER_SOCKET=/downloader/downloader.sock
       - OPENROUTER_MODEL=inception/mercury-2.5
-      - OWNER_CHAT_ID
+      - OWNER_CHAT_ID_FILE=/run/secrets/owner_chat_id
+    secrets:
+      - telegram_bot_token
+      - postgres_password
+      - deepgram_api_key
+      - openrouter_api_key
+      - owner_chat_id
     depends_on:
       downloader-worker:
         condition: service_healthy
@@ -44,7 +51,7 @@ services:
       - DOWNLOADER_SOCKET=/downloader/downloader.sock
       - DOWNLOADS_DIR=/downloads
       - AUDIO_CACHE_DIR=/downloads/audio_cache
-      - MAX_YT_DLP_SESSIONS=${MAX_YT_DLP_SESSIONS:-4}
+      - MAX_YT_DLP_SESSIONS=4
       - TMPDIR=/downloads/tmp
       - XDG_CACHE_HOME=/downloads/.cache
     depends_on:
@@ -92,7 +99,7 @@ services:
       - TELEGRAM_API_HASH_FILE=/run/secrets/telegram_api_hash
       - TELEGRAM_API_ID_FILE=/run/secrets/telegram_api_id
       - TELEGRAM_LOCAL=1
-      - TELEGRAM_VERBOSITY
+      - TELEGRAM_VERBOSITY=1
     secrets: [telegram_api_hash, telegram_api_id]
 
   postgres:
@@ -105,7 +112,8 @@ services:
     environment:
       POSTGRES_DB: crabberbot
       POSTGRES_USER: crabberbot
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
     volumes: [pgdata:/var/lib/postgresql]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U crabberbot"]
@@ -124,6 +132,16 @@ volumes:
   telegram-bot-api-data:
 
 secrets:
+  telegram_bot_token:
+    file: ./secrets/telegram_bot_token
+  postgres_password:
+    file: ./secrets/postgres_password
+  deepgram_api_key:
+    file: ./secrets/deepgram_api_key
+  openrouter_api_key:
+    file: ./secrets/openrouter_api_key
+  owner_chat_id:
+    file: ./secrets/owner_chat_id
   telegram_api_hash:
     file: ./secrets/telegram_api_hash
   telegram_api_id:
