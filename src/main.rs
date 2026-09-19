@@ -335,7 +335,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let client = Client::new();
-    let bot = Bot::with_client(config.telegram_token.clone(), client.clone());
+    let api_url = std::env::var("TELOXIDE_API_URL")
+        .unwrap_or_else(|_| "https://api.telegram.org".to_string());
+    let api_url = api_url.trim_end_matches('/');
+    let bot = Bot::with_client(config.telegram_token.clone(), client.clone())
+        .set_api_url(Url::parse(api_url).expect("Invalid TELOXIDE_API_URL"));
 
     let downloader: Arc<dyn Downloader> =
         Arc::new(SocketDownloader::new(config.downloader_socket.clone()));
