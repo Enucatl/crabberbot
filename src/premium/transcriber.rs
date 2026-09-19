@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -29,6 +30,11 @@ pub enum TranscriptionError {
 
 pub struct TranscriptionResult {
     pub transcript: String,
+    /// Diarized utterances formatted with authoritative Deepgram speaker IDs.
+    /// Falls back to `None` when Deepgram does not return utterance data.
+    pub diarized_transcript: Option<String>,
+    /// Number of unique speaker IDs in the diarized utterances.
+    pub speaker_count: Option<u32>,
     /// BCP-47 language code detected by Deepgram (e.g. "it", "en"), if available.
     pub detected_language: Option<String>,
     /// Audio duration as reported by Deepgram (what they bill on).
@@ -50,6 +56,16 @@ pub trait Transcriber: Send + Sync {
         &self,
         audio_path: &Path,
     ) -> Result<TranscriptionResult, TranscriptionError>;
+}
+
+/// Count speaker IDs from the diarized source format passed to the language model.
+pub fn speaker_count_from_diarized_transcript(raw: &str) -> Option<u32> {
+    let speaker_ids: HashSet<&str> = raw
+        .lines()
+        .filter_map(|line| line.strip_prefix("<utterance speaker_id=\""))
+        .filter_map(|rest| rest.split_once('"').map(|(speaker, _)| speaker))
+        .collect();
+    (!speaker_ids.is_empty()).then_some(speaker_ids.len() as u32)
 }
 
 pub struct DeepgramTranscriber {
@@ -92,7 +108,7 @@ impl Transcriber for DeepgramTranscriber {
             || async {
                 let response = self
                     .client
-                    .post("https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&detect_language=true")
+                    .post("https://api.deepgram.com/v1/listen?model=nova-3&diarize_model=latest&utterances=true&smart_format=true&detect_language=true")
                     .timeout(Duration::from_secs(45))
                     .header("Authorization", format!("Token {}", self.api_key))
                     .header("Content-Type", "audio/mpeg")
@@ -165,12 +181,34 @@ impl Transcriber for DeepgramTranscriber {
             .as_str()
             .map(String::from);
 
+        let diarized_transcript = json["results"]["utterances"]
+            .as_array()
+            .filter(|utterances| !utterances.is_empty())
+            .map(|utterances| {
+                utterances
+                    .iter()
+                    .filter_map(|utterance| {
+                        let speaker = utterance["speaker"].as_u64()?;
+                        let transcript = utterance["transcript"].as_str()?.trim();
+                        (!transcript.is_empty()).then(|| {
+                            format!("<utterance speaker_id=\"{speaker}\">{transcript}</utterance>")
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|text| !text.is_empty());
+        let speaker_count = diarized_transcript
+            .as_deref()
+            .and_then(speaker_count_from_diarized_transcript);
+
         let billed_duration_secs = json["metadata"]["duration"].as_f64().unwrap_or(0.0);
         let cost_usd = billed_duration_secs * DEEPGRAM_COST_PER_SECOND;
 
         log::info!(
-            "Deepgram: transcript {} chars, detected_language={:?}, duration={:.2}s, cost=${:.6}",
+            "Deepgram: transcript {} chars, diarized={}, detected_language={:?}, duration={:.2}s, cost=${:.6}",
             transcript.len(),
+            diarized_transcript.is_some(),
             detected_language,
             billed_duration_secs,
             cost_usd,
@@ -184,6 +222,8 @@ impl Transcriber for DeepgramTranscriber {
 
         Ok(TranscriptionResult {
             transcript,
+            diarized_transcript,
+            speaker_count,
             detected_language,
             billed_duration_secs,
             cost_usd,

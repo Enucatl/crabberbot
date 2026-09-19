@@ -37,10 +37,16 @@ pub struct CallbackContext {
     pub has_video: bool,
     pub media_duration_secs: Option<i32>,
     pub audio_cache_path: Option<String>,
-    /// Cached raw Deepgram transcript (set after first transcription call).
+    /// Cleaned transcript returned by OpenRouter.
     pub transcript: Option<String>,
-    /// BCP-47 language code detected by Deepgram, e.g. "en", "it".
+    /// BCP-47 language code detected by Deepgram or returned by OpenRouter, e.g. "en", "it".
     pub transcript_language: Option<String>,
+    /// Raw Deepgram transcript, including diarization markup when available.
+    pub raw_transcript: Option<String>,
+    /// Cached structured summary produced together with the corrected transcript.
+    pub summary: Option<String>,
+    /// Number of unique speakers returned by the structured AI result.
+    pub speaker_count: Option<i32>,
 }
 
 /// Context returned after a successful download, containing info needed for premium buttons.
@@ -779,6 +785,9 @@ pub async fn maybe_send_premium_buttons(
             .map(|p| p.to_string_lossy().to_string()),
         transcript: None,
         transcript_language: None,
+        raw_transcript: None,
+        summary: None,
+        speaker_count: None,
     };
 
     let context_id = storage.store_callback_context(&callback_ctx).await;

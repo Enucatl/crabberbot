@@ -8,7 +8,9 @@ use crate::concurrency::ConcurrencyLimiter;
 use crate::handler::{CallbackContext, send_long_text};
 use crate::premium::MAX_PREMIUM_FILE_DURATION_SECS;
 use crate::premium::summarizer::{OpenRouterResult, Summarizer};
-use crate::premium::transcriber::{DeepgramUsage, Transcriber};
+use crate::premium::transcriber::{
+    DeepgramUsage, Transcriber, speaker_count_from_diarized_transcript,
+};
 use crate::storage::{QuotaReservation, Storage};
 use crate::subscription::{
     PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_PRICE_STARS,
@@ -1054,41 +1056,25 @@ async fn handle_transcription(
     summarizer: &dyn Summarizer,
 ) -> ResponseResult<()> {
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
-    let Some((raw_transcript, detected_language, deepgram_usage, _reservation)) =
-        prepare_ai_action(
-            context_id,
-            ctx,
-            user_id,
-            chat_id,
-            message_id,
-            api,
-            storage,
-            transcriber,
-            "transcription",
-        )
-        .await?
+    let Some((result, deepgram_usage, reservation)) = prepare_ai_action(
+        context_id,
+        ctx,
+        user_id,
+        chat_id,
+        message_id,
+        api,
+        storage,
+        transcriber,
+        summarizer,
+        "transcription",
+    )
+    .await?
     else {
         return Ok(());
     };
 
-    let correction = match summarizer
-        .correct_transcript(&raw_transcript, detected_language)
-        .await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            log::error!("Transcript correction failed: {}", e);
-            OpenRouterResult {
-                text: raw_transcript,
-                prompt_tokens: 0,
-                output_tokens: 0,
-                cost_usd: 0.0,
-            }
-        }
-    };
-
-    if !send_long_text(chat_id, message_id, &correction.text, api).await {
-        storage.release_ai_seconds(user_id, _reservation).await;
+    if !send_long_text(chat_id, message_id, &result.transcript, api).await {
+        storage.release_ai_seconds(user_id, reservation).await;
         return Ok(());
     }
 
@@ -1101,7 +1087,14 @@ async fn handle_transcription(
         deepgram_usage,
     )
     .await;
-    record_openrouter_usage(storage, user_id, ctx, "openrouter_correction", &correction).await;
+    record_openrouter_usage(
+        storage,
+        user_id,
+        ctx,
+        "openrouter_transcript_summary",
+        &result,
+    )
+    .await;
     Ok(())
 }
 
@@ -1118,7 +1111,7 @@ async fn handle_summarization(
     summarizer: &dyn Summarizer,
 ) -> ResponseResult<()> {
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
-    let Some((raw_transcript, detected_language, deepgram_usage, reservation)) = prepare_ai_action(
+    let Some((result, deepgram_usage, reservation)) = prepare_ai_action(
         context_id,
         ctx,
         user_id,
@@ -1127,6 +1120,7 @@ async fn handle_summarization(
         api,
         storage,
         transcriber,
+        summarizer,
         "summarization",
     )
     .await?
@@ -1134,30 +1128,7 @@ async fn handle_summarization(
         return Ok(());
     };
 
-    let summary = match summarizer
-        .summarize(&raw_transcript, detected_language)
-        .await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            storage.release_ai_seconds(user_id, reservation).await;
-            log::error!("Summarization failed: {}", e);
-            log_telegram_failure(
-                api.send_text_message(
-                    chat_id,
-                    message_id,
-                    "Sorry, summarization failed. Please try again later.",
-                )
-                .await,
-                chat_id,
-                "summarization_failed_notice",
-            )
-            .await;
-            return Ok(()); // no quota deduction
-        }
-    };
-
-    if !send_long_text(chat_id, message_id, &summary.text, api).await {
+    if !send_long_text(chat_id, message_id, &result.summary, api).await {
         storage.release_ai_seconds(user_id, reservation).await;
         return Ok(());
     }
@@ -1171,7 +1142,14 @@ async fn handle_summarization(
         deepgram_usage,
     )
     .await;
-    record_openrouter_usage(storage, user_id, ctx, "openrouter_summarize", &summary).await;
+    record_openrouter_usage(
+        storage,
+        user_id,
+        ctx,
+        "openrouter_transcript_summary",
+        &result,
+    )
+    .await;
     Ok(())
 }
 
@@ -1185,15 +1163,9 @@ async fn prepare_ai_action(
     api: &dyn TelegramApi,
     storage: &dyn Storage,
     transcriber: &dyn Transcriber,
+    summarizer: &dyn Summarizer,
     action: &str,
-) -> ResponseResult<
-    Option<(
-        String,
-        Option<String>,
-        Option<DeepgramUsage>,
-        QuotaReservation,
-    )>,
-> {
+) -> ResponseResult<Option<(OpenRouterResult, Option<DeepgramUsage>, QuotaReservation)>> {
     let sub = storage.get_subscription(user_id).await;
     let duration_secs = ctx.media_duration_secs.unwrap_or(0);
 
@@ -1237,48 +1209,116 @@ async fn prepare_ai_action(
         .await?;
 
     if let Some(cached) = &ctx.transcript {
-        return Ok(Some((
-            cached.clone(),
-            ctx.transcript_language.clone(),
-            None::<DeepgramUsage>,
-            reservation,
-        )));
+        if let Some(summary) = &ctx.summary {
+            return Ok(Some((
+                OpenRouterResult {
+                    language: ctx
+                        .transcript_language
+                        .clone()
+                        .unwrap_or_else(|| "und".to_string()),
+                    speaker_count: ctx.speaker_count.unwrap_or(1) as u32,
+                    transcript: cached.clone(),
+                    summary: summary.clone(),
+                    prompt_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: 0.0,
+                },
+                None,
+                reservation,
+            )));
+        }
     }
 
-    let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
-    match transcriber.transcribe(&audio_path).await {
-        Ok(t) => {
-            storage
-                .cache_transcript(context_id, &t.transcript, t.detected_language.clone())
-                .await;
-            let usage = DeepgramUsage {
-                billed_duration_secs: t.billed_duration_secs,
-                cost_usd: t.cost_usd,
-            };
-            Ok(Some((
-                t.transcript,
-                t.detected_language,
-                Some(usage),
-                reservation,
-            )))
-        }
+    let cached_raw_transcript = ctx.raw_transcript.as_ref().or(ctx.transcript.as_ref());
+    let (raw_transcript, detected_language, speaker_count, deepgram_usage) =
+        if let Some(cached) = cached_raw_transcript {
+            (
+                cached.clone(),
+                ctx.transcript_language.clone(),
+                ctx.speaker_count
+                    .map(|count| count as u32)
+                    .or_else(|| speaker_count_from_diarized_transcript(cached)),
+                None,
+            )
+        } else {
+            let audio_path = PathBuf::from(ctx.audio_cache_path.as_deref().unwrap_or(""));
+            match transcriber.transcribe(&audio_path).await {
+                Ok(t) => {
+                    storage
+                        .cache_transcript(
+                            context_id,
+                            t.diarized_transcript.as_deref().unwrap_or(&t.transcript),
+                            t.detected_language.clone(),
+                            t.speaker_count.map(|count| count as i32),
+                        )
+                        .await;
+                    let usage = DeepgramUsage {
+                        billed_duration_secs: t.billed_duration_secs,
+                        cost_usd: t.cost_usd,
+                    };
+                    (
+                        t.diarized_transcript.unwrap_or(t.transcript),
+                        t.detected_language,
+                        t.speaker_count,
+                        Some(usage),
+                    )
+                }
+                Err(e) => {
+                    storage.release_ai_seconds(user_id, reservation).await;
+                    log::error!("Transcription failed: {}", e);
+                    log_telegram_failure(
+                        api.send_text_message(
+                            chat_id,
+                            message_id,
+                            "Sorry, transcription failed. Please try again later.",
+                        )
+                        .await,
+                        chat_id,
+                        &format!("{action}_transcription_failed_notice"),
+                    )
+                    .await;
+                    return Ok(None);
+                }
+            }
+        };
+
+    let result = match summarizer
+        .generate_transcript_and_summary(
+            &raw_transcript,
+            detected_language,
+            speaker_count.unwrap_or(1),
+        )
+        .await
+    {
+        Ok(result) => result,
         Err(e) => {
             storage.release_ai_seconds(user_id, reservation).await;
-            log::error!("Transcription failed: {}", e);
+            log::error!("Transcript and summary generation failed: {}", e);
             log_telegram_failure(
                 api.send_text_message(
                     chat_id,
                     message_id,
-                    "Sorry, transcription failed. Please try again later.",
+                    "Sorry, transcript processing failed. Please try again later.",
                 )
                 .await,
                 chat_id,
-                &format!("{action}_transcription_failed_notice"),
+                &format!("{action}_ai_failed_notice"),
             )
             .await;
-            Ok(None)
+            return Ok(None);
         }
-    }
+    };
+
+    storage
+        .cache_ai_result(
+            context_id,
+            &result.transcript,
+            &result.language,
+            &result.summary,
+            result.speaker_count as i32,
+        )
+        .await;
+    Ok(Some((result, deepgram_usage, reservation)))
 }
 
 async fn record_ai_action_usage(
@@ -1390,6 +1430,9 @@ mod tests {
             audio_cache_path: None,
             transcript: None,
             transcript_language: None,
+            summary: None,
+            speaker_count: None,
+            raw_transcript: None,
         }
     }
 
@@ -1827,6 +1870,9 @@ mod tests {
             audio_cache_path: Some("/tmp/fake_audio.mp3".to_string()),
             transcript: None,
             transcript_language: None,
+            summary: None,
+            speaker_count: None,
+            raw_transcript: None,
         };
 
         handle_audio_extraction(
@@ -1874,6 +1920,9 @@ mod tests {
             audio_cache_path: Some(path),
             transcript: None,
             transcript_language: None,
+            summary: None,
+            speaker_count: None,
+            raw_transcript: None,
         };
 
         handle_audio_extraction(
@@ -1906,6 +1955,8 @@ mod tests {
     fn make_transcription_result(transcript: &str) -> TranscriptionResult {
         TranscriptionResult {
             transcript: transcript.to_string(),
+            diarized_transcript: None,
+            speaker_count: None,
             detected_language: Some("en".to_string()),
             billed_duration_secs: 60.0,
             cost_usd: 60.0 * crate::premium::DEEPGRAM_COST_PER_SECOND,
@@ -1938,14 +1989,21 @@ mod tests {
         mock_storage
             .expect_cache_transcript()
             .times(1)
-            .returning(|_, _, _| ());
+            .returning(|_, _, _, _| ());
+        mock_storage
+            .expect_cache_ai_result()
+            .times(1)
+            .returning(|_, _, _, _, _| ());
 
         mock_summarizer
-            .expect_correct_transcript()
+            .expect_generate_transcript_and_summary()
             .times(1)
-            .returning(|_, _| {
+            .returning(|_, _, _| {
                 Ok(crate::premium::summarizer::OpenRouterResult {
-                    text: "Corrected transcript.".to_string(),
+                    language: "en".to_string(),
+                    speaker_count: 1,
+                    transcript: "Corrected transcript.".to_string(),
+                    summary: "A summary.".to_string(),
                     prompt_tokens: 1000,
                     output_tokens: 500,
                     cost_usd: 0.0,
@@ -1973,12 +2031,12 @@ mod tests {
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "openrouter_correction_input")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_transcript_summary_input")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "openrouter_correction_output")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_transcript_summary_output")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
 
@@ -1991,6 +2049,9 @@ mod tests {
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
             transcript: None,
             transcript_language: None,
+            summary: None,
+            speaker_count: None,
+            raw_transcript: None,
         };
 
         handle_transcription(
@@ -2010,30 +2071,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_transcription_cached_skips_deepgram_and_charges_quota() {
-        // Cached transcript avoids Deepgram but still consumes quota for the delivered action.
+        // Cached structured output avoids Deepgram and OpenRouter but still consumes quota for the delivered action.
         let mut mock_api = MockTelegramApi::new();
         let mut mock_storage = MockStorage::new();
         let mock_transcriber = MockTranscriber::new(); // no expectations — panics if called
-        let mut mock_summarizer = MockSummarizer::new();
+        let mock_summarizer = MockSummarizer::new();
 
         mock_storage
             .expect_get_subscription()
             .returning(|_| active_basic_with_quota());
         mock_api.expect_send_chat_action().returning(|_, _| Ok(()));
-
-        // cache_transcript must NOT be called since transcript already exists
-        mock_summarizer
-            .expect_correct_transcript()
-            .times(1)
-            .returning(|_, _| {
-                Ok(crate::premium::summarizer::OpenRouterResult {
-                    text: "Corrected.".to_string(),
-                    prompt_tokens: 800,
-                    output_tokens: 400,
-                    cost_usd: 0.0,
-                })
-            });
-
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -2059,17 +2106,6 @@ mod tests {
             })
             .times(1)
             .returning(|_, _, _, _, _, _| ());
-        mock_storage
-            .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "openrouter_correction_input")
-            .times(1)
-            .returning(|_, _, _, _, _, _| ());
-        mock_storage
-            .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "openrouter_correction_output")
-            .times(1)
-            .returning(|_, _, _, _, _, _| ());
-
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
             chat_id: 100,
@@ -2079,6 +2115,9 @@ mod tests {
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
             transcript: Some("cached transcript".to_string()),
             transcript_language: Some("en".to_string()),
+            summary: Some("A summary.".to_string()),
+            speaker_count: Some(1),
+            raw_transcript: None,
         };
 
         handle_transcription(
@@ -2124,6 +2163,9 @@ mod tests {
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
             transcript: None,
             transcript_language: None,
+            summary: None,
+            speaker_count: None,
+            raw_transcript: None,
         };
 
         handle_transcription(
@@ -2166,6 +2208,9 @@ mod tests {
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
             transcript: None,
             transcript_language: None,
+            summary: None,
+            speaker_count: None,
+            raw_transcript: None,
         };
 
         handle_transcription(
@@ -2209,14 +2254,21 @@ mod tests {
         mock_storage
             .expect_cache_transcript()
             .times(1)
-            .returning(|_, _, _| ());
+            .returning(|_, _, _, _| ());
+        mock_storage
+            .expect_cache_ai_result()
+            .times(1)
+            .returning(|_, _, _, _, _| ());
 
         mock_summarizer
-            .expect_summarize()
+            .expect_generate_transcript_and_summary()
             .times(1)
-            .returning(|_, _| {
+            .returning(|_, _, _| {
                 Ok(crate::premium::summarizer::OpenRouterResult {
-                    text: "• Point one\n\n• Point two".to_string(),
+                    language: "it".to_string(),
+                    speaker_count: 1,
+                    transcript: "Corrected transcript.".to_string(),
+                    summary: "• Point one\n\n• Point two".to_string(),
                     prompt_tokens: 1200,
                     output_tokens: 60,
                     cost_usd: 0.0,
@@ -2244,12 +2296,12 @@ mod tests {
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "openrouter_summarize_input")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_transcript_summary_input")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "openrouter_summarize_output")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_transcript_summary_output")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
 
@@ -2262,6 +2314,9 @@ mod tests {
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
             transcript: None,
             transcript_language: None,
+            summary: None,
+            speaker_count: None,
+            raw_transcript: None,
         };
 
         handle_summarization(
@@ -2281,29 +2336,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_summarization_cached_skips_deepgram_and_charges_quota() {
-        // Cached transcript avoids Deepgram but still consumes quota for the delivered action.
+        // Cached structured output avoids Deepgram and OpenRouter but still consumes quota for the delivered action.
         let mut mock_api = MockTelegramApi::new();
         let mut mock_storage = MockStorage::new();
         let mock_transcriber = MockTranscriber::new(); // no expectations — panics if called
-        let mut mock_summarizer = MockSummarizer::new();
+        let mock_summarizer = MockSummarizer::new();
 
         mock_storage
             .expect_get_subscription()
             .returning(|_| active_basic_with_quota());
         mock_api.expect_send_chat_action().returning(|_, _| Ok(()));
-
-        mock_summarizer
-            .expect_summarize()
-            .times(1)
-            .returning(|_, _| {
-                Ok(crate::premium::summarizer::OpenRouterResult {
-                    text: "• Point one".to_string(),
-                    prompt_tokens: 900,
-                    output_tokens: 30,
-                    cost_usd: 0.0,
-                })
-            });
-
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -2329,17 +2371,6 @@ mod tests {
             })
             .times(1)
             .returning(|_, _, _, _, _, _| ());
-        mock_storage
-            .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "openrouter_summarize_input")
-            .times(1)
-            .returning(|_, _, _, _, _, _| ());
-        mock_storage
-            .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "openrouter_summarize_output")
-            .times(1)
-            .returning(|_, _, _, _, _, _| ());
-
         let ctx = CallbackContext {
             source_url: "https://example.com/video".to_string(),
             chat_id: 100,
@@ -2349,6 +2380,9 @@ mod tests {
             audio_cache_path: Some("/tmp/audio.mp3".to_string()),
             transcript: Some("cached transcript".to_string()),
             transcript_language: Some("it".to_string()),
+            summary: Some("• Point one".to_string()),
+            speaker_count: Some(1),
+            raw_transcript: None,
         };
 
         handle_summarization(

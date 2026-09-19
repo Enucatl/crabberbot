@@ -89,7 +89,21 @@ pub trait Storage: Send + Sync {
     // Callback context
     async fn store_callback_context(&self, ctx: &CallbackContext) -> i32;
     async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext>;
-    async fn cache_transcript(&self, context_id: i32, transcript: &str, language: Option<String>);
+    async fn cache_transcript(
+        &self,
+        context_id: i32,
+        transcript: &str,
+        language: Option<String>,
+        speaker_count: Option<i32>,
+    );
+    async fn cache_ai_result(
+        &self,
+        context_id: i32,
+        transcript: &str,
+        language: &str,
+        summary: &str,
+        speaker_count: i32,
+    );
 
     /// Records a payment refund and revokes its entitlement atomically.
     /// Returns true only when the stored charge was refunded for the first time.
@@ -617,9 +631,12 @@ impl Storage for PostgresStorage {
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
+            Option<i32>,
+            Option<String>,
         )> = sqlx::query_as(
             "SELECT source_url, chat_id, user_id, has_video, media_duration_secs, audio_cache_path, \
-             transcript, transcript_language \
+             transcript, transcript_language, summary, speaker_count, raw_transcript \
              FROM callback_contexts WHERE id = $1",
         )
         .bind(context_id)
@@ -642,6 +659,9 @@ impl Storage for PostgresStorage {
                 audio_cache_path,
                 transcript,
                 transcript_language,
+                summary,
+                speaker_count,
+                raw_transcript,
             )| {
                 CallbackContext {
                     source_url,
@@ -652,23 +672,60 @@ impl Storage for PostgresStorage {
                     audio_cache_path,
                     transcript,
                     transcript_language,
+                    summary,
+                    speaker_count,
+                    raw_transcript,
                 }
             },
         )
     }
 
-    async fn cache_transcript(&self, context_id: i32, transcript: &str, language: Option<String>) {
+    async fn cache_transcript(
+        &self,
+        context_id: i32,
+        transcript: &str,
+        language: Option<String>,
+        speaker_count: Option<i32>,
+    ) {
         if let Err(e) = sqlx::query(
-            "UPDATE callback_contexts SET transcript = $1, transcript_language = $2 WHERE id = $3",
+            "UPDATE callback_contexts SET raw_transcript = $1, transcript_language = $2, speaker_count = $3 WHERE id = $4",
         )
         .bind(transcript)
         .bind(language)
+        .bind(speaker_count)
         .bind(context_id)
         .execute(&self.pool)
         .await
         {
             log::error!(
                 "Failed to cache transcript for context {}: {}",
+                context_id,
+                e
+            );
+        }
+    }
+
+    async fn cache_ai_result(
+        &self,
+        context_id: i32,
+        transcript: &str,
+        language: &str,
+        summary: &str,
+        speaker_count: i32,
+    ) {
+        if let Err(e) = sqlx::query(
+            "UPDATE callback_contexts SET transcript = $1, transcript_language = $2, summary = $3, speaker_count = $4 WHERE id = $5",
+        )
+        .bind(transcript)
+        .bind(language)
+        .bind(summary)
+        .bind(speaker_count)
+        .bind(context_id)
+        .execute(&self.pool)
+        .await
+        {
+            log::error!(
+                "Failed to cache AI result for context {}: {}",
                 context_id,
                 e
             );
