@@ -12,8 +12,8 @@ pub struct AppConfig {
     pub postgres_min_connections: u32,
     pub postgres_acquire_timeout: Duration,
     pub deepgram_api_key: String,
-    pub gemini_api_key: String,
-    pub gemini_model: String,
+    pub openrouter_api_key: String,
+    pub openrouter_model: String,
     pub owner_chat_id: i64,
     pub port: u16,
     pub webhook_url: Url,
@@ -44,9 +44,9 @@ impl AppConfig {
         }
         let postgres_acquire_timeout_secs = parse_env("POSTGRES_ACQUIRE_TIMEOUT_SECS", 5u64)?;
         let deepgram_api_key = std::env::var("DEEPGRAM_API_KEY").unwrap_or_default();
-        let gemini_api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
-        let gemini_model =
-            std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.1-flash-lite".to_string());
+        let openrouter_api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
+        let openrouter_model = std::env::var("OPENROUTER_MODEL")
+            .unwrap_or_else(|_| "inception/mercury-2.5".to_string());
         let owner_chat_id = parse_env("OWNER_CHAT_ID", 0i64)?;
         let port = parse_env("PORT", 8080u16)?;
         let webhook_url = required("WEBHOOK_URL")?
@@ -68,8 +68,8 @@ impl AppConfig {
             postgres_min_connections,
             postgres_acquire_timeout: Duration::from_secs(postgres_acquire_timeout_secs),
             deepgram_api_key,
-            gemini_api_key,
-            gemini_model,
+            openrouter_api_key,
+            openrouter_model,
             owner_chat_id,
             port,
             webhook_url,

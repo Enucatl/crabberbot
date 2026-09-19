@@ -17,9 +17,9 @@ services:
       - POSTGRES_MIN_CONNECTIONS=1
       - POSTGRES_ACQUIRE_TIMEOUT_SECS=5
       - DEEPGRAM_API_KEY
-      - GEMINI_API_KEY
+      - OPENROUTER_API_KEY
       - DOWNLOADER_SOCKET=/downloader/downloader.sock
-      - GEMINI_MODEL=gemini-3.1-flash-lite
+      - OPENROUTER_MODEL=inception/mercury-2.5
       - OWNER_CHAT_ID
     depends_on:
       downloader-worker:

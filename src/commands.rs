@@ -6,12 +6,9 @@ use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Messag
 
 use crate::concurrency::ConcurrencyLimiter;
 use crate::handler::{CallbackContext, send_long_text};
-use crate::premium::summarizer::{GeminiResult, Summarizer};
+use crate::premium::MAX_PREMIUM_FILE_DURATION_SECS;
+use crate::premium::summarizer::{OpenRouterResult, Summarizer};
 use crate::premium::transcriber::{DeepgramUsage, Transcriber};
-use crate::premium::{
-    GEMINI_INPUT_COST_PER_MILLION_TOKENS, GEMINI_OUTPUT_COST_PER_MILLION_TOKENS,
-    MAX_PREMIUM_FILE_DURATION_SECS,
-};
 use crate::storage::{QuotaReservation, Storage};
 use crate::subscription::{
     PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_PRICE_STARS,
@@ -1081,10 +1078,11 @@ async fn handle_transcription(
         Ok(result) => result,
         Err(e) => {
             log::error!("Transcript correction failed: {}", e);
-            GeminiResult {
+            OpenRouterResult {
                 text: raw_transcript,
                 prompt_tokens: 0,
                 output_tokens: 0,
+                cost_usd: 0.0,
             }
         }
     };
@@ -1103,7 +1101,7 @@ async fn handle_transcription(
         deepgram_usage,
     )
     .await;
-    record_gemini_usage(storage, user_id, ctx, "gemini_correction", &correction).await;
+    record_openrouter_usage(storage, user_id, ctx, "openrouter_correction", &correction).await;
     Ok(())
 }
 
@@ -1173,7 +1171,7 @@ async fn handle_summarization(
         deepgram_usage,
     )
     .await;
-    record_gemini_usage(storage, user_id, ctx, "gemini_summarize", &summary).await;
+    record_openrouter_usage(storage, user_id, ctx, "openrouter_summarize", &summary).await;
     Ok(())
 }
 
@@ -1304,16 +1302,21 @@ async fn record_ai_action_usage(
         .await;
 }
 
-async fn record_gemini_usage(
+async fn record_openrouter_usage(
     storage: &dyn Storage,
     user_id: i64,
     ctx: &CallbackContext,
     feature_prefix: &str,
-    result: &GeminiResult,
+    result: &OpenRouterResult,
 ) {
+    let total_tokens = result.prompt_tokens + result.output_tokens;
+    let input_cost = if total_tokens > 0 {
+        result.cost_usd * result.prompt_tokens as f64 / total_tokens as f64
+    } else {
+        0.0
+    };
+    let output_cost = result.cost_usd - input_cost;
     if result.prompt_tokens > 0 {
-        let input_cost =
-            result.prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS;
         storage
             .record_premium_usage(
                 user_id,
@@ -1326,8 +1329,6 @@ async fn record_gemini_usage(
             .await;
     }
     if result.output_tokens > 0 {
-        let output_cost =
-            result.output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
         storage
             .record_premium_usage(
                 user_id,
@@ -1943,10 +1944,11 @@ mod tests {
             .expect_correct_transcript()
             .times(1)
             .returning(|_, _| {
-                Ok(crate::premium::summarizer::GeminiResult {
+                Ok(crate::premium::summarizer::OpenRouterResult {
                     text: "Corrected transcript.".to_string(),
                     prompt_tokens: 1000,
                     output_tokens: 500,
+                    cost_usd: 0.0,
                 })
             });
 
@@ -1971,12 +1973,12 @@ mod tests {
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "gemini_correction_input")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_correction_input")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "gemini_correction_output")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_correction_output")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
 
@@ -2024,10 +2026,11 @@ mod tests {
             .expect_correct_transcript()
             .times(1)
             .returning(|_, _| {
-                Ok(crate::premium::summarizer::GeminiResult {
+                Ok(crate::premium::summarizer::OpenRouterResult {
                     text: "Corrected.".to_string(),
                     prompt_tokens: 800,
                     output_tokens: 400,
+                    cost_usd: 0.0,
                 })
             });
 
@@ -2058,12 +2061,12 @@ mod tests {
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "gemini_correction_input")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_correction_input")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "gemini_correction_output")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_correction_output")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
 
@@ -2187,7 +2190,7 @@ mod tests {
     #[tokio::test]
     async fn test_summarization_fresh_calls_deepgram_and_caches() {
         // No cached transcript → Deepgram called, quota deducted,
-        // three usage rows recorded (summarize + two Gemini rows).
+        // three usage rows recorded (summarize + two OpenRouter rows).
         let mut mock_api = MockTelegramApi::new();
         let mut mock_storage = MockStorage::new();
         let mut mock_transcriber = MockTranscriber::new();
@@ -2212,10 +2215,11 @@ mod tests {
             .expect_summarize()
             .times(1)
             .returning(|_, _| {
-                Ok(crate::premium::summarizer::GeminiResult {
+                Ok(crate::premium::summarizer::OpenRouterResult {
                     text: "• Point one\n\n• Point two".to_string(),
                     prompt_tokens: 1200,
                     output_tokens: 60,
+                    cost_usd: 0.0,
                 })
             });
 
@@ -2240,12 +2244,12 @@ mod tests {
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "gemini_summarize_input")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_summarize_input")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "gemini_summarize_output")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_summarize_output")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
 
@@ -2292,10 +2296,11 @@ mod tests {
             .expect_summarize()
             .times(1)
             .returning(|_, _| {
-                Ok(crate::premium::summarizer::GeminiResult {
+                Ok(crate::premium::summarizer::OpenRouterResult {
                     text: "• Point one".to_string(),
                     prompt_tokens: 900,
                     output_tokens: 30,
+                    cost_usd: 0.0,
                 })
             });
 
@@ -2326,12 +2331,12 @@ mod tests {
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "gemini_summarize_input")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_summarize_input")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
         mock_storage
             .expect_record_premium_usage()
-            .withf(|_, feature, _, _, _, _| feature == "gemini_summarize_output")
+            .withf(|_, feature, _, _, _, _| feature == "openrouter_summarize_output")
             .times(1)
             .returning(|_, _, _, _, _, _| ());
 

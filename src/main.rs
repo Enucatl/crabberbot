@@ -24,7 +24,7 @@ use crabberbot::config::AppConfig;
 use crabberbot::downloader::{Downloader, SocketDownloader};
 use crabberbot::handler::{maybe_send_premium_buttons, process_download_request};
 use crabberbot::premium::audio_extractor::{AudioExtractor, SocketAudioExtractor};
-use crabberbot::premium::summarizer::{GeminiSummarizer, Summarizer};
+use crabberbot::premium::summarizer::{OpenRouterSummarizer, Summarizer};
 use crabberbot::premium::transcriber::{DeepgramTranscriber, Transcriber};
 use crabberbot::storage::{PostgresStorage, Storage};
 use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
@@ -292,9 +292,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Starting CrabberBot version {}", version);
 
     let config = AppConfig::from_env()?;
-    if config.deepgram_api_key.is_empty() || config.gemini_api_key.is_empty() {
+    if config.deepgram_api_key.is_empty() || config.openrouter_api_key.is_empty() {
         log::warn!(
-            "DEEPGRAM_API_KEY and/or GEMINI_API_KEY not set — transcription and summarization will be unavailable"
+            "DEEPGRAM_API_KEY and/or OPENROUTER_API_KEY not set — transcription and summarization will be unavailable"
         );
     }
     log::info!(
@@ -345,10 +345,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client.clone(),
         config.deepgram_api_key.clone(),
     ));
-    let summarizer: Arc<dyn Summarizer> = Arc::new(GeminiSummarizer::new(
+    let summarizer: Arc<dyn Summarizer> = Arc::new(OpenRouterSummarizer::new(
         client.clone(),
-        config.gemini_api_key.clone(),
-        config.gemini_model.clone(),
+        config.openrouter_api_key.clone(),
+        config.openrouter_model.clone(),
     ));
 
     let addr = ([0, 0, 0, 0], config.port).into();

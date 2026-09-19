@@ -50,7 +50,7 @@ After a supported video download, the bot can offer:
 
 - **Extract Audio** — cached MP3 produced by the worker.
 - **Transcribe** — Deepgram transcription of the cached audio.
-- **Summarize** — Deepgram transcription followed by Gemini summarization.
+- **Summarize** — Deepgram transcription followed by OpenRouter summarization.
 
 The public products are Basic (50 Stars/month, 60 AI Video Minutes), Pro (150 Stars/month, 200 AI Video Minutes plus unlimited audio extraction), and a 60-minute top-up (50 Stars). AI Video Minutes are charged by video duration. Top-ups work without a subscription and expire 365 days after the latest top-up purchase. The bot's `/terms` command is the authoritative customer-facing policy.
 
@@ -87,14 +87,15 @@ POSTGRES_PASSWORD=change-me
 # Optional
 TELEGRAM_VERBOSITY=1
 DEEPGRAM_API_KEY=
-GEMINI_API_KEY=
+OPENROUTER_API_KEY=
+OPENROUTER_MODEL=inception/mercury-2.5
 OWNER_CHAT_ID=
 MAX_YT_DLP_SESSIONS=4
 ```
 
 Compose mounts the Telegram API ID and hash files under `/run/secrets`; they aren't exposed in the Telegram Bot API container environment.
 
-`DEEPGRAM_API_KEY` and `GEMINI_API_KEY` are required only for transcription and summarization. `OWNER_CHAT_ID` enables owner-only grants, support replies, and refunds.
+`DEEPGRAM_API_KEY` and `OPENROUTER_API_KEY` are required only for transcription and summarization. `OPENROUTER_MODEL` is optional and defaults to `inception/mercury-2.5`; set it to any model ID supported by OpenRouter. `OWNER_CHAT_ID` enables owner-only grants, support replies, and refunds.
 
 Start the stack:
 

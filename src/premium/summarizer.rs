@@ -4,7 +4,6 @@ use reqwest::StatusCode;
 use std::time::Duration;
 use thiserror::Error;
 
-use crate::premium::{GEMINI_INPUT_COST_PER_MILLION_TOKENS, GEMINI_OUTPUT_COST_PER_MILLION_TOKENS};
 use crate::retry::{
     ProviderCooldown, RetryPolicy, retry_after_from_response, retry_async, retryable_status,
     transient_reqwest_error,
@@ -14,19 +13,20 @@ use crate::retry::{
 pub enum SummarizationError {
     #[error("HTTP request failed: {0}")]
     HttpError(#[from] reqwest::Error),
-    #[error("Gemini API error: {0}")]
+    #[error("OpenRouter API error: {0}")]
     ApiError(String),
-    #[error("Gemini transient API error: HTTP {status}")]
+    #[error("OpenRouter transient API error: HTTP {status}")]
     RetryableApi {
         status: StatusCode,
         retry_after: Option<Duration>,
     },
 }
 
-pub struct GeminiResult {
+pub struct OpenRouterResult {
     pub text: String,
     pub prompt_tokens: u64,
     pub output_tokens: u64,
+    pub cost_usd: f64,
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -36,15 +36,15 @@ pub trait Summarizer: Send + Sync {
         &self,
         transcript: &str,
         language: Option<String>,
-    ) -> Result<GeminiResult, SummarizationError>;
+    ) -> Result<OpenRouterResult, SummarizationError>;
     async fn correct_transcript(
         &self,
         transcript: &str,
         language: Option<String>,
-    ) -> Result<GeminiResult, SummarizationError>;
+    ) -> Result<OpenRouterResult, SummarizationError>;
 }
 
-pub struct GeminiSummarizer {
+pub struct OpenRouterSummarizer {
     client: reqwest::Client,
     api_key: String,
     model: String,
@@ -52,25 +52,22 @@ pub struct GeminiSummarizer {
     cooldown: ProviderCooldown,
 }
 
-impl GeminiSummarizer {
+impl OpenRouterSummarizer {
     pub fn new(client: reqwest::Client, api_key: String, model: String) -> Self {
         Self {
             client,
             api_key,
             model,
             retry_policy: RetryPolicy::provider_default(),
-            cooldown: ProviderCooldown::new("Gemini"),
+            cooldown: ProviderCooldown::new("OpenRouter"),
         }
     }
 
-    fn generate_content_url(&self) -> String {
-        format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-            self.model
-        )
+    fn chat_completions_url(&self) -> &'static str {
+        "https://openrouter.ai/api/v1/chat/completions"
     }
 
-    fn generate_content_request(
+    fn chat_completions_request(
         &self,
         url: &str,
         body: &serde_json::Value,
@@ -79,35 +76,35 @@ impl GeminiSummarizer {
             .post(url)
             .timeout(Duration::from_secs(45))
             .header("Content-Type", "application/json")
-            .header("x-goog-api-key", &self.api_key)
+            .header("Authorization", format!("Bearer {}", self.api_key))
             .json(body)
     }
 
-    /// Returns `(text, prompt_tokens, output_tokens)`.
-    async fn call_gemini(&self, prompt: &str) -> Result<(String, u64, u64), SummarizationError> {
+    /// Returns `(text, prompt_tokens, output_tokens, cost_usd)`.
+    async fn call_openrouter(
+        &self,
+        prompt: &str,
+    ) -> Result<(String, u64, u64, f64), SummarizationError> {
         self.cooldown
             .check()
             .await
             .map_err(SummarizationError::ApiError)?;
-        let url = self.generate_content_url();
+        let url = self.chat_completions_url();
 
         let body = serde_json::json!({
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 8192, "thinkingConfig": {"thinkingLevel": "minimal"}},
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-            ]
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens": 8192,
+            "usage": {"include": true}
         });
 
-        log::debug!("Gemini request body: {}", body);
+        log::debug!("OpenRouter request body: {}", body);
 
         let response_result = retry_async(
             &self.retry_policy,
             || async {
-                let response = self.generate_content_request(&url, &body).send().await?;
+                let response = self.chat_completions_request(url, &body).send().await?;
                 let status = response.status();
                 if retryable_status(status) {
                     return Err(SummarizationError::RetryableApi {
@@ -126,14 +123,14 @@ impl GeminiSummarizer {
                 SummarizationError::RetryableApi { .. } => true,
                 _ => false,
             },
-            "gemini.generate_content",
+            "openrouter.chat_completions",
         )
         .await;
         let response = match response_result {
             Ok(response) => response,
             Err(error) => {
                 if matches!(error, SummarizationError::RetryableApi { .. }) {
-                    log::error!("Gemini retry budget exhausted: {}", error);
+                    log::error!("OpenRouter retry budget exhausted: {}", error);
                     self.cooldown.start(Duration::from_secs(30)).await;
                 }
                 return Err(error);
@@ -153,7 +150,7 @@ impl GeminiSummarizer {
             body.extend_from_slice(&chunk);
         }
         let text = String::from_utf8_lossy(&body).into_owned();
-        log::debug!("Gemini response status={} body={}", status, text);
+        log::debug!("OpenRouter response status={} body={}", status, text);
 
         if !status.is_success() {
             return Err(SummarizationError::ApiError(format!(
@@ -165,25 +162,22 @@ impl GeminiSummarizer {
         let json: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| SummarizationError::ApiError(format!("JSON parse error: {}", e)))?;
 
-        let result = json["candidates"][0]["content"]["parts"][0]["text"]
+        let result = json["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or("")
             .to_string();
 
         if result.is_empty() {
             return Err(SummarizationError::ApiError(
-                "Empty response returned from Gemini".to_string(),
+                "Empty response returned from OpenRouter".to_string(),
             ));
         }
 
-        let prompt_tokens = json["usageMetadata"]["promptTokenCount"]
-            .as_u64()
-            .unwrap_or(0);
-        let output_tokens = json["usageMetadata"]["candidatesTokenCount"]
-            .as_u64()
-            .unwrap_or(0);
+        let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+        let output_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+        let cost_usd = json["usage"]["cost"].as_f64().unwrap_or(0.0);
 
-        Ok((result, prompt_tokens, output_tokens))
+        Ok((result, prompt_tokens, output_tokens, cost_usd))
     }
 }
 
@@ -193,46 +187,51 @@ mod tests {
 
     use super::*;
 
-    const SENTINEL_API_KEY: &str = "sentinel-gemini-api-key";
+    const SENTINEL_API_KEY: &str = "sentinel-openrouter-api-key";
 
     #[test]
-    fn gemini_request_sends_api_key_in_header() {
-        let summarizer = GeminiSummarizer::new(
+    fn openrouter_request_sends_api_key_in_header() {
+        let summarizer = OpenRouterSummarizer::new(
             reqwest::Client::new(),
             SENTINEL_API_KEY.to_string(),
             "test-model".to_string(),
         );
-        let url = summarizer.generate_content_url();
+        let url = summarizer.chat_completions_url();
         let request = summarizer
-            .generate_content_request(&url, &serde_json::json!({}))
+            .chat_completions_request(url, &serde_json::json!({}))
             .build()
             .unwrap();
 
         assert!(request.url().query_pairs().all(|(name, _)| name != "key"));
         assert!(!request.url().as_str().contains(SENTINEL_API_KEY));
         assert_eq!(
-            request.headers().get("x-goog-api-key").unwrap(),
-            SENTINEL_API_KEY
+            request
+                .headers()
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            format!("Bearer {SENTINEL_API_KEY}")
         );
     }
 
     #[tokio::test]
-    async fn gemini_connection_error_does_not_expose_api_key() {
+    async fn openrouter_connection_error_does_not_expose_api_key() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address: SocketAddr = listener.local_addr().unwrap();
         drop(listener);
         let client = reqwest::Client::builder()
-            .resolve("generativelanguage.googleapis.com", address)
+            .resolve("openrouter.ai", address)
             .build()
             .unwrap();
-        let mut summarizer = GeminiSummarizer::new(
+        let mut summarizer = OpenRouterSummarizer::new(
             client,
             SENTINEL_API_KEY.to_string(),
             "test-model".to_string(),
         );
         summarizer.retry_policy.max_attempts = 1;
 
-        let error = summarizer.call_gemini("test").await.unwrap_err();
+        let error = summarizer.call_openrouter("test").await.unwrap_err();
 
         assert!(!error.to_string().contains(SENTINEL_API_KEY));
     }
@@ -240,12 +239,12 @@ mod tests {
 
 #[allow(clippy::items_after_test_module)]
 #[async_trait]
-impl Summarizer for GeminiSummarizer {
+impl Summarizer for OpenRouterSummarizer {
     async fn summarize(
         &self,
         transcript: &str,
         language: Option<String>,
-    ) -> Result<GeminiResult, SummarizationError> {
+    ) -> Result<OpenRouterResult, SummarizationError> {
         let language_hint = match &language {
             Some(lang) => format!(
                 "The two-letter code for the language is: {}. Answer only in that language.\n\n",
@@ -264,23 +263,22 @@ impl Summarizer for GeminiSummarizer {
             language_hint, transcript
         );
         log::info!(
-            "Gemini summarize: transcript {} chars, language={:?}",
+            "OpenRouter summarize: transcript {} chars, language={:?}",
             transcript.len(),
             language
         );
-        let (text, prompt_tokens, output_tokens) = self.call_gemini(&prompt).await?;
-        let cost = prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS
-            + output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+        let (text, prompt_tokens, output_tokens, cost_usd) = self.call_openrouter(&prompt).await?;
         log::info!(
-            "Gemini summarize: tokens in={} out={} cost=${:.6}",
+            "OpenRouter summarize: tokens in={} out={} cost=${:.6}",
             prompt_tokens,
             output_tokens,
-            cost
+            cost_usd
         );
-        Ok(GeminiResult {
+        Ok(OpenRouterResult {
             text,
             prompt_tokens,
             output_tokens,
+            cost_usd,
         })
     }
 
@@ -288,7 +286,7 @@ impl Summarizer for GeminiSummarizer {
         &self,
         transcript: &str,
         language: Option<String>,
-    ) -> Result<GeminiResult, SummarizationError> {
+    ) -> Result<OpenRouterResult, SummarizationError> {
         let language_hint = match &language {
             Some(lang) => format!(
                 "The two-letter code for the language is: {}.\nKeep this in mind and answer only in the same language.\n\n",
@@ -313,23 +311,22 @@ impl Summarizer for GeminiSummarizer {
             language_hint, transcript
         );
         log::info!(
-            "Gemini correction: transcript {} chars, language={:?}",
+            "OpenRouter correction: transcript {} chars, language={:?}",
             transcript.len(),
             language
         );
-        let (text, prompt_tokens, output_tokens) = self.call_gemini(&prompt).await?;
-        let cost = prompt_tokens as f64 / 1_000_000.0 * GEMINI_INPUT_COST_PER_MILLION_TOKENS
-            + output_tokens as f64 / 1_000_000.0 * GEMINI_OUTPUT_COST_PER_MILLION_TOKENS;
+        let (text, prompt_tokens, output_tokens, cost_usd) = self.call_openrouter(&prompt).await?;
         log::info!(
-            "Gemini correction: tokens in={} out={} cost=${:.6}",
+            "OpenRouter correction: tokens in={} out={} cost=${:.6}",
             prompt_tokens,
             output_tokens,
-            cost
+            cost_usd
         );
-        Ok(GeminiResult {
+        Ok(OpenRouterResult {
             text: text.trim().to_string(),
             prompt_tokens,
             output_tokens,
+            cost_usd,
         })
     }
 }
