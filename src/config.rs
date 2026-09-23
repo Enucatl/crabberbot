@@ -68,7 +68,7 @@ impl AppConfig {
         let deepgram_api_key = secret_env("DEEPGRAM_API_KEY")?;
         let openrouter_api_key = secret_env("OPENROUTER_API_KEY")?;
         let openrouter_model =
-            std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-5.6-luna".to_string());
+            std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-6-luna".to_string());
         let owner_chat_id = parse_secret_env("OWNER_CHAT_ID", 0i64)?;
         let port = parse_env("PORT", 8080u16)?;
         let webhook_url = required("WEBHOOK_URL")?

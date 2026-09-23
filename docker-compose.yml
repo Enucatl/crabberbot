@@ -20,7 +20,7 @@ services:
       - DEEPGRAM_API_KEY_FILE=/run/secrets/deepgram_api_key
       - OPENROUTER_API_KEY_FILE=/run/secrets/openrouter_api_key
       - DOWNLOADER_SOCKET=/downloader/downloader.sock
-      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-openai/gpt-5.6-luna}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-openai/gpt-6-luna}
       - OWNER_CHAT_ID_FILE=/run/secrets/owner_chat_id
     secrets:
       - telegram_bot_token
