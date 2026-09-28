@@ -37,10 +37,10 @@ impl TempImage {
 
 impl Drop for TempImage {
     fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.0) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                log::warn!("Could not remove temporary image {:?}: {}", self.0, e);
-            }
+        if let Err(e) = std::fs::remove_file(&self.0)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("Could not remove temporary image {:?}: {}", self.0, e);
         }
     }
 }

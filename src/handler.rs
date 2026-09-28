@@ -265,11 +265,10 @@ async fn send_single_item(
                 .as_ref()
                 .map(TempImage::path)
                 .unwrap_or(&item.filepath);
-            let send_result = telegram_api
+            telegram_api
                 .send_photo(chat_id, message_id, effective_path, caption)
                 .await
-                .map(|(file_id, sent_id)| (file_id, MediaType::Photo, sent_id));
-            send_result
+                .map(|(file_id, sent_id)| (file_id, MediaType::Photo, sent_id))
         }
     };
 
