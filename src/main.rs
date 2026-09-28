@@ -550,15 +550,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn cleanup_audio_cache(pool: &sqlx::PgPool, audio_cache_dir: &std::path::Path) {
     // Fetch paths currently referenced by active (non-expired) cache entries so
     // we don't delete audio files that are still needed for premium buttons.
-    let referenced: HashSet<String> = sqlx::query_as::<_, (String,)>(
+    let referenced = match sqlx::query_as::<_, (String,)>(
         "SELECT audio_cache_path FROM media_cache WHERE audio_cache_path IS NOT NULL",
     )
     .fetch_all(pool)
     .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|(p,)| p)
-    .collect();
+    {
+        Ok(paths) => paths,
+        Err(error) => {
+            log::error!("Cannot fetch audio cache references: {}", error);
+            return;
+        }
+    };
+    let referenced: HashSet<String> = referenced.into_iter().map(|(p,)| p).collect();
 
     let mut entries = match tokio::fs::read_dir(audio_cache_dir).await {
         Ok(e) => e,
@@ -589,6 +593,31 @@ async fn cleanup_audio_cache(pool: &sqlx::PgPool, audio_cache_dir: &std::path::P
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod audio_cache_cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn preserves_old_audio_when_reference_query_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cached.mp3");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() - Duration::from_secs(3 * 3600)),
+        )
+        .unwrap();
+
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/crabberbot")
+            .unwrap();
+        pool.close().await;
+        cleanup_audio_cache(&pool, dir.path()).await;
+
+        assert!(path.exists());
     }
 }
 
