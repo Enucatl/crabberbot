@@ -383,11 +383,12 @@ impl Storage for PostgresStorage {
         let limit = tier.ai_seconds_limit();
         let tier_str = tier.to_string();
         if let Err(e) = sqlx::query(
-            "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, updated_at) \
-             VALUES ($1, $2, 0, $3, NOW() + make_interval(days => $4::int), NOW()) \
+            "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, source_payment_id, updated_at) \
+             VALUES ($1, $2, 0, $3, NOW() + make_interval(days => $4::int), NULL, NOW()) \
              ON CONFLICT (user_id) DO UPDATE SET \
                tier = $2, ai_seconds_used = 0, ai_seconds_limit = $3, \
-               expires_at = NOW() + make_interval(days => $4::int), updated_at = NOW()",
+               expires_at = NOW() + make_interval(days => $4::int), \
+               source_payment_id = NULL, updated_at = NOW()",
         )
         .bind(user_id)
         .bind(&tier_str)
@@ -422,9 +423,9 @@ impl Storage for PostgresStorage {
         .bind(amount)
         .fetch_optional(&mut *tx)
         .await?;
-        if inserted.is_none() {
+        let Some((payment_id,)) = inserted else {
             return Ok(false);
-        }
+        };
 
         let result = match product {
             crate::subscription::PRODUCT_SUB_BASIC | crate::subscription::PRODUCT_SUB_PRO => {
@@ -434,15 +435,17 @@ impl Storage for PostgresStorage {
                     SubscriptionTier::Pro
                 };
                 sqlx::query(
-                    "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, updated_at) \
-                     VALUES ($1, $2, 0, $3, NOW() + make_interval(days => 30), NOW()) \
+                    "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, source_payment_id, updated_at) \
+                     VALUES ($1, $2, 0, $3, NOW() + make_interval(days => 30), $4, NOW()) \
                      ON CONFLICT (user_id) DO UPDATE SET \
                        tier = $2, ai_seconds_used = 0, ai_seconds_limit = $3, \
-                       expires_at = NOW() + make_interval(days => 30), updated_at = NOW()",
+                       expires_at = NOW() + make_interval(days => 30), \
+                       source_payment_id = $4, updated_at = NOW()",
                 )
                 .bind(user_id)
                 .bind(tier.to_string())
                 .bind(tier.ai_seconds_limit())
+                .bind(payment_id)
                 .execute(&mut *tx)
                 .await
             }
@@ -718,16 +721,16 @@ impl Storage for PostgresStorage {
         telegram_charge_id: &str,
     ) -> Result<bool, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let product: Option<(String,)> = sqlx::query_as(
+        let product: Option<(i32, String)> = sqlx::query_as(
             "UPDATE payments SET refunded_at = NOW() \
              WHERE user_id = $1 AND telegram_payment_charge_id = $2 AND refunded_at IS NULL \
-             RETURNING product",
+             RETURNING id, product",
         )
         .bind(user_id)
         .bind(telegram_charge_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((product,)) = product else {
+        let Some((payment_id, product)) = product else {
             return Ok(false);
         };
 
@@ -735,9 +738,11 @@ impl Storage for PostgresStorage {
             crate::subscription::PRODUCT_SUB_BASIC | crate::subscription::PRODUCT_SUB_PRO => {
                 sqlx::query(
                     "UPDATE subscriptions SET tier = 'free', ai_seconds_limit = 0, \
-                     expires_at = NULL, updated_at = NOW() WHERE user_id = $1",
+                     expires_at = NULL, source_payment_id = NULL, updated_at = NOW() \
+                     WHERE user_id = $1 AND source_payment_id = $2",
                 )
                 .bind(user_id)
+                .bind(payment_id)
                 .execute(&mut *tx)
                 .await
             }
@@ -861,7 +866,9 @@ impl Storage for PostgresStorage {
 #[cfg(test)]
 mod tests {
     use super::{PostgresStorage, QuotaReservation, Storage};
-    use crate::subscription::{PRODUCT_SUB_BASIC, PRODUCT_TOPUP_60, TOPUP_SECONDS};
+    use crate::subscription::{
+        PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_SECONDS,
+    };
     use sqlx::PgPool;
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1002,6 +1009,58 @@ mod tests {
             .unwrap();
         assert!(refunded_at.is_some());
         assert_eq!((tier.as_str(), limit), ("free", 0));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn refund_only_revokes_its_own_subscription(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+        storage
+            .fulfill_payment(1, "basic-a", "provider-a", PRODUCT_SUB_BASIC, 50)
+            .await
+            .unwrap();
+        storage
+            .fulfill_payment(1, "pro-b", "provider-b", PRODUCT_SUB_PRO, 150)
+            .await
+            .unwrap();
+
+        assert!(storage.refund_payment(1, "basic-a").await.unwrap());
+        let (tier, limit, source): (String, i32, Option<String>) = sqlx::query_as(
+            "SELECT s.tier, s.ai_seconds_limit, p.telegram_payment_charge_id \
+             FROM subscriptions s LEFT JOIN payments p ON p.id = s.source_payment_id \
+             WHERE s.user_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (tier.as_str(), limit, source.as_deref()),
+            ("pro", 12_000, Some("pro-b"))
+        );
+
+        assert!(storage.refund_payment(1, "pro-b").await.unwrap());
+        let (tier, limit, source): (String, i32, Option<i32>) = sqlx::query_as(
+            "SELECT tier, ai_seconds_limit, source_payment_id FROM subscriptions WHERE user_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((tier.as_str(), limit, source), ("free", 0, None));
+
+        storage
+            .fulfill_payment(1, "basic-c", "provider-c", PRODUCT_SUB_BASIC, 50)
+            .await
+            .unwrap();
+        storage
+            .upsert_subscription(1, SubscriptionTier::Pro, 30)
+            .await;
+        assert!(storage.refund_payment(1, "basic-c").await.unwrap());
+        let (tier, limit, source): (String, i32, Option<i32>) = sqlx::query_as(
+            "SELECT tier, ai_seconds_limit, source_payment_id FROM subscriptions WHERE user_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((tier.as_str(), limit, source), ("pro", 12_000, None));
     }
 
     #[sqlx::test(migrations = "./migrations")]

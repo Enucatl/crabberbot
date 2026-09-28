@@ -577,7 +577,7 @@ pub async fn handle_refund(
     api.send_text_message(
         message.chat.id,
         message.id,
-        &format!("Refund issued and access revoked for user_id {target_user_id}."),
+        &format!("Refund issued for user_id {target_user_id}."),
     )
     .await?;
     Ok(())
