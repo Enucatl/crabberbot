@@ -546,12 +546,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Delete audio cache files older than 2 hours.
+/// Delete unreferenced audio cache files older than 2 hours.
 async fn cleanup_audio_cache(pool: &sqlx::PgPool, audio_cache_dir: &std::path::Path) {
-    // Fetch paths currently referenced by active (non-expired) cache entries so
-    // we don't delete audio files that are still needed for premium buttons.
+    // Keep audio used by cached media or live premium buttons.
     let referenced = match sqlx::query_as::<_, (String,)>(
-        "SELECT audio_cache_path FROM media_cache WHERE audio_cache_path IS NOT NULL",
+        "SELECT audio_cache_path FROM media_cache WHERE audio_cache_path IS NOT NULL \
+         UNION SELECT audio_cache_path FROM callback_contexts \
+         WHERE audio_cache_path IS NOT NULL AND created_at >= NOW() - INTERVAL '24 hours'",
     )
     .fetch_all(pool)
     .await
@@ -577,7 +578,7 @@ async fn cleanup_audio_cache(pool: &sqlx::PgPool, audio_cache_dir: &std::path::P
                 let path = entry.path();
                 let path_str = path.to_string_lossy();
                 if referenced.contains(path_str.as_ref()) {
-                    continue; // live cache entry — leave it alone
+                    continue;
                 }
                 if let Ok(metadata) = entry.metadata().await
                     && let Ok(modified) = metadata.modified()
@@ -599,6 +600,64 @@ async fn cleanup_audio_cache(pool: &sqlx::PgPool, audio_cache_dir: &std::path::P
 #[cfg(test)]
 mod audio_cache_cleanup_tests {
     use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn keeps_both_audio_files_for_live_callbacks(pool: sqlx::PgPool) {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.mp3");
+        let second = dir.path().join("second.mp3");
+        let expired = dir.path().join("expired.mp3");
+        for path in [&first, &second, &expired] {
+            let file = std::fs::File::create(path).unwrap();
+            file.set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::now() - Duration::from_secs(3 * 3600)),
+            )
+            .unwrap();
+        }
+
+        sqlx::query(
+            "INSERT INTO media_cache (source_url, caption, audio_cache_path, last_used_at) \
+             VALUES ('same-url', '', $1, NOW() - INTERVAL '8 days')",
+        )
+        .bind(second.to_str().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        for path in [&first, &second] {
+            sqlx::query(
+                "INSERT INTO callback_contexts (source_url, chat_id, audio_cache_path) \
+                 VALUES ('same-url', 1, $1)",
+            )
+            .bind(path.to_str().unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO callback_contexts (source_url, chat_id, audio_cache_path, created_at) \
+             VALUES ('old-url', 1, $1, NOW() - INTERVAL '25 hours')",
+        )
+        .bind(expired.to_str().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        cleanup_audio_cache(&pool, dir.path()).await;
+        assert!(first.exists());
+        assert!(second.exists());
+        assert!(!expired.exists());
+
+        PostgresStorage::cleanup_expired(&pool, 7).await;
+        let cached: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media_cache")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cached, 0);
+        cleanup_audio_cache(&pool, dir.path()).await;
+        assert!(first.exists());
+        assert!(second.exists());
+    }
 
     #[tokio::test]
     async fn preserves_old_audio_when_reference_query_fails() {
