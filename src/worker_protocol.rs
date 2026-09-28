@@ -14,7 +14,7 @@ pub enum Request {
         url: String,
     },
     Download {
-        info: MediaInfo,
+        info: Box<MediaInfo>,
         url: String,
     },
     ExtractAudio {
@@ -35,7 +35,7 @@ pub enum Response {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResultData {
     Metadata {
-        info: MediaInfo,
+        info: Box<MediaInfo>,
     },
     Download {
         media: WireMedia,

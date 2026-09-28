@@ -79,7 +79,6 @@ async fn persist_payment_update(
 }
 
 async fn handle_command(
-    _bot: Bot,
     api: Arc<dyn TelegramApi>,
     storage: Arc<dyn Storage>,
     premium_limiter: Arc<ConcurrencyLimiter>,
@@ -141,7 +140,7 @@ If you encounter any issues, please double-check the URL or try again later. Not
 }
 
 async fn handle_owner_command(
-    _bot: Bot,
+    update: Update,
     api: Arc<dyn TelegramApi>,
     storage: Arc<dyn Storage>,
     message: Message,
@@ -151,7 +150,7 @@ async fn handle_owner_command(
     log_update_context("owner_command", &message);
     match command {
         OwnerCommand::Grant(args) => {
-            handle_grant(api, message, storage, args, owner_chat_id).await?
+            handle_grant(api, message, storage, args, owner_chat_id, update.id).await?
         }
         OwnerCommand::Reply(args) => handle_reply(api, message, args, owner_chat_id).await?,
         OwnerCommand::Refund(args) => {
@@ -500,8 +499,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Update::filter_message()
                 .branch(
                     successful_payment_filter
-                        .endpoint(|api: Arc<dyn TelegramApi>, storage: Arc<dyn Storage>, msg: Message| async move {
-                            handle_successful_payment(api, storage, msg).await
+                        .endpoint(|api: Arc<dyn TelegramApi>, storage: Arc<dyn Storage>, msg: Message, update: Update| async move {
+                            handle_successful_payment(api, storage, msg, update.id).await
                         }),
                 )
                 .branch(

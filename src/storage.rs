@@ -13,6 +13,13 @@ pub struct PaymentRecord {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Telegram event order, independent of when fulfillment succeeds.
+#[derive(Debug, Clone, Copy)]
+pub struct PaymentOrder {
+    pub paid_at: chrono::DateTime<chrono::Utc>,
+    pub update_id: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct CachedMedia {
     pub caption: String,
@@ -58,9 +65,15 @@ pub trait Storage: Send + Sync {
 
     // Subscription management
     async fn get_subscription(&self, user_id: i64) -> SubscriptionInfo;
-    async fn upsert_subscription(&self, user_id: i64, tier: SubscriptionTier, duration_days: i64);
+    async fn upsert_subscription(
+        &self,
+        user_id: i64,
+        tier: SubscriptionTier,
+        duration_days: i64,
+        order: PaymentOrder,
+    );
 
-    /// Records a charge and grants its product entitlement atomically.
+    /// Records a charge atomically; only newer purchases replace the current tier.
     /// Returns Ok(true) only when this charge was fulfilled for the first time.
     async fn fulfill_payment(
         &self,
@@ -69,6 +82,7 @@ pub trait Storage: Send + Sync {
         provider_charge_id: &str,
         product: &str,
         amount: i32,
+        order: PaymentOrder,
     ) -> Result<bool, sqlx::Error>;
 
     // AI Seconds tracking
@@ -383,21 +397,30 @@ impl Storage for PostgresStorage {
         }
     }
 
-    async fn upsert_subscription(&self, user_id: i64, tier: SubscriptionTier, duration_days: i64) {
+    async fn upsert_subscription(
+        &self,
+        user_id: i64,
+        tier: SubscriptionTier,
+        duration_days: i64,
+        order: PaymentOrder,
+    ) {
         let limit = tier.ai_seconds_limit();
         let tier_str = tier.to_string();
         if let Err(e) = sqlx::query(
-            "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, source_payment_id, updated_at) \
-             VALUES ($1, $2, 0, $3, NOW() + make_interval(days => $4::int), NULL, NOW()) \
+            "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, source_payment_id, entitlement_at, entitlement_update_id, updated_at) \
+             VALUES ($1, $2, 0, $3, NOW() + make_interval(days => $4::int), NULL, $5, $6, NOW()) \
              ON CONFLICT (user_id) DO UPDATE SET \
                tier = $2, ai_seconds_used = 0, ai_seconds_limit = $3, \
                expires_at = NOW() + make_interval(days => $4::int), \
-               source_payment_id = NULL, updated_at = NOW()",
+               source_payment_id = NULL, entitlement_at = $5, entitlement_update_id = $6, updated_at = NOW() \
+             WHERE (subscriptions.entitlement_at, subscriptions.entitlement_update_id) < ($5, $6)",
         )
         .bind(user_id)
         .bind(&tier_str)
         .bind(limit)
         .bind(duration_days)
+        .bind(order.paid_at)
+        .bind(order.update_id)
         .execute(&self.pool)
         .await
         {
@@ -412,12 +435,13 @@ impl Storage for PostgresStorage {
         provider_charge_id: &str,
         product: &str,
         amount: i32,
+        order: PaymentOrder,
     ) -> Result<bool, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
         let inserted: Option<(i32,)> = sqlx::query_as(
-            "INSERT INTO payments (user_id, telegram_payment_charge_id, provider_payment_charge_id, product, amount) \
-             VALUES ($1, $2, $3, $4, $5) \
+            "INSERT INTO payments (user_id, telegram_payment_charge_id, provider_payment_charge_id, product, amount, created_at, telegram_update_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
              ON CONFLICT (telegram_payment_charge_id) DO NOTHING RETURNING id",
         )
         .bind(user_id)
@@ -425,6 +449,8 @@ impl Storage for PostgresStorage {
         .bind(provider_charge_id)
         .bind(product)
         .bind(amount)
+        .bind(order.paid_at)
+        .bind(order.update_id)
         .fetch_optional(&mut *tx)
         .await?;
         let Some((payment_id,)) = inserted else {
@@ -439,29 +465,38 @@ impl Storage for PostgresStorage {
                     SubscriptionTier::Pro
                 };
                 sqlx::query(
-                    "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, source_payment_id, updated_at) \
-                     VALUES ($1, $2, 0, $3, NOW() + make_interval(days => 30), $4, NOW()) \
+                    "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, source_payment_id, entitlement_at, entitlement_update_id, updated_at) \
+                     VALUES ($1, $2, 0, $3, NOW() + make_interval(days => 30), $4, $5, $6, NOW()) \
                      ON CONFLICT (user_id) DO UPDATE SET \
                        tier = $2, ai_seconds_used = 0, ai_seconds_limit = $3, \
                        expires_at = NOW() + make_interval(days => 30), \
-                       source_payment_id = $4, updated_at = NOW()",
+                       source_payment_id = $4, entitlement_at = $5, entitlement_update_id = $6, updated_at = NOW() \
+                     WHERE (subscriptions.entitlement_at, subscriptions.entitlement_update_id) < ($5, $6)",
                 )
                 .bind(user_id)
                 .bind(tier.to_string())
                 .bind(tier.ai_seconds_limit())
                 .bind(payment_id)
+                .bind(order.paid_at)
+                .bind(order.update_id)
                 .execute(&mut *tx)
                 .await
             }
             crate::subscription::PRODUCT_TOPUP_60 => sqlx::query(
                 "INSERT INTO subscriptions (user_id, tier, topup_seconds_available, last_topup_at, updated_at) \
-                 VALUES ($1, 'free', $2, NOW(), NOW()) \
+                 VALUES ($1, 'free', $2, $3, NOW()) \
                  ON CONFLICT (user_id) DO UPDATE SET \
                    topup_seconds_available = subscriptions.topup_seconds_available + $2, \
-                   last_topup_at = NOW(), updated_at = NOW()",
+                   last_topup_at = GREATEST(subscriptions.last_topup_at, $3), updated_at = NOW()",
             )
             .bind(user_id)
             .bind(crate::subscription::TOPUP_SECONDS)
+            // Legacy inbox rows have no purchase date; retain a full top-up lifetime.
+            .bind(if order.paid_at.timestamp() == 0 {
+                chrono::Utc::now()
+            } else {
+                order.paid_at
+            })
             .execute(&mut *tx)
             .await,
             _ => return Err(sqlx::Error::Protocol("Unknown payment product".into())),
@@ -771,7 +806,8 @@ impl Storage for PostgresStorage {
     async fn get_latest_payment(&self, user_id: i64) -> Option<PaymentRecord> {
         let row: Option<(String, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT telegram_payment_charge_id, amount, created_at \
-             FROM payments WHERE user_id = $1 AND refunded_at IS NULL ORDER BY created_at DESC LIMIT 1",
+             FROM payments WHERE user_id = $1 AND refunded_at IS NULL \
+             ORDER BY created_at DESC, telegram_update_id DESC, id DESC LIMIT 1",
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
@@ -791,15 +827,15 @@ impl Storage for PostgresStorage {
     }
 
     async fn get_recent_payments(&self, user_id: i64, limit: i64) -> Vec<PaymentRecord> {
-        let rows: Result<Vec<(String, i32, chrono::DateTime<chrono::Utc>)>, _> =
-            sqlx::query_as(
-                "SELECT telegram_payment_charge_id, amount, created_at \
-                 FROM payments WHERE user_id = $1 AND refunded_at IS NULL ORDER BY created_at DESC LIMIT $2",
-            )
-            .bind(user_id)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await;
+        let rows: Result<Vec<(String, i32, chrono::DateTime<chrono::Utc>)>, _> = sqlx::query_as(
+            "SELECT telegram_payment_charge_id, amount, created_at \
+                 FROM payments WHERE user_id = $1 AND refunded_at IS NULL \
+                 ORDER BY created_at DESC, telegram_update_id DESC, id DESC LIMIT $2",
+        )
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await;
 
         match rows {
             Ok(rows) => rows
@@ -871,11 +907,18 @@ impl Storage for PostgresStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::{PostgresStorage, QuotaReservation, Storage};
+    use super::{PaymentOrder, PostgresStorage, QuotaReservation, Storage};
     use crate::subscription::{
         PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_SECONDS,
     };
     use sqlx::PgPool;
+
+    fn payment_order() -> PaymentOrder {
+        PaymentOrder {
+            paid_at: chrono::Utc::now(),
+            update_id: 0,
+        }
+    }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn cleanup_keeps_audio_when_row_is_refreshed_during_delete(pool: PgPool) {
@@ -983,13 +1026,27 @@ mod tests {
 
         assert!(
             storage
-                .fulfill_payment(1, "basic-charge", "provider-charge", PRODUCT_SUB_BASIC, 50)
+                .fulfill_payment(
+                    1,
+                    "basic-charge",
+                    "provider-charge",
+                    PRODUCT_SUB_BASIC,
+                    50,
+                    payment_order()
+                )
                 .await
                 .unwrap()
         );
         assert!(
             !storage
-                .fulfill_payment(1, "basic-charge", "provider-charge", PRODUCT_SUB_BASIC, 50)
+                .fulfill_payment(
+                    1,
+                    "basic-charge",
+                    "provider-charge",
+                    PRODUCT_SUB_BASIC,
+                    50,
+                    payment_order()
+                )
                 .await
                 .unwrap()
         );
@@ -1018,13 +1075,27 @@ mod tests {
 
         assert!(
             storage
-                .fulfill_payment(2, "topup-charge", "provider-charge", PRODUCT_TOPUP_60, 50)
+                .fulfill_payment(
+                    2,
+                    "topup-charge",
+                    "provider-charge",
+                    PRODUCT_TOPUP_60,
+                    50,
+                    payment_order()
+                )
                 .await
                 .unwrap()
         );
         assert!(
             !storage
-                .fulfill_payment(2, "topup-charge", "provider-charge", PRODUCT_TOPUP_60, 50)
+                .fulfill_payment(
+                    2,
+                    "topup-charge",
+                    "provider-charge",
+                    PRODUCT_TOPUP_60,
+                    50,
+                    payment_order()
+                )
                 .await
                 .unwrap()
         );
@@ -1048,7 +1119,14 @@ mod tests {
     async fn concurrent_reservations_do_not_overspend(pool: PgPool) {
         let storage = std::sync::Arc::new(PostgresStorage::new(pool));
         storage
-            .fulfill_payment(1, "reserve-charge", "provider", PRODUCT_SUB_BASIC, 50)
+            .fulfill_payment(
+                1,
+                "reserve-charge",
+                "provider",
+                PRODUCT_SUB_BASIC,
+                50,
+                payment_order(),
+            )
             .await
             .unwrap();
         let first = storage.clone();
@@ -1097,7 +1175,14 @@ mod tests {
         let storage = PostgresStorage::new(pool.clone());
         assert!(
             storage
-                .fulfill_payment(1, "basic-charge", "provider-charge", PRODUCT_SUB_BASIC, 50)
+                .fulfill_payment(
+                    1,
+                    "basic-charge",
+                    "provider-charge",
+                    PRODUCT_SUB_BASIC,
+                    50,
+                    payment_order()
+                )
                 .await
                 .unwrap()
         );
@@ -1121,11 +1206,25 @@ mod tests {
     async fn refund_only_revokes_its_own_subscription(pool: PgPool) {
         let storage = PostgresStorage::new(pool.clone());
         storage
-            .fulfill_payment(1, "basic-a", "provider-a", PRODUCT_SUB_BASIC, 50)
+            .fulfill_payment(
+                1,
+                "basic-a",
+                "provider-a",
+                PRODUCT_SUB_BASIC,
+                50,
+                payment_order(),
+            )
             .await
             .unwrap();
         storage
-            .fulfill_payment(1, "pro-b", "provider-b", PRODUCT_SUB_PRO, 150)
+            .fulfill_payment(
+                1,
+                "pro-b",
+                "provider-b",
+                PRODUCT_SUB_PRO,
+                150,
+                payment_order(),
+            )
             .await
             .unwrap();
 
@@ -1153,11 +1252,18 @@ mod tests {
         assert_eq!((tier.as_str(), limit, source), ("free", 0, None));
 
         storage
-            .fulfill_payment(1, "basic-c", "provider-c", PRODUCT_SUB_BASIC, 50)
+            .fulfill_payment(
+                1,
+                "basic-c",
+                "provider-c",
+                PRODUCT_SUB_BASIC,
+                50,
+                payment_order(),
+            )
             .await
             .unwrap();
         storage
-            .upsert_subscription(1, SubscriptionTier::Pro, 30)
+            .upsert_subscription(1, SubscriptionTier::Pro, 30, payment_order())
             .await;
         assert!(storage.refund_payment(1, "basic-c").await.unwrap());
         let (tier, limit, source): (String, i32, Option<i32>) = sqlx::query_as(
@@ -1174,7 +1280,14 @@ mod tests {
         let storage = PostgresStorage::new(pool.clone());
         assert!(
             storage
-                .fulfill_payment(1, "charge", "provider", PRODUCT_TOPUP_60, 50)
+                .fulfill_payment(
+                    1,
+                    "charge",
+                    "provider",
+                    PRODUCT_TOPUP_60,
+                    50,
+                    payment_order()
+                )
                 .await
                 .unwrap()
         );
@@ -1198,13 +1311,27 @@ mod tests {
         let storage = PostgresStorage::new(pool.clone());
         assert!(
             storage
-                .fulfill_payment(1, "topup-a", "provider-a", PRODUCT_TOPUP_60, 50)
+                .fulfill_payment(
+                    1,
+                    "topup-a",
+                    "provider-a",
+                    PRODUCT_TOPUP_60,
+                    50,
+                    payment_order()
+                )
                 .await
                 .unwrap()
         );
         assert!(
             storage
-                .fulfill_payment(1, "topup-b", "provider-b", PRODUCT_TOPUP_60, 50)
+                .fulfill_payment(
+                    1,
+                    "topup-b",
+                    "provider-b",
+                    PRODUCT_TOPUP_60,
+                    50,
+                    payment_order()
+                )
                 .await
                 .unwrap()
         );
@@ -1228,13 +1355,27 @@ mod tests {
         let storage = PostgresStorage::new(pool.clone());
         assert!(
             storage
-                .fulfill_payment(1, "older", "provider-a", PRODUCT_SUB_BASIC, 50)
+                .fulfill_payment(
+                    1,
+                    "older",
+                    "provider-a",
+                    PRODUCT_SUB_BASIC,
+                    50,
+                    payment_order()
+                )
                 .await
                 .unwrap()
         );
         assert!(
             storage
-                .fulfill_payment(1, "newer", "provider-b", PRODUCT_TOPUP_60, 50)
+                .fulfill_payment(
+                    1,
+                    "newer",
+                    "provider-b",
+                    PRODUCT_TOPUP_60,
+                    50,
+                    payment_order()
+                )
                 .await
                 .unwrap()
         );

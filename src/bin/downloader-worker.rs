@@ -86,7 +86,9 @@ async fn process_request(
                 .get_media_metadata(&url)
                 .await
                 .map(|info| Response::Ok {
-                    result: ResultData::Metadata { info },
+                    result: ResultData::Metadata {
+                        info: Box::new(info),
+                    },
                 })
                 .unwrap_or_else(download_error),
             Err(response) => response,
@@ -255,10 +257,10 @@ mod tests {
         write_frame(
             &mut client,
             &Request::Download {
-                info: MediaInfo {
+                info: Box::new(MediaInfo {
                     id: "media".to_string(),
                     ..Default::default()
-                },
+                }),
                 url: "https://example.com/video".to_string(),
             },
         )

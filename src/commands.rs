@@ -11,7 +11,7 @@ use crate::premium::summarizer::{OpenRouterResult, Summarizer};
 use crate::premium::transcriber::{
     DeepgramUsage, Transcriber, speaker_count_from_diarized_transcript,
 };
-use crate::storage::{QuotaReservation, Storage};
+use crate::storage::{PaymentOrder, QuotaReservation, Storage};
 use crate::subscription::{
     PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_PRICE_STARS,
 };
@@ -109,6 +109,7 @@ pub async fn handle_grant(
     storage: Arc<dyn Storage>,
     args: String,
     owner_chat_id: i64,
+    update_id: teloxide::types::UpdateId,
 ) -> ResponseResult<()> {
     if message.chat.id.0 != owner_chat_id {
         return Ok(()); // silently ignore non-owner
@@ -227,7 +228,15 @@ pub async fn handle_grant(
     };
 
     storage
-        .upsert_subscription(target_user_id, tier.clone(), days)
+        .upsert_subscription(
+            target_user_id,
+            tier.clone(),
+            days,
+            PaymentOrder {
+                paid_at: message.date,
+                update_id: i64::from(update_id.0),
+            },
+        )
         .await;
 
     let duration_label = if days >= 36500 {
@@ -600,6 +609,7 @@ pub async fn handle_successful_payment(
     api: Arc<dyn TelegramApi>,
     storage: Arc<dyn Storage>,
     message: Message,
+    update_id: teloxide::types::UpdateId,
 ) -> ResponseResult<()> {
     log::info!(
         "request_context action=successful_payment update_message_id={} chat_id={} user_id={:?}",
@@ -637,6 +647,10 @@ pub async fn handle_successful_payment(
             &payment.provider_payment_charge_id,
             product,
             amount as i32,
+            PaymentOrder {
+                paid_at: message.date,
+                update_id: i64::from(update_id.0),
+            },
         )
         .await
     {
@@ -657,8 +671,8 @@ pub async fn handle_successful_payment(
             api.send_text_message(
                 chat_id,
                 message.id,
-                "Thank you! Your <b>Basic</b> subscription is now active.\n\
-                 You have <b>60 AI Video Minutes</b> this month.",
+                "Thank you! Your <b>Basic</b> purchase has been recorded.\n\
+                 Use /subscribe to view your current plan and AI Video Minutes.",
             )
             .await?;
         }
@@ -666,8 +680,8 @@ pub async fn handle_successful_payment(
             api.send_text_message(
                 chat_id,
                 message.id,
-                "Thank you! Your <b>Pro</b> subscription is now active.\n\
-                 You have <b>200 AI Video Minutes</b> this month + unlimited audio extraction.",
+                "Thank you! Your <b>Pro</b> purchase has been recorded.\n\
+                 Use /subscribe to view your current plan and AI Video Minutes.",
             )
             .await?;
         }
@@ -1591,9 +1605,14 @@ mod tests {
 
         mock_storage
             .expect_fulfill_payment()
-            .withf(|_, _, _, product, amount| product == "sub_basic" && *amount == 50)
+            .withf(|_, _, _, product, amount, order| {
+                product == "sub_basic"
+                    && *amount == 50
+                    && order.paid_at.timestamp() == 0
+                    && order.update_id == 123
+            })
             .times(1)
-            .returning(|_, _, _, _, _| Ok(true));
+            .returning(|_, _, _, _, _, _| Ok(true));
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -1609,9 +1628,14 @@ mod tests {
         });
         let message = make_message(msg_json);
 
-        handle_successful_payment(Arc::new(mock_api), Arc::new(mock_storage), message)
-            .await
-            .unwrap();
+        handle_successful_payment(
+            Arc::new(mock_api),
+            Arc::new(mock_storage),
+            message,
+            teloxide::types::UpdateId(123),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1621,9 +1645,14 @@ mod tests {
 
         mock_storage
             .expect_fulfill_payment()
-            .withf(|_, _, _, product, amount| product == "topup_60" && *amount == 50)
+            .withf(|_, _, _, product, amount, order| {
+                product == "topup_60"
+                    && *amount == 50
+                    && order.paid_at.timestamp() == 0
+                    && order.update_id == 456
+            })
             .times(1)
-            .returning(|_, _, _, _, _| Ok(true));
+            .returning(|_, _, _, _, _, _| Ok(true));
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -1639,9 +1668,14 @@ mod tests {
         });
         let message = make_message(msg_json);
 
-        handle_successful_payment(Arc::new(mock_api), Arc::new(mock_storage), message)
-            .await
-            .unwrap();
+        handle_successful_payment(
+            Arc::new(mock_api),
+            Arc::new(mock_storage),
+            message,
+            teloxide::types::UpdateId(456),
+        )
+        .await
+        .unwrap();
     }
 
     // ---------------------------------------------------------------------------

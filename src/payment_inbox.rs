@@ -1,7 +1,7 @@
 use serde_json::Value;
 use sqlx::PgPool;
 
-use crate::storage::{PostgresStorage, Storage};
+use crate::storage::{PaymentOrder, PostgresStorage, Storage};
 
 #[derive(Debug)]
 struct PaymentEvent {
@@ -11,6 +11,7 @@ struct PaymentEvent {
     provider_charge_id: Option<String>,
     product: Option<String>,
     amount: Option<i32>,
+    order: PaymentOrder,
 }
 
 fn payment_event(update: &Value) -> Result<Option<PaymentEvent>, &'static str> {
@@ -24,6 +25,14 @@ fn payment_event(update: &Value) -> Result<Option<PaymentEvent>, &'static str> {
     } else {
         return Ok(None);
     };
+    let paid_at = message["date"]
+        .as_i64()
+        .and_then(|date| chrono::DateTime::from_timestamp(date, 0))
+        .ok_or("invalid payment date")?;
+    let update_id = update["update_id"]
+        .as_u64()
+        .and_then(|id| i64::try_from(id).ok())
+        .ok_or("invalid payment update ID")?;
     let charge_id = payment["telegram_payment_charge_id"]
         .as_str()
         .filter(|id| !id.is_empty())
@@ -59,6 +68,7 @@ fn payment_event(update: &Value) -> Result<Option<PaymentEvent>, &'static str> {
         provider_charge_id,
         product,
         amount,
+        order: PaymentOrder { paid_at, update_id },
     }))
 }
 
@@ -69,8 +79,8 @@ pub async fn record_update(pool: &PgPool, update: &Value) -> Result<(), sqlx::Er
         return Ok(());
     };
     sqlx::query(
-        "INSERT INTO payment_inbox (kind, telegram_charge_id, user_id, provider_charge_id, product, amount) \
-         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (kind, telegram_charge_id) DO NOTHING",
+        "INSERT INTO payment_inbox (kind, telegram_charge_id, user_id, provider_charge_id, product, amount, paid_at, telegram_update_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (kind, telegram_charge_id) DO NOTHING",
     )
     .bind(event.kind)
     .bind(&event.charge_id)
@@ -78,6 +88,8 @@ pub async fn record_update(pool: &PgPool, update: &Value) -> Result<(), sqlx::Er
     .bind(event.provider_charge_id)
     .bind(event.product)
     .bind(event.amount)
+    .bind(event.order.paid_at)
+    .bind(event.order.update_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -93,15 +105,17 @@ pub async fn replay_pending(pool: &PgPool) -> Result<(), sqlx::Error> {
         Option<String>,
         Option<String>,
         Option<i32>,
+        chrono::DateTime<chrono::Utc>,
+        i64,
     );
     let events: Vec<InboxRow> = sqlx::query_as(
-        "SELECT id, kind, telegram_charge_id, user_id, provider_charge_id, product, amount \
-             FROM payment_inbox WHERE processed_at IS NULL ORDER BY id",
+        "SELECT id, kind, telegram_charge_id, user_id, provider_charge_id, product, amount, paid_at, telegram_update_id \
+             FROM payment_inbox WHERE processed_at IS NULL ORDER BY paid_at, telegram_update_id, id",
     )
     .fetch_all(pool)
     .await?;
     let storage = PostgresStorage::new(pool.clone());
-    for (id, kind, charge_id, user_id, provider, product, amount) in events {
+    for (id, kind, charge_id, user_id, provider, product, amount, paid_at, update_id) in events {
         let result = match kind.as_str() {
             "payment" => {
                 storage
@@ -111,6 +125,7 @@ pub async fn replay_pending(pool: &PgPool) -> Result<(), sqlx::Error> {
                         provider.as_deref().unwrap_or_default(),
                         product.as_deref().unwrap_or_default(),
                         amount.unwrap_or_default(),
+                        PaymentOrder { paid_at, update_id },
                     )
                     .await
             }
@@ -154,11 +169,15 @@ pub async fn replay_pending(pool: &PgPool) -> Result<(), sqlx::Error> {
 #[cfg(test)]
 mod tests {
     use super::{payment_event, record_update, replay_pending};
+    use crate::storage::{PaymentOrder, PostgresStorage, Storage};
+    use crate::subscription::SubscriptionTier;
     use serde_json::json;
     use sqlx::PgPool;
 
     fn update(kind: &str, charge: &str) -> serde_json::Value {
-        let mut update = json!({"message": {"from": {"id": 42}, "chat": {"id": 42}}});
+        let mut update = json!({"update_id": 1, "message": {
+            "date": chrono::Utc::now().timestamp(), "from": {"id": 42}, "chat": {"id": 42}
+        }});
         update["message"][kind] = json!({
             "telegram_payment_charge_id": charge,
             "provider_payment_charge_id": "provider",
@@ -184,6 +203,183 @@ mod tests {
                 .kind,
             "refund"
         );
+        let mut invalid = update("successful_payment", "charge");
+        invalid["message"]["date"] = json!("invalid");
+        assert!(payment_event(&invalid).is_err());
+        invalid["message"]["date"] = json!(0);
+        invalid["update_id"] = json!(-1);
+        assert!(payment_event(&invalid).is_err());
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn migration_preserves_legacy_pending_purchase_order(pool: PgPool) {
+        for migration in sqlx::migrate!("./migrations")
+            .iter()
+            .filter(|m| m.version < 16)
+        {
+            sqlx::raw_sql(migration.sql.clone())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO payment_inbox (kind, telegram_charge_id, user_id, provider_charge_id, product, amount) \
+             VALUES ('payment', 'legacy-basic', 42, 'provider', 'sub_basic', 50), \
+                    ('payment', 'legacy-pro', 42, 'provider', 'sub_pro', 150)"
+        ).execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../migrations/016_payment_order.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        replay_pending(&pool).await.unwrap();
+        replay_pending(&pool).await.unwrap();
+        let storage = PostgresStorage::new(pool);
+        assert_eq!(
+            storage.get_subscription(42).await.tier,
+            SubscriptionTier::Pro
+        );
+        assert_eq!(
+            storage
+                .get_latest_payment(42)
+                .await
+                .unwrap()
+                .telegram_charge_id,
+            "legacy-pro"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn replayed_topups_preserve_latest_expiry(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+        let now = chrono::Utc::now().timestamp();
+        let mut newer = update("successful_payment", "newer-topup");
+        newer["message"]["date"] = json!(now);
+        record_update(&pool, &newer).await.unwrap();
+        replay_pending(&pool).await.unwrap();
+        let mut older = update("successful_payment", "older-topup");
+        older["message"]["date"] = json!(now - 60);
+        record_update(&pool, &older).await.unwrap();
+        replay_pending(&pool).await.unwrap();
+        replay_pending(&pool).await.unwrap();
+        let sub = storage.get_subscription(42).await;
+        assert_eq!(
+            sub.topup_seconds_available,
+            2 * crate::subscription::TOPUP_SECONDS
+        );
+        assert_eq!(sub.last_topup_at.unwrap().timestamp(), now);
+
+        // Migration 016 uses the epoch for old inbox events whose date was lost.
+        let mut legacy = update("successful_payment", "legacy-topup");
+        legacy["message"]["from"]["id"] = json!(43);
+        legacy["message"]["date"] = json!(0);
+        record_update(&pool, &legacy).await.unwrap();
+        replay_pending(&pool).await.unwrap();
+        let sub = storage.get_subscription(43).await;
+        assert_eq!(
+            sub.topup_seconds_available,
+            crate::subscription::TOPUP_SECONDS
+        );
+        assert!(sub.last_topup_at.unwrap().timestamp() >= now);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn replay_preserves_newer_purchases_refunds_and_grants(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+        let now = chrono::Utc::now().timestamp();
+        // Cover equal-second purchases and a reset Telegram sequence on a later date.
+        for (user_id, old_date, old_id, new_id) in [(42, now, 1, 2), (43, now - 86400, 900, 1)] {
+            let old_charge = format!("old-{user_id}");
+            let new_charge = format!("new-{user_id}");
+            let mut old = update("successful_payment", &old_charge);
+            old["update_id"] = json!(old_id);
+            old["message"]["date"] = json!(old_date);
+            old["message"]["from"]["id"] = json!(user_id);
+            old["message"]["successful_payment"]["invoice_payload"] = json!("sub_basic");
+            record_update(&pool, &old).await.unwrap();
+            sqlx::query("ALTER TABLE subscriptions ADD CONSTRAINT reject_basic CHECK (tier <> 'basic') NOT VALID")
+                .execute(&pool).await.unwrap();
+            replay_pending(&pool).await.unwrap();
+            sqlx::query("ALTER TABLE subscriptions DROP CONSTRAINT reject_basic")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let new_order = PaymentOrder {
+                paid_at: chrono::DateTime::from_timestamp(now, 0).unwrap(),
+                update_id: new_id,
+            };
+            storage
+                .fulfill_payment(user_id, &new_charge, "provider", "sub_pro", 150, new_order)
+                .await
+                .unwrap();
+            storage.reserve_ai_seconds(user_id, 60).await.unwrap();
+            let expiry = storage.get_subscription(user_id).await.expires_at;
+            replay_pending(&pool).await.unwrap();
+            replay_pending(&pool).await.unwrap();
+            let sub = storage.get_subscription(user_id).await;
+            assert_eq!(
+                (sub.tier, sub.ai_seconds_used, sub.expires_at),
+                (SubscriptionTier::Pro, 60, expiry)
+            );
+            let latest = storage.get_latest_payment(user_id).await.unwrap();
+            assert_eq!(latest.telegram_charge_id, new_charge);
+            assert_eq!(latest.created_at, new_order.paid_at);
+            let recent = storage.get_recent_payments(user_id, 2).await;
+            assert_eq!(recent[1].telegram_charge_id, old_charge);
+            assert_eq!(recent[1].created_at.timestamp(), old_date);
+            storage.refund_payment(user_id, &old_charge).await.unwrap();
+            assert_eq!(
+                storage.get_subscription(user_id).await.tier,
+                SubscriptionTier::Pro
+            );
+
+            storage.refund_payment(user_id, &new_charge).await.unwrap();
+            // A different stale charge must not resurrect access after the newer refund.
+            old["message"]["successful_payment"]["telegram_payment_charge_id"] =
+                json!(format!("stale-refund-{user_id}"));
+            record_update(&pool, &old).await.unwrap();
+            replay_pending(&pool).await.unwrap();
+            assert_eq!(
+                storage.get_subscription(user_id).await.tier,
+                SubscriptionTier::Free
+            );
+
+            let grant_order = PaymentOrder {
+                update_id: new_id + 1,
+                ..new_order
+            };
+            storage
+                .upsert_subscription(user_id, SubscriptionTier::Pro, 30, grant_order)
+                .await;
+            old["message"]["successful_payment"]["telegram_payment_charge_id"] =
+                json!(format!("stale-grant-{user_id}"));
+            record_update(&pool, &old).await.unwrap();
+            replay_pending(&pool).await.unwrap();
+            assert_eq!(
+                storage.get_subscription(user_id).await.tier,
+                SubscriptionTier::Pro
+            );
+            // A genuinely later purchase in the same second still supersedes the grant.
+            storage
+                .fulfill_payment(
+                    user_id,
+                    &format!("after-grant-{user_id}"),
+                    "provider",
+                    "sub_basic",
+                    50,
+                    PaymentOrder {
+                        update_id: new_id + 2,
+                        ..new_order
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                storage.get_subscription(user_id).await.tier,
+                SubscriptionTier::Basic
+            );
+        }
     }
 
     #[sqlx::test(migrations = "./migrations")]

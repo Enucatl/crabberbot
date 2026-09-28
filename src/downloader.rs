@@ -273,7 +273,7 @@ impl Downloader for SocketDownloader {
             })
             .await?
         {
-            ResultData::Metadata { info } => Ok(info),
+            ResultData::Metadata { info } => Ok(*info),
             _ => Err(DownloadError::ParsingFailed(
                 "unexpected downloader response".to_string(),
             )),
@@ -292,7 +292,7 @@ impl Downloader for SocketDownloader {
         }
         match self
             .request(Request::Download {
-                info: info.clone(),
+                info: Box::new(info.clone()),
                 url: url.to_string(),
             })
             .await?

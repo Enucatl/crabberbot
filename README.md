@@ -99,12 +99,16 @@ docker compose up -d
 
 ### Development
 
-Run formatting and the test suite. SQLx storage tests need a disposable PostgreSQL database:
+Run formatting, Clippy, and the test suite with Docker available:
 
 ```bash
-cargo fmt --all --check
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/crabberbot cargo test --verbose
+bash scripts/test.sh
 ```
+
+The script starts a disposable PostgreSQL 18 container with its data in `tmpfs`,
+uses an automatically assigned local port, and removes it on exit. SQLx creates
+an isolated database for each storage test. PostgreSQL is required to test the
+application's SQL and locking behavior; SQLite in memory is not interchangeable.
 
 For a local Compose build, use the supplied override and test environment:
 

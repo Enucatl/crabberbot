@@ -953,25 +953,40 @@ mod tests {
         .unwrap();
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn large_photo_resize_keeps_runtime_responsive() {
+    #[test]
+    fn photo_resize_uses_blocking_pool() {
+        use std::future::Future;
+        use std::task::Poll;
+
         let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("large.jpg");
-        image::DynamicImage::new_rgb8(1000, 9001)
+        let source = dir.path().join("source.jpg");
+        image::DynamicImage::new_rgb8(2, 9999)
             .save(&source)
             .unwrap();
 
-        let timer = tokio::time::sleep(Duration::from_millis(20));
-        tokio::pin!(timer);
-        let mut resize = tokio::spawn(resize_photo_if_needed(source));
-        tokio::task::yield_now().await;
-        tokio::select! {
-            biased;
-            _ = &mut resize => panic!("resize finished before the runtime timer ran"),
-            _ = &mut timer => {}
-        }
-        let resized = resize.await.unwrap().unwrap().unwrap();
-        assert!(resized.path().exists());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        runtime.block_on(async {
+            let resize = resize_photo_if_needed(source);
+            tokio::pin!(resize);
+            let pending =
+                std::future::poll_fn(|cx| Poll::Ready(resize.as_mut().poll(cx).is_pending())).await;
+            finish_tx.send(()).unwrap();
+            assert!(pending, "resizing must wait for the occupied blocking pool");
+            blocker.await.unwrap();
+            let resized = resize.await.unwrap().unwrap();
+            assert!(resized.path().exists());
+        });
     }
 
     #[tokio::test]

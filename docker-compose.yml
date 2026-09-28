@@ -44,6 +44,7 @@ services:
       file: ../compose-security-baseline/hardening.yml
       service: hardened-medium
     image: ghcr.io/enucatl/crabberbot-worker:latest
+    init: true # Reap orphaned yt-dlp/ffmpeg descendants after process-group cleanup.
     command: ["./downloader-worker"]
     networks: [downloader]
     environment:
