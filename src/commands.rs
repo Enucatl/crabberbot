@@ -437,11 +437,21 @@ pub async fn handle_refundme(
         return Ok(());
     }
 
-    if !storage
+    match storage
         .refund_payment(user_id, &payment.telegram_charge_id)
         .await
     {
-        return Ok(());
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(e) => {
+            log::error!(
+                "Failed to record Telegram refund {}: {}",
+                payment.telegram_charge_id,
+                e
+            );
+            api.send_text_message(chat_id, message.id, "Telegram returned your Stars, but account access is still being updated. Please contact /support if it does not change shortly.").await?;
+            return Ok(());
+        }
     }
 
     api.send_text_message(
@@ -533,14 +543,22 @@ pub async fn handle_refund(
         return Ok(());
     }
 
-    if !storage.refund_payment(target_user_id, charge_id).await {
-        api.send_text_message(
-            message.chat.id,
-            message.id,
-            "Telegram refunded the charge, but no stored payment was newly deactivated.",
-        )
-        .await?;
-        return Ok(());
+    match storage.refund_payment(target_user_id, charge_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            api.send_text_message(
+                message.chat.id,
+                message.id,
+                "Telegram refunded the charge, but no stored payment was newly deactivated.",
+            )
+            .await?;
+            return Ok(());
+        }
+        Err(e) => {
+            log::error!("Failed to record Telegram refund {}: {}", charge_id, e);
+            api.send_text_message(message.chat.id, message.id, "Telegram refunded the charge, but account access could not be updated yet. Check again shortly.").await?;
+            return Ok(());
+        }
     }
 
     // Notify the user. For private chats user_id == chat_id; for groups we send to user_id directly.
@@ -599,7 +617,7 @@ pub async fn handle_successful_payment(
         return Ok(());
     }
 
-    if !storage
+    match storage
         .fulfill_payment(
             user_id,
             &payment.telegram_payment_charge_id.0,
@@ -609,7 +627,16 @@ pub async fn handle_successful_payment(
         )
         .await
     {
-        return Ok(());
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(e) => {
+            log::error!(
+                "Failed to fulfill Telegram charge {}: {}",
+                payment.telegram_payment_charge_id.0,
+                e
+            );
+            return Ok(());
+        }
     }
 
     match product.as_str() {
@@ -672,11 +699,20 @@ pub async fn handle_refunded_payment(
         user_id,
         refund.telegram_payment_charge_id.0
     );
-    if !storage
+    match storage
         .refund_payment(user_id, &refund.telegram_payment_charge_id.0)
         .await
     {
-        return Ok(());
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(e) => {
+            log::error!(
+                "Failed to record Telegram refund {}: {}",
+                refund.telegram_payment_charge_id.0,
+                e
+            );
+            return Ok(());
+        }
     }
     api.send_text_message(
         chat_id,
@@ -1539,7 +1575,7 @@ mod tests {
             .expect_fulfill_payment()
             .withf(|_, _, _, product, amount| product == "sub_basic" && *amount == 50)
             .times(1)
-            .returning(|_, _, _, _, _| true);
+            .returning(|_, _, _, _, _| Ok(true));
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -1569,7 +1605,7 @@ mod tests {
             .expect_fulfill_payment()
             .withf(|_, _, _, product, amount| product == "topup_60" && *amount == 50)
             .times(1)
-            .returning(|_, _, _, _, _| true);
+            .returning(|_, _, _, _, _| Ok(true));
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -1603,7 +1639,7 @@ mod tests {
             .expect_refund_payment()
             .withf(|user_id, charge_id| *user_id == 200 && charge_id == "tg_charge_123")
             .times(1)
-            .returning(|_, _| true);
+            .returning(|_, _| Ok(true));
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -1650,7 +1686,7 @@ mod tests {
             .expect_refund_payment()
             .withf(|user_id, charge_id| *user_id == 200 && charge_id == "tg_charge_123")
             .times(1)
-            .returning(|_, _| true);
+            .returning(|_, _| Ok(true));
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -1816,7 +1852,7 @@ mod tests {
             .expect_refund_payment()
             .withf(|user_id, charge_id| *user_id == 200 && charge_id == "tg_charge_123")
             .times(1)
-            .returning(|_, _| true);
+            .returning(|_, _| Ok(true));
         mock_api
             .expect_send_text_no_reply()
             .times(1)

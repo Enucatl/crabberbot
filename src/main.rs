@@ -1,4 +1,11 @@
-use axum::{http::StatusCode, routing::get};
+use axum::{
+    body::{Body, to_bytes},
+    extract::{Request, State},
+    http::StatusCode,
+    middleware::{Next, from_fn_with_state},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use log::LevelFilter;
 use std::collections::HashSet;
 use std::io::Write;
@@ -23,6 +30,7 @@ use crabberbot::concurrency::ConcurrencyLimiter;
 use crabberbot::config::AppConfig;
 use crabberbot::downloader::{Downloader, SocketDownloader};
 use crabberbot::handler::{maybe_send_premium_buttons, process_download_request};
+use crabberbot::payment_inbox::{record_update, replay_pending};
 use crabberbot::premium::audio_extractor::{AudioExtractor, SocketAudioExtractor};
 use crabberbot::premium::summarizer::{OpenRouterSummarizer, Summarizer};
 use crabberbot::premium::transcriber::{DeepgramTranscriber, Transcriber};
@@ -31,6 +39,44 @@ use crabberbot::telegram_api::{TelegramApi, TeloxideApi};
 use crabberbot::terms;
 
 const OVERALL_REQUEST_TIMEOUT: Duration = Duration::from_secs(360);
+
+async fn persist_payment_update(
+    State(pool): State<sqlx::PgPool>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let bytes = match to_bytes(body, 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log::warn!("Cannot read webhook update: {}", error);
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    };
+    let update = match serde_json::from_slice(&bytes) {
+        Ok(update) => update,
+        Err(error) => {
+            log::warn!("Invalid webhook update: {}", error);
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    };
+    let response = next
+        .run(Request::from_parts(parts, Body::from(bytes)))
+        .await;
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+    if let Err(error) = record_update(&pool, &update).await {
+        log::error!("Cannot persist payment webhook update: {}", error);
+        return if matches!(error, sqlx::Error::Protocol(_)) {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        .into_response();
+    }
+    response
+}
 
 async fn handle_command(
     _bot: Bot,
@@ -320,6 +366,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Database connected and migrations applied.");
     let storage: Arc<dyn Storage> = Arc::new(PostgresStorage::new(pool.clone()));
 
+    let replay_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            if let Err(error) = replay_pending(&replay_pool).await {
+                log::error!("Cannot replay payment inbox: {}", error);
+            }
+        }
+    });
+
     let audio_cache_dir = config.audio_cache_dir.clone();
     let cleanup_pool = pool.clone();
     let cleanup_storage = storage.clone();
@@ -369,24 +426,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     .expect("Failed to set webhook");
     let stop_token = listener.stop_token();
-    let app = app.route(
-        "/healthz",
-        get({
-            let pool = pool.clone();
-            move || {
+    let app = app
+        .layer(from_fn_with_state(pool.clone(), persist_payment_update))
+        .route(
+            "/healthz",
+            get({
                 let pool = pool.clone();
-                async move {
-                    match sqlx::query("SELECT 1").execute(&pool).await {
-                        Ok(_) => StatusCode::NO_CONTENT,
-                        Err(error) => {
-                            log::warn!("Healthcheck database query failed: {}", error);
-                            StatusCode::SERVICE_UNAVAILABLE
+                move || {
+                    let pool = pool.clone();
+                    async move {
+                        match sqlx::query("SELECT 1").execute(&pool).await {
+                            Ok(_) => StatusCode::NO_CONTENT,
+                            Err(error) => {
+                                log::warn!("Healthcheck database query failed: {}", error);
+                                StatusCode::SERVICE_UNAVAILABLE
+                            }
                         }
                     }
                 }
-            }
-        }),
-    );
+            }),
+        );
     tokio::spawn(async move {
         let tcp_listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -529,5 +588,90 @@ async fn cleanup_audio_cache(pool: &sqlx::PgPool, audio_cache_dir: &std::path::P
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod payment_webhook_tests {
+    use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn authenticates_before_intake_and_retries_failed_intake(pool: sqlx::PgPool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let options = teloxide::update_listeners::webhooks::Options::new(
+            address,
+            Url::parse("http://localhost/webhook").unwrap(),
+        )
+        .secret_token("correct".to_owned());
+        let (_updates, _stop, app) = teloxide::update_listeners::webhooks::axum_no_setup(options);
+        let intake_pool = pool.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.layer(from_fn_with_state(intake_pool, persist_payment_update)),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/webhook");
+        let update = serde_json::json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "date": 0,
+                "chat": {"id": 42, "type": "private"},
+                "from": {"id": 42, "is_bot": false, "first_name": "Test"},
+                "successful_payment": {
+                    "currency": "XTR",
+                    "total_amount": 50,
+                    "invoice_payload": "topup_60",
+                    "telegram_payment_charge_id": "charge",
+                    "provider_payment_charge_id": "provider"
+                }
+            }
+        });
+        let response = client
+            .post(&url)
+            .header("X-Telegram-Bot-Api-Secret-Token", "wrong")
+            .json(&update)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payment_inbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let response = client
+            .post(&url)
+            .header("X-Telegram-Bot-Api-Secret-Token", "correct")
+            .json(&update)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payment_inbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        sqlx::query("DROP TABLE payment_inbox")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let response = client
+            .post(&url)
+            .header("X-Telegram-Bot-Api-Secret-Token", "correct")
+            .json(&update)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        server.abort();
     }
 }

@@ -61,7 +61,7 @@ pub trait Storage: Send + Sync {
     async fn upsert_subscription(&self, user_id: i64, tier: SubscriptionTier, duration_days: i64);
 
     /// Records a charge and grants its product entitlement atomically.
-    /// Returns true only when this charge was fulfilled for the first time.
+    /// Returns Ok(true) only when this charge was fulfilled for the first time.
     async fn fulfill_payment(
         &self,
         user_id: i64,
@@ -69,7 +69,7 @@ pub trait Storage: Send + Sync {
         provider_charge_id: &str,
         product: &str,
         amount: i32,
-    ) -> bool;
+    ) -> Result<bool, sqlx::Error>;
 
     // AI Seconds tracking
     async fn consume_ai_seconds(&self, user_id: i64, seconds: i32);
@@ -106,8 +106,12 @@ pub trait Storage: Send + Sync {
     );
 
     /// Records a payment refund and revokes its entitlement atomically.
-    /// Returns true only when the stored charge was refunded for the first time.
-    async fn refund_payment(&self, user_id: i64, telegram_charge_id: &str) -> bool;
+    /// Returns Ok(true) only when the stored charge was refunded for the first time.
+    async fn refund_payment(
+        &self,
+        user_id: i64,
+        telegram_charge_id: &str,
+    ) -> Result<bool, sqlx::Error>;
     /// Returns the most recent unrefunded payment for a user, if any.
     async fn get_latest_payment(&self, user_id: i64) -> Option<PaymentRecord>;
     /// Returns the most recent `limit` unrefunded payments for a user (for owner tooling).
@@ -403,16 +407,10 @@ impl Storage for PostgresStorage {
         provider_charge_id: &str,
         product: &str,
         amount: i32,
-    ) -> bool {
-        let mut tx = match self.pool.begin().await {
-            Ok(tx) => tx,
-            Err(e) => {
-                log::error!("Failed to begin payment fulfillment for {}: {}", user_id, e);
-                return false;
-            }
-        };
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
 
-        let inserted: Option<(i32,)> = match sqlx::query_as(
+        let inserted: Option<(i32,)> = sqlx::query_as(
             "INSERT INTO payments (user_id, telegram_payment_charge_id, provider_payment_charge_id, product, amount) \
              VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (telegram_payment_charge_id) DO NOTHING RETURNING id",
@@ -423,16 +421,9 @@ impl Storage for PostgresStorage {
         .bind(product)
         .bind(amount)
         .fetch_optional(&mut *tx)
-        .await
-        {
-            Ok(inserted) => inserted,
-            Err(e) => {
-                log::error!("Failed to record payment for {}: {}", user_id, e);
-                return false;
-            }
-        };
+        .await?;
         if inserted.is_none() {
-            return false;
+            return Ok(false);
         }
 
         let result = match product {
@@ -466,22 +457,11 @@ impl Storage for PostgresStorage {
             .bind(crate::subscription::TOPUP_SECONDS)
             .execute(&mut *tx)
             .await,
-            _ => return false,
+            _ => return Err(sqlx::Error::Protocol("Unknown payment product".into())),
         };
-        if let Err(e) = result {
-            log::error!("Failed to grant payment entitlement for {}: {}", user_id, e);
-            return false;
-        }
-
-        if let Err(e) = tx.commit().await {
-            log::error!(
-                "Failed to commit payment fulfillment for {}: {}",
-                user_id,
-                e
-            );
-            return false;
-        }
-        true
+        result?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn consume_ai_seconds(&self, user_id: i64, seconds: i32) {
@@ -732,15 +712,13 @@ impl Storage for PostgresStorage {
         }
     }
 
-    async fn refund_payment(&self, user_id: i64, telegram_charge_id: &str) -> bool {
-        let mut tx = match self.pool.begin().await {
-            Ok(tx) => tx,
-            Err(e) => {
-                log::error!("Failed to begin payment refund for {}: {}", user_id, e);
-                return false;
-            }
-        };
-        let product: Option<(String,)> = match sqlx::query_as(
+    async fn refund_payment(
+        &self,
+        user_id: i64,
+        telegram_charge_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let product: Option<(String,)> = sqlx::query_as(
             "UPDATE payments SET refunded_at = NOW() \
              WHERE user_id = $1 AND telegram_payment_charge_id = $2 AND refunded_at IS NULL \
              RETURNING product",
@@ -748,16 +726,9 @@ impl Storage for PostgresStorage {
         .bind(user_id)
         .bind(telegram_charge_id)
         .fetch_optional(&mut *tx)
-        .await
-        {
-            Ok(product) => product,
-            Err(e) => {
-                log::error!("Failed to record payment refund for {}: {}", user_id, e);
-                return false;
-            }
-        };
+        .await?;
         let Some((product,)) = product else {
-            return false;
+            return Ok(false);
         };
 
         let result = match product.as_str() {
@@ -783,15 +754,9 @@ impl Storage for PostgresStorage {
             }
             _ => Ok(sqlx::postgres::PgQueryResult::default()),
         };
-        if let Err(e) = result {
-            log::error!("Failed to revoke refunded payment for {}: {}", user_id, e);
-            return false;
-        }
-        if let Err(e) = tx.commit().await {
-            log::error!("Failed to commit payment refund for {}: {}", user_id, e);
-            return false;
-        }
-        true
+        result?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn get_latest_payment(&self, user_id: i64) -> Option<PaymentRecord> {
@@ -907,11 +872,13 @@ mod tests {
             storage
                 .fulfill_payment(1, "basic-charge", "provider-charge", PRODUCT_SUB_BASIC, 50)
                 .await
+                .unwrap()
         );
         assert!(
             !storage
                 .fulfill_payment(1, "basic-charge", "provider-charge", PRODUCT_SUB_BASIC, 50)
                 .await
+                .unwrap()
         );
 
         let payment_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payments")
@@ -940,11 +907,13 @@ mod tests {
             storage
                 .fulfill_payment(2, "topup-charge", "provider-charge", PRODUCT_TOPUP_60, 50)
                 .await
+                .unwrap()
         );
         assert!(
             !storage
                 .fulfill_payment(2, "topup-charge", "provider-charge", PRODUCT_TOPUP_60, 50)
                 .await
+                .unwrap()
         );
 
         let payment_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payments")
@@ -967,7 +936,8 @@ mod tests {
         let storage = std::sync::Arc::new(PostgresStorage::new(pool));
         storage
             .fulfill_payment(1, "reserve-charge", "provider", PRODUCT_SUB_BASIC, 50)
-            .await;
+            .await
+            .unwrap();
         let first = storage.clone();
         let second = storage.clone();
         let (left, right) = tokio::join!(
@@ -1016,10 +986,11 @@ mod tests {
             storage
                 .fulfill_payment(1, "basic-charge", "provider-charge", PRODUCT_SUB_BASIC, 50)
                 .await
+                .unwrap()
         );
 
-        assert!(storage.refund_payment(1, "basic-charge").await);
-        assert!(!storage.refund_payment(1, "basic-charge").await);
+        assert!(storage.refund_payment(1, "basic-charge").await.unwrap());
+        assert!(!storage.refund_payment(1, "basic-charge").await.unwrap());
 
         let (refunded_at, tier, limit): (Option<chrono::DateTime<chrono::Utc>>, String, i32) =
             sqlx::query_as(
@@ -1034,23 +1005,49 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    async fn refund_storage_failure_is_not_a_duplicate(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+        assert!(
+            storage
+                .fulfill_payment(1, "charge", "provider", PRODUCT_TOPUP_60, 50)
+                .await
+                .unwrap()
+        );
+        sqlx::query(
+            "ALTER TABLE payments ADD CONSTRAINT reject_refund CHECK (refunded_at IS NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(storage.refund_payment(1, "charge").await.is_err());
+        sqlx::query("ALTER TABLE payments DROP CONSTRAINT reject_refund")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(storage.refund_payment(1, "charge").await.unwrap());
+        assert!(!storage.refund_payment(1, "charge").await.unwrap());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     async fn refund_topup_once_and_rejects_wrong_charge_owner(pool: PgPool) {
         let storage = PostgresStorage::new(pool.clone());
         assert!(
             storage
                 .fulfill_payment(1, "topup-a", "provider-a", PRODUCT_TOPUP_60, 50)
                 .await
+                .unwrap()
         );
         assert!(
             storage
                 .fulfill_payment(1, "topup-b", "provider-b", PRODUCT_TOPUP_60, 50)
                 .await
+                .unwrap()
         );
 
-        assert!(!storage.refund_payment(2, "topup-a").await);
-        assert!(!storage.refund_payment(1, "unknown-charge").await);
-        assert!(storage.refund_payment(1, "topup-a").await);
-        assert!(!storage.refund_payment(1, "topup-a").await);
+        assert!(!storage.refund_payment(2, "topup-a").await.unwrap());
+        assert!(!storage.refund_payment(1, "unknown-charge").await.unwrap());
+        assert!(storage.refund_payment(1, "topup-a").await.unwrap());
+        assert!(!storage.refund_payment(1, "topup-a").await.unwrap());
 
         let topup_seconds: i32 = sqlx::query_scalar(
             "SELECT topup_seconds_available FROM subscriptions WHERE user_id = 1",
@@ -1068,13 +1065,15 @@ mod tests {
             storage
                 .fulfill_payment(1, "older", "provider-a", PRODUCT_SUB_BASIC, 50)
                 .await
+                .unwrap()
         );
         assert!(
             storage
                 .fulfill_payment(1, "newer", "provider-b", PRODUCT_TOPUP_60, 50)
                 .await
+                .unwrap()
         );
-        assert!(storage.refund_payment(1, "newer").await);
+        assert!(storage.refund_payment(1, "newer").await.unwrap());
 
         assert_eq!(
             storage

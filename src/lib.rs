@@ -3,6 +3,7 @@ pub mod concurrency;
 pub mod config;
 pub mod downloader;
 pub mod handler;
+pub mod payment_inbox;
 pub mod premium;
 pub mod retry;
 pub mod storage;
