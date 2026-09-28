@@ -693,7 +693,8 @@ pub async fn send_long_text(
     const MAX_LEN: usize = 4000;
     if text.len() <= MAX_LEN {
         return log_reply_failure(
-            api.send_text_message(chat_id, message_id, text).await,
+            api.send_text_message(chat_id, message_id, &teloxide::utils::html::escape(text))
+                .await,
             chat_id,
             "long_text_chunk",
         )
@@ -704,7 +705,8 @@ pub async fn send_long_text(
         let end = text.floor_char_boundary((start + MAX_LEN).min(text.len()));
         let chunk = &text[start..end];
         if !log_reply_failure(
-            api.send_text_message(chat_id, message_id, chunk).await,
+            api.send_text_message(chat_id, message_id, &teloxide::utils::html::escape(chunk))
+                .await,
             chat_id,
             "long_text_chunk",
         )
@@ -1994,14 +1996,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_long_text_exactly_at_limit_is_single_message() {
-        let text = "x".repeat(4000);
+        let suffix = "Vec<String> & <b>literal</b>";
+        let text = format!("{}{}", "x".repeat(4000 - suffix.len()), suffix);
+        let expected = format!(
+            "{}Vec&lt;String&gt; &amp; &lt;b&gt;literal&lt;/b&gt;",
+            "x".repeat(4000 - suffix.len())
+        );
         let mut mock_api = MockTelegramApi::new();
         mock_api
             .expect_send_text_message()
+            .withf(move |_, _, message| *message == expected)
             .times(1)
             .returning(|_, _, _| Ok(()));
 
-        send_long_text(ChatId(1), MessageId(1), &text, &mock_api).await;
+        assert!(send_long_text(ChatId(1), MessageId(1), &text, &mock_api).await);
     }
 
     #[tokio::test]
@@ -2014,6 +2022,27 @@ mod tests {
             .returning(|_, _, _| Ok(()));
 
         send_long_text(ChatId(1), MessageId(1), &text, &mock_api).await;
+    }
+
+    #[tokio::test]
+    async fn test_send_long_text_escapes_each_chunk_at_boundary() {
+        let text = format!("{}<&>literal <b>tag</b> & Vec<String>", "x".repeat(3999));
+        let first = format!("{}&lt;", "x".repeat(3999));
+        let second =
+            String::from("&amp;&gt;literal &lt;b&gt;tag&lt;/b&gt; &amp; Vec&lt;String&gt;");
+        let mut mock_api = MockTelegramApi::new();
+        mock_api
+            .expect_send_text_message()
+            .withf(move |_, _, message| *message == first)
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        mock_api
+            .expect_send_text_message()
+            .withf(move |_, _, message| *message == second)
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        assert!(send_long_text(ChatId(1), MessageId(1), &text, &mock_api).await);
     }
 
     #[tokio::test]
