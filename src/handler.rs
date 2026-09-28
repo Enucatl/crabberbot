@@ -12,7 +12,7 @@ use crate::downloader::{
 };
 use crate::premium::audio_extractor::AudioExtractor;
 use crate::storage::{CachedMedia, Storage};
-use crate::telegram_api::{SentMedia, TelegramApi, resize_photo_if_needed};
+use crate::telegram_api::{SentMedia, TelegramApi, TempImage, resize_photo_if_needed};
 use crate::validator::validate_media_metadata;
 
 const MAX_TELEGRAM_ALBUM_ITEMS: usize = 10;
@@ -117,17 +117,6 @@ impl Drop for FileCleanupGuard {
                 });
             }
         }
-    }
-}
-
-async fn remove_temp_file(path: PathBuf, context: &str) {
-    if let Err(e) = tokio::fs::remove_file(&path).await {
-        log::warn!(
-            "Failed to remove temporary file {} for {}: {}",
-            path.display(),
-            context,
-            e
-        );
     }
 }
 
@@ -258,7 +247,7 @@ async fn send_single_item(
             .map(|(file_id, sent_id)| (file_id, MediaType::Video, sent_id)),
         MediaType::Photo => {
             // Resize happens at the handler layer for both single and group photos.
-            let resized = match resize_photo_if_needed(&item.filepath) {
+            let resized = match resize_photo_if_needed(item.filepath.clone()).await {
                 Ok(resized) => resized,
                 Err(e) => {
                     log_reply_failure(
@@ -272,14 +261,14 @@ async fn send_single_item(
                     return None;
                 }
             };
-            let effective_path = resized.as_deref().unwrap_or(&item.filepath);
+            let effective_path = resized
+                .as_ref()
+                .map(TempImage::path)
+                .unwrap_or(&item.filepath);
             let send_result = telegram_api
                 .send_photo(chat_id, message_id, effective_path, caption)
                 .await
                 .map(|(file_id, sent_id)| (file_id, MediaType::Photo, sent_id));
-            if let Some(p) = resized {
-                remove_temp_file(p, "single photo resize").await;
-            }
             send_result
         }
     };
@@ -317,7 +306,7 @@ async fn send_media_group_step(
     telegram_api: &dyn TelegramApi,
 ) -> Option<Vec<SentMedia>> {
     let mut media_group: Vec<InputMedia> = Vec::new();
-    let mut temp_resized: Vec<PathBuf> = Vec::new();
+    let mut temp_resized: Vec<TempImage> = Vec::new();
 
     for (i, item) in items.iter().enumerate() {
         let item_caption = if i == 0 {
@@ -336,7 +325,7 @@ async fn send_media_group_step(
                 )
             }
             MediaType::Photo => {
-                let resized = match resize_photo_if_needed(&item.filepath) {
+                let resized = match resize_photo_if_needed(item.filepath.clone()).await {
                     Ok(resized) => resized,
                     Err(e) => {
                         log_reply_failure(
@@ -350,7 +339,11 @@ async fn send_media_group_step(
                         continue;
                     }
                 };
-                let path = resized.as_deref().unwrap_or(&item.filepath).to_path_buf();
+                let path = resized
+                    .as_ref()
+                    .map(TempImage::path)
+                    .unwrap_or(&item.filepath)
+                    .to_path_buf();
                 if let Some(p) = resized {
                     temp_resized.push(p);
                 }
@@ -389,9 +382,6 @@ async fn send_media_group_step(
         Ok(sent)
     }
     .await;
-    for p in temp_resized {
-        remove_temp_file(p, "media group resize").await;
-    }
     match result {
         Ok(sent) => {
             log::info!("Successfully sent media group to chat_id: {}", chat_id);

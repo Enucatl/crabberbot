@@ -27,7 +27,25 @@ const MAX_PHOTO_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_VIDEO_THUMBNAIL_DIMENSION: u32 = 320;
 const MAX_VIDEO_THUMBNAIL_BYTES: u64 = 200_000;
 
-fn prepare_video_thumbnail(path: &Path) -> Result<PathBuf, String> {
+pub(crate) struct TempImage(PathBuf);
+
+impl TempImage {
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempImage {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.0) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("Could not remove temporary image {:?}: {}", self.0, e);
+            }
+        }
+    }
+}
+
+fn prepare_video_thumbnail(path: &Path) -> Result<TempImage, String> {
     let img = image::ImageReader::open(path)
         .map_err(|e| e.to_string())
         .and_then(|reader| reader.with_guessed_format().map_err(|e| e.to_string()))
@@ -36,16 +54,15 @@ fn prepare_video_thumbnail(path: &Path) -> Result<PathBuf, String> {
             reader.decode().map_err(|e| e.to_string())
         })?;
     let resized = img.thumbnail(MAX_VIDEO_THUMBNAIL_DIMENSION, MAX_VIDEO_THUMBNAIL_DIMENSION);
-    let temp_path = std::env::temp_dir().join(format!("{}.jpg", uuid::Uuid::new_v4()));
-    let file = std::fs::File::create(&temp_path).map_err(|e| e.to_string())?;
+    let temp_path = TempImage(std::env::temp_dir().join(format!("{}.jpg", uuid::Uuid::new_v4())));
+    let file = std::fs::File::create(temp_path.path()).map_err(|e| e.to_string())?;
     image::codecs::jpeg::JpegEncoder::new_with_quality(file, 80)
         .encode_image(&resized)
         .map_err(|e| e.to_string())?;
-    let size = std::fs::metadata(&temp_path)
+    let size = std::fs::metadata(temp_path.path())
         .map_err(|e| e.to_string())?
         .len();
     if size >= MAX_VIDEO_THUMBNAIL_BYTES {
-        let _ = std::fs::remove_file(&temp_path);
         return Err(format!("encoded thumbnail is {size} bytes"));
     }
     Ok(temp_path)
@@ -53,8 +70,8 @@ fn prepare_video_thumbnail(path: &Path) -> Result<PathBuf, String> {
 
 /// Resize a photo if its dimension sum exceeds Telegram's 10000 limit.
 /// Returns the path to a temporary resized file, or None if no resize was needed.
-/// The caller is responsible for deleting the temp file when done.
-pub(crate) fn resize_photo_if_needed(path: &Path) -> Result<Option<PathBuf>, String> {
+/// The returned guard deletes a resized file when dropped.
+fn resize_photo_if_needed_sync(path: &Path) -> Result<Option<TempImage>, String> {
     let dimensions = match image::ImageReader::open(path)
         .map_err(|e| e.to_string())
         .and_then(|reader| reader.with_guessed_format().map_err(|e| e.to_string()))
@@ -112,12 +129,23 @@ pub(crate) fn resize_photo_if_needed(path: &Path) -> Result<Option<PathBuf>, Str
     );
     let resized = img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
-    let temp_path = std::env::temp_dir().join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
-    if let Err(e) = resized.save(&temp_path) {
-        log::warn!("Could not save resized image to {:?}: {}", temp_path, e);
+    let temp_path =
+        TempImage(std::env::temp_dir().join(format!("{}.{}", uuid::Uuid::new_v4(), ext)));
+    if let Err(e) = resized.save(temp_path.path()) {
+        log::warn!(
+            "Could not save resized image to {:?}: {}",
+            temp_path.path(),
+            e
+        );
         return Ok(None);
     }
     Ok(Some(temp_path))
+}
+
+pub(crate) async fn resize_photo_if_needed(path: PathBuf) -> Result<Option<TempImage>, String> {
+    tokio::task::spawn_blocking(move || resize_photo_if_needed_sync(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 pub(crate) fn photo_dimensions_allowed(width: u32, height: u32) -> bool {
@@ -399,11 +427,19 @@ impl TelegramApi for TeloxideApi {
         log::info!("Sending video {:?} to chat {}", file_path, chat_id);
         self.send_chat_action(chat_id, ChatAction::UploadVideo)
             .await?;
-        let prepared_thumbnail = thumbnail_filepath.as_deref().and_then(|path| {
-            prepare_video_thumbnail(path)
-                .inspect_err(|e| log::warn!("Could not prepare video thumbnail {:?}: {}", path, e))
-                .ok()
-        });
+        let prepared_thumbnail = if let Some(path) = thumbnail_filepath {
+            tokio::task::spawn_blocking({
+                let path = path.clone();
+                move || prepare_video_thumbnail(&path)
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|result| result)
+            .inspect_err(|e| log::warn!("Could not prepare video thumbnail {:?}: {}", path, e))
+            .ok()
+        } else {
+            None
+        };
         let result = self
             .request(Some(chat_id), "telegram.send_video", || {
                 let mut request = self
@@ -413,15 +449,12 @@ impl TelegramApi for TeloxideApi {
                     .parse_mode(ParseMode::Html)
                     .reply_to(message_id);
 
-                if let Some(p) = prepared_thumbnail.clone() {
-                    request = request.thumbnail(InputFile::file(p));
+                if let Some(p) = &prepared_thumbnail {
+                    request = request.thumbnail(InputFile::file(p.path()));
                 }
                 async move { request.await }
             })
             .await;
-        if let Some(path) = prepared_thumbnail {
-            let _ = tokio::fs::remove_file(path).await;
-        }
         let message = result?;
         let file_id = message
             .video()
@@ -841,15 +874,48 @@ mod tests {
             .unwrap();
 
         let prepared = prepare_video_thumbnail(&source).unwrap();
-        let (width, height) = image::ImageReader::open(&prepared)
+        let (width, height) = image::ImageReader::open(prepared.path())
             .unwrap()
             .into_dimensions()
             .unwrap();
 
         assert!(width <= 320 && height <= 320);
-        assert!(std::fs::metadata(&prepared).unwrap().len() < 200_000);
-        assert_eq!(prepared.extension().unwrap(), "jpg");
-        std::fs::remove_file(prepared).unwrap();
+        assert!(std::fs::metadata(prepared.path()).unwrap().len() < 200_000);
+        assert_eq!(prepared.path().extension().unwrap(), "jpg");
+        let path = prepared.path().to_path_buf();
+        drop(prepared);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn temporary_image_removes_partial_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("partial.jpg");
+        let temporary = TempImage(output.clone());
+        std::fs::write(&output, b"partial JPEG data").unwrap();
+        drop(temporary);
+        assert!(!output.exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn large_photo_resize_keeps_runtime_responsive() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("large.jpg");
+        image::DynamicImage::new_rgb8(1000, 9001)
+            .save(&source)
+            .unwrap();
+
+        let timer = tokio::time::sleep(Duration::from_millis(20));
+        tokio::pin!(timer);
+        let mut resize = tokio::spawn(resize_photo_if_needed(source));
+        tokio::task::yield_now().await;
+        tokio::select! {
+            biased;
+            _ = &mut resize => panic!("resize finished before the runtime timer ran"),
+            _ = &mut timer => {}
+        }
+        let resized = resize.await.unwrap().unwrap().unwrap();
+        assert!(resized.path().exists());
     }
 
     #[tokio::test]
