@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::AbortHandle;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -344,7 +345,10 @@ impl YtDlpDownloader {
     ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), DownloadError> {
         command
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command
             .spawn()
             .map_err(|e| DownloadError::CommandFailed(e.to_string()))?;
@@ -352,58 +356,39 @@ impl YtDlpDownloader {
         let stderr = child.stderr.take().expect("piped stderr");
         let mut out = tokio::spawn(read_capped(stdout));
         let mut err = tokio::spawn(read_capped(stderr));
-        let mut stdout = None;
-        let mut stderr = None;
-        enum CommandRun {
-            Finished(std::process::ExitStatus),
-            Failed(DownloadError),
-        }
-        let outcome = {
-            let wait = tokio::time::timeout(timeout, child.wait());
-            tokio::pin!(wait);
-            loop {
-                tokio::select! {
-                status = &mut wait => match status {
-                    Ok(Ok(status)) => break CommandRun::Finished(status),
-                    Ok(Err(e)) => break CommandRun::Failed(DownloadError::CommandFailed(e.to_string())),
-                    Err(_) => break CommandRun::Failed(DownloadError::Timeout(timeout.as_secs())),
+        let cleanup = CommandCleanup {
+            #[cfg(unix)]
+            group: i32::try_from(child.id().expect("spawned child has a PID"))
+                .expect("child PID fits i32"),
+            out: out.abort_handle(),
+            err: err.abort_handle(),
+        };
+        let result = tokio::time::timeout(timeout, async {
+            tokio::try_join!(
+                async {
+                    child
+                        .wait()
+                        .await
+                        .map_err(|e| DownloadError::CommandFailed(e.to_string()))
                 },
-                result = &mut out, if stdout.is_none() => match result {
-                    Ok(Ok(bytes)) => stdout = Some(bytes),
-                    result => break CommandRun::Failed(command_output_error(result)),
+                async {
+                    match (&mut out).await {
+                        Ok(Ok(bytes)) => Ok(bytes),
+                        result => Err(command_output_error(result)),
+                    }
                 },
-                result = &mut err, if stderr.is_none() => match result {
-                    Ok(Ok(bytes)) => stderr = Some(bytes),
-                    result => break CommandRun::Failed(command_output_error(result)),
+                async {
+                    match (&mut err).await {
+                        Ok(Ok(bytes)) => Ok(bytes),
+                        result => Err(command_output_error(result)),
+                    }
                 },
-                }
-            }
-        };
-        let status = match outcome {
-            CommandRun::Finished(status) => status,
-            CommandRun::Failed(error) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                out.abort();
-                err.abort();
-                return Err(error);
-            }
-        };
-        let stdout = match stdout {
-            Some(bytes) => bytes,
-            None => out
-                .await
-                .map_err(|e| DownloadError::CommandFailed(e.to_string()))?
-                .map_err(|e| DownloadError::CommandFailed(e.to_string()))?,
-        };
-        let stderr = match stderr {
-            Some(bytes) => bytes,
-            None => err
-                .await
-                .map_err(|e| DownloadError::CommandFailed(e.to_string()))?
-                .map_err(|e| DownloadError::CommandFailed(e.to_string()))?,
-        };
-        Ok((status, stdout, stderr))
+            )
+        })
+        .await
+        .unwrap_or(Err(DownloadError::Timeout(timeout.as_secs())));
+        drop(cleanup);
+        result
     }
 
     fn validated_download_path(download_dir: &Path, uuid: &str, filepath: &str) -> Option<PathBuf> {
@@ -506,6 +491,26 @@ impl YtDlpDownloader {
                 let _ = tokio::fs::remove_file(path).await;
             }
         }
+    }
+}
+
+struct CommandCleanup {
+    #[cfg(unix)]
+    group: i32,
+    out: AbortHandle,
+    err: AbortHandle,
+}
+
+impl Drop for CommandCleanup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            // SAFETY: group is the positive PID of the child we spawned with
+            // process_group(0), so its negative value addresses only that group.
+            unsafe { libc::kill(-self.group, libc::SIGKILL) };
+        }
+        self.out.abort();
+        self.err.abort();
     }
 }
 
@@ -1142,5 +1147,66 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".part")
         }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_run_command_kills_pipe_holding_descendant_on_timeout_and_cancellation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let script = temp_dir.path().join("fake-yt-dlp");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30 &\necho $! > \"$1\"\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        for cancel in [false, true] {
+            let pid_file = temp_dir
+                .path()
+                .join(if cancel { "cancel.pid" } else { "timeout.pid" });
+            let mut command = tokio::process::Command::new(&script);
+            command.arg(&pid_file);
+            if cancel {
+                let task = tokio::spawn(YtDlpDownloader::run_command(
+                    command,
+                    Duration::from_secs(30),
+                ));
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !pid_file.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("fake descendant started");
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                let result = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    YtDlpDownloader::run_command(command, Duration::from_secs(1)),
+                )
+                .await
+                .expect("pipe drain stayed within its deadline");
+                assert!(matches!(result, Err(DownloadError::Timeout(1))));
+            }
+
+            let pid: u32 = std::fs::read_to_string(&pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let status = std::fs::read_to_string(format!("/proc/{pid}/status"));
+                    if status.ok().is_none_or(|status| {
+                        status.lines().any(|line| line.starts_with("State:\tZ"))
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("fake descendant still running");
+        }
     }
 }
