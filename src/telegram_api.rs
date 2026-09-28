@@ -891,10 +891,66 @@ mod tests {
     fn temporary_image_removes_partial_output() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("partial.jpg");
-        let temporary = TempImage(output.clone());
-        std::fs::write(&output, b"partial JPEG data").unwrap();
-        drop(temporary);
+        let write_result: std::io::Result<TempImage> = (|| {
+            let temporary = TempImage(output.clone());
+            std::fs::write(temporary.path(), b"partial JPEG data")?;
+            Err(std::io::Error::other("encoding failed"))
+        })();
+        assert!(write_result.is_err());
         assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn cancelled_upload_removes_resized_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.jpg");
+        image::DynamicImage::new_rgb8(2, 9999)
+            .save(&source)
+            .unwrap();
+
+        let (path_tx, path_rx) = tokio::sync::oneshot::channel();
+        let upload = tokio::spawn(async move {
+            let resized = resize_photo_if_needed(source).await.unwrap().unwrap();
+            path_tx.send(resized.path().to_path_buf()).unwrap();
+            std::future::pending::<()>().await;
+            drop(resized);
+        });
+
+        let path = path_rx.await.unwrap();
+        assert!(path.exists());
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn abandoned_blocking_transform_removes_its_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("partial.jpg");
+        let (created_tx, created_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let transform = tokio::task::spawn_blocking({
+            let output = output.clone();
+            move || {
+                let temporary = TempImage(output.clone());
+                std::fs::write(&output, b"partial JPEG data").unwrap();
+                created_tx.send(()).unwrap();
+                finish_rx.recv().unwrap();
+                temporary
+            }
+        });
+
+        created_rx.await.unwrap();
+        assert!(output.exists());
+        drop(transform);
+        finish_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while output.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
