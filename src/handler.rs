@@ -150,29 +150,6 @@ async fn log_reply_failure(
     }
 }
 
-/// Removes fragments and query parameters, except YouTube's required `v` parameter.
-#[must_use]
-fn cleanup_url(original_url: &Url) -> Url {
-    let mut cleaned_url = original_url.clone();
-    cleaned_url.set_fragment(None);
-    let video_id = cleaned_url
-        .host_str()
-        .filter(|host| host.ends_with("youtube.com") || *host == "youtu.be")
-        .and_then(|_| {
-            original_url
-                .query_pairs()
-                .find(|(key, _)| key == "v")
-                .map(|(_, value)| value.into_owned())
-        });
-    cleaned_url.set_query(None);
-
-    if let Some(video_id) = video_id {
-        cleaned_url.query_pairs_mut().append_pair("v", &video_id);
-    }
-
-    cleaned_url
-}
-
 /// Step 1: Perform pre-download validation.
 async fn pre_download_validation(
     url: &Url,
@@ -511,12 +488,11 @@ pub async fn process_download_request(
     audio_extractor: &dyn AudioExtractor,
 ) -> Option<DownloadContext> {
     let start = Instant::now();
-    let clean_url = cleanup_url(url);
-    let clean_url_str = clean_url.as_str();
+    let cache_key = url.as_str();
 
     // Cache check
-    if let Some(cached) = storage.get_cached_media(clean_url_str).await {
-        log::info!("Cache hit for {}", clean_url);
+    if let Some(cached) = storage.get_cached_media(cache_key).await {
+        log::info!("Cache hit for {}", url);
         let is_single_video =
             cached.files.len() == 1 && cached.files[0].media_type == MediaType::Video;
 
@@ -529,7 +505,7 @@ pub async fn process_download_request(
             if audio_file_missing {
                 log::warn!(
                     "Cached audio file missing for {}, falling through to re-download",
-                    clean_url
+                    url
                 );
             } else if let Ok(sent_message_id) =
                 send_cached_media(&cached, chat_id, message_id, telegram_api).await
@@ -537,13 +513,13 @@ pub async fn process_download_request(
                 storage
                     .log_request(
                         chat_id.0,
-                        clean_url_str,
+                        cache_key,
                         "cached",
                         start.elapsed().as_millis() as i64,
                     )
                     .await;
                 return Some(DownloadContext {
-                    source_url: clean_url,
+                    source_url: url.clone(),
                     has_video: true,
                     media_duration_secs: cached.media_duration_secs,
                     audio_cache_path: cached.audio_cache_path.map(PathBuf::from),
@@ -557,7 +533,7 @@ pub async fn process_download_request(
             storage
                 .log_request(
                     chat_id.0,
-                    clean_url_str,
+                    cache_key,
                     "cached",
                     start.elapsed().as_millis() as i64,
                 )
@@ -565,22 +541,17 @@ pub async fn process_download_request(
             return None;
         }
         // Cache send failed — fall through to normal download
-        log::warn!(
-            "Cache send failed for {}, falling through to download",
-            clean_url
-        );
+        log::warn!("Cache send failed for {}, falling through to download", url);
     }
 
     let info =
-        match pre_download_validation(&clean_url, chat_id, message_id, downloader, telegram_api)
-            .await
-        {
+        match pre_download_validation(url, chat_id, message_id, downloader, telegram_api).await {
             Ok(info) => info,
             Err(_) => {
                 storage
                     .log_request(
                         chat_id.0,
-                        clean_url_str,
+                        cache_key,
                         "validation_error",
                         start.elapsed().as_millis() as i64,
                     )
@@ -589,31 +560,23 @@ pub async fn process_download_request(
             }
         };
 
-    let downloaded = match download_step(
-        &info,
-        &clean_url,
-        chat_id,
-        message_id,
-        downloader,
-        telegram_api,
-    )
-    .await
-    {
-        Ok(media) => media,
-        Err(_) => {
-            storage
-                .log_request(
-                    chat_id.0,
-                    clean_url_str,
-                    "error",
-                    start.elapsed().as_millis() as i64,
-                )
-                .await;
-            return None;
-        }
-    };
+    let downloaded =
+        match download_step(&info, url, chat_id, message_id, downloader, telegram_api).await {
+            Ok(media) => media,
+            Err(_) => {
+                storage
+                    .log_request(
+                        chat_id.0,
+                        cache_key,
+                        "error",
+                        start.elapsed().as_millis() as i64,
+                    )
+                    .await;
+                return None;
+            }
+        };
 
-    let caption = build_caption(&info, &clean_url);
+    let caption = build_caption(&info, url);
     let _cleanup_guard = FileCleanupGuard::from_downloaded_media(&downloaded);
 
     // For a single video item, run upload and audio extraction concurrently.
@@ -692,7 +655,7 @@ pub async fn process_download_request(
         }
         storage
             .store_cached_media(
-                clean_url_str,
+                cache_key,
                 &caption,
                 files,
                 audio_cache_path
@@ -703,10 +666,10 @@ pub async fn process_download_request(
             )
             .await;
         storage
-            .log_request(chat_id.0, clean_url_str, "success", elapsed_ms)
+            .log_request(chat_id.0, cache_key, "success", elapsed_ms)
             .await;
         Some(DownloadContext {
-            source_url: clean_url,
+            source_url: url.clone(),
             has_video,
             media_duration_secs,
             audio_cache_path,
@@ -714,7 +677,7 @@ pub async fn process_download_request(
         })
     } else {
         storage
-            .log_request(chat_id.0, clean_url_str, "error", elapsed_ms)
+            .log_request(chat_id.0, cache_key, "error", elapsed_ms)
             .await;
         None
     }
@@ -867,19 +830,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cleanup_url_strips_tracking_but_keeps_youtube_video_id() {
-        let youtube =
-            Url::parse("https://www.youtube.com/watch?v=video-id&utm_source=test#frag").unwrap();
-        let other = Url::parse("https://example.com/video?utm_source=test#frag").unwrap();
-
-        assert_eq!(
-            cleanup_url(&youtube).as_str(),
-            "https://www.youtube.com/watch?v=video-id"
-        );
-        assert_eq!(cleanup_url(&other).as_str(), "https://example.com/video");
-    }
-
     #[tokio::test]
     async fn test_send_media_group_splits_and_preserves_caption_and_order() {
         let items: Vec<_> = (0..11)
@@ -977,8 +927,22 @@ mod tests {
     async fn test_process_download_request_sends_video_on_success() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
-        let mock_storage = create_default_mock_storage();
-        let test_url = Url::parse("https://instagram.com/p/valid_post").unwrap();
+        let mut mock_storage = MockStorage::new();
+        let test_url_str =
+            "https://instagram.com/p/valid_post?expires=123&signature=secret&utm_source=chat#video";
+        let test_url = Url::parse(test_url_str).unwrap();
+
+        mock_storage
+            .expect_get_cached_media()
+            .with(eq(test_url_str))
+            .times(1)
+            .returning(|_| None);
+        mock_storage
+            .expect_store_cached_media()
+            .withf(|url, _, _, _, _| url == "https://instagram.com/p/valid_post?expires=123&signature=secret&utm_source=chat#video")
+            .times(1)
+            .returning(|_, _, _, _, _| ());
+        mock_storage.expect_log_request().returning(|_, _, _, _| ());
 
         mock_downloader
             .expect_get_media_metadata()
@@ -989,7 +953,8 @@ mod tests {
         mock_downloader
             .expect_download_media()
             .withf(|info, url| {
-                info.id == "123" && url.as_str() == "https://instagram.com/p/valid_post"
+                info.id == "123"
+                    && url.as_str() == "https://instagram.com/p/valid_post?expires=123&signature=secret&utm_source=chat#video"
             })
             .times(1)
             .returning(|_, _| {
@@ -1026,6 +991,44 @@ mod tests {
             &create_failing_audio_extractor(),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_facebook_watch_urls_have_distinct_cache_keys() {
+        let mut downloader = MockDownloader::new();
+        let mut api = MockTelegramApi::new();
+        let mut storage = MockStorage::new();
+
+        for video_id in ["first", "second"] {
+            let cache_key = format!("https://www.facebook.com/watch/?v={video_id}");
+            storage
+                .expect_get_cached_media()
+                .with(eq(cache_key))
+                .times(1)
+                .returning(|_| None);
+        }
+        storage.expect_log_request().returning(|_, _, _, _| ());
+        downloader
+            .expect_get_media_metadata()
+            .times(2)
+            .returning(|_| Err(DownloadError::MediaUnavailable("unavailable".into())));
+        api.expect_send_text_message()
+            .times(2)
+            .returning(|_, _, _| Ok(()));
+
+        for video_id in ["first", "second"] {
+            let url = Url::parse(&format!("https://www.facebook.com/watch/?v={video_id}")).unwrap();
+            process_download_request(
+                &url,
+                ChatId(123),
+                MessageId(456),
+                &downloader,
+                &api,
+                &storage,
+                &create_failing_audio_extractor(),
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
