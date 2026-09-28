@@ -132,6 +132,18 @@ fn escape_html_text(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn take_caption_text<'a>(text: &'a str, budget: &mut usize) -> &'a str {
+    let mut end = 0;
+    for (offset, ch) in text.char_indices() {
+        if ch.len_utf16() > *budget {
+            break;
+        }
+        *budget -= ch.len_utf16();
+        end = offset + ch.len_utf8();
+    }
+    &text[..end]
+}
+
 /// Builds a caption string from pre-download metadata and the source URL.
 #[must_use]
 pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
@@ -147,7 +159,12 @@ pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
         via_link, source_url
     );
 
+    // Count visible UTF-16 units to stay within Telegram's parsed caption limit.
+    let mut budget = CAPTION_MAX_LEN.saturating_sub(
+        "CrabberBot 🦀 Source".encode_utf16().count() + SEPARATOR.len() + TRUNCATION_MARKER.len(),
+    );
     let mut quote_parts = Vec::new();
+    let mut truncated = false;
     let uploader = info
         .uploader
         .as_deref()
@@ -155,34 +172,32 @@ pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
     if let Some(uploader) = uploader
         && !uploader.is_empty()
     {
-        quote_parts.push(format!("<i>{}</i>", escape_html_text(uploader)));
+        let included = take_caption_text(uploader, &mut budget);
+        truncated |= included.len() < uploader.len();
+        if !included.is_empty() {
+            quote_parts.push(format!("<i>{}</i>", escape_html_text(included)));
+        }
     }
 
     let description = info.description.as_deref().or(info.title.as_deref());
     if let Some(desc) = description {
         let desc = desc.trim();
         if !desc.is_empty() {
-            quote_parts.push(escape_html_text(desc));
+            if !quote_parts.is_empty() {
+                budget = budget.saturating_sub(1); // newline between uploader and description
+            }
+            let included = take_caption_text(desc, &mut budget);
+            truncated |= included.len() < desc.len();
+            if !included.is_empty() {
+                quote_parts.push(escape_html_text(included));
+            }
         }
     }
 
-    let full_quote_content = quote_parts.join("\n");
-    let overhead = header.chars().count()
-        + SEPARATOR.len()
-        + BLOCKQUOTE_OPEN.len()
-        + BLOCKQUOTE_CLOSE.len()
-        + TRUNCATION_MARKER.len();
-    let available_space_for_quote = CAPTION_MAX_LEN.saturating_sub(overhead);
-    let final_quote = if full_quote_content.chars().count() > available_space_for_quote {
-        let mut truncated: String = full_quote_content
-            .chars()
-            .take(available_space_for_quote)
-            .collect();
-        truncated.push_str(TRUNCATION_MARKER);
-        truncated
-    } else {
-        full_quote_content
-    };
+    let mut final_quote = quote_parts.join("\n");
+    if truncated {
+        final_quote.push_str(TRUNCATION_MARKER);
+    }
 
     format!("{header}{SEPARATOR}{BLOCKQUOTE_OPEN}{final_quote}{BLOCKQUOTE_CLOSE}")
 }
@@ -866,6 +881,59 @@ mod tests {
         assert!(caption.contains("A &amp; B &lt; C &gt; D"));
         // Verify no double-escaping
         assert!(!caption.contains("&amp;amp;"));
+    }
+
+    #[test]
+    fn test_build_caption_truncates_raw_text_before_html() {
+        let url = Url::parse("https://example.com/video").unwrap();
+        let mut info = MediaInfo {
+            uploader: Some(format!("{}&", "u".repeat(997))),
+            ..Default::default()
+        };
+        let caption = build_caption(&info, &url);
+        let quote = caption
+            .split_once("<blockquote>")
+            .unwrap()
+            .1
+            .strip_suffix("</blockquote>")
+            .unwrap();
+        assert_eq!(quote, format!("<i>{}</i>[...]", "u".repeat(997)));
+
+        info.uploader = None;
+        for gap in 0..=5 {
+            info.description = Some(format!("{}&zzzzzz", "x".repeat(997 - gap)));
+            let caption = build_caption(&info, &url);
+            let quote = caption
+                .split_once("<blockquote>")
+                .unwrap()
+                .1
+                .strip_suffix("</blockquote>")
+                .unwrap();
+            let expected = format!(
+                "{}{}{}[...]",
+                "x".repeat(997 - gap),
+                if gap == 0 { "" } else { "&amp;" },
+                "z".repeat(gap.saturating_sub(1))
+            );
+            assert_eq!(quote, expected);
+        }
+
+        info.uploader = Some("u".repeat(900));
+        info.description = Some("&".repeat(100));
+        let caption = build_caption(&info, &url);
+        assert!(caption.contains(&format!(
+            "<blockquote><i>{}</i>\n{}[...]</blockquote>",
+            "u".repeat(900),
+            "&amp;".repeat(96)
+        )));
+
+        info.uploader = Some("🦀".repeat(500));
+        info.description = None;
+        let caption = build_caption(&info, &url);
+        assert!(caption.contains(&format!(
+            "<blockquote><i>{}</i>[...]</blockquote>",
+            "🦀".repeat(498)
+        )));
     }
 
     #[tokio::test]
