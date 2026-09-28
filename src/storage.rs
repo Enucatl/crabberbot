@@ -116,7 +116,7 @@ pub trait Storage: Send + Sync {
     async fn get_latest_payment(&self, user_id: i64) -> Option<PaymentRecord>;
     /// Returns the most recent `limit` unrefunded payments for a user (for owner tooling).
     async fn get_recent_payments(&self, user_id: i64, limit: i64) -> Vec<PaymentRecord>;
-    /// Returns true if the user has any premium_usage rows recorded after `since`.
+    /// Returns true if transcription or summarization was used after `since`.
     async fn has_ai_usage_since(&self, user_id: i64, since: chrono::DateTime<chrono::Utc>) -> bool;
 
     // Cleanup
@@ -819,7 +819,9 @@ impl Storage for PostgresStorage {
 
     async fn has_ai_usage_since(&self, user_id: i64, since: chrono::DateTime<chrono::Utc>) -> bool {
         let result: Result<(bool,), _> = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM premium_usage WHERE user_id = $1 AND created_at > $2)",
+            "SELECT EXISTS(SELECT 1 FROM premium_usage WHERE user_id = $1 AND created_at > $2 \
+             AND feature IN ('transcribe', 'summarize', 'openrouter_transcript_summary_input', \
+                             'openrouter_transcript_summary_output'))",
         )
         .bind(user_id)
         .bind(since)
@@ -1246,5 +1248,31 @@ mod tests {
             Some("older".to_string())
         );
         assert_eq!(storage.get_recent_payments(1, 5).await.len(), 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn refund_usage_matches_transcription_and_summarization(pool: PgPool) {
+        let storage = PostgresStorage::new(pool);
+        let since = chrono::Utc::now() - chrono::TimeDelta::minutes(1);
+
+        storage
+            .record_premium_usage(1, "audio_extract", "video", 60, 0.0, 0.0)
+            .await;
+        assert!(!storage.has_ai_usage_since(1, since).await);
+
+        for (user_id, feature) in [
+            (2, "transcribe"),
+            (3, "summarize"),
+            (4, "openrouter_transcript_summary_input"),
+            (5, "openrouter_transcript_summary_output"),
+        ] {
+            storage
+                .record_premium_usage(user_id, feature, "video", 60, 0.0, 0.0)
+                .await;
+            assert!(
+                storage.has_ai_usage_since(user_id, since).await,
+                "{feature}"
+            );
+        }
     }
 }
