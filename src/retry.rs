@@ -45,8 +45,7 @@ where
                     return Err(error);
                 }
                 let delay = retry_after(&error)
-                    .unwrap_or_else(|| backoff_delay(policy, attempt))
-                    .min(policy.max_delay);
+                    .unwrap_or_else(|| backoff_delay(policy, attempt).min(policy.max_delay));
                 log::warn!(
                     "{} attempt {} failed: {}; retrying in {:?}",
                     label,
@@ -123,4 +122,37 @@ fn jitter_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| u64::from(duration.subsec_nanos()) % 250)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn server_retry_delay_exceeds_backoff_cap() {
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let server_delay = Duration::from_millis(40);
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+
+        let result = retry_async(
+            &policy,
+            || {
+                attempts += 1;
+                std::future::ready(if attempts == 1 { Err("retry") } else { Ok(()) })
+            },
+            |_| Some(server_delay),
+            |_| true,
+            "test",
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(attempts, 2);
+        assert!(started.elapsed() >= server_delay);
+    }
 }
