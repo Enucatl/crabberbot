@@ -139,30 +139,34 @@ impl PostgresStorage {
     }
 
     pub async fn cleanup_expired(pool: &PgPool, ttl_days: i64) {
-        // Collect audio file paths to delete before removing DB rows
-        let expired_audio: Vec<(Option<String>,)> = sqlx::query_as(
-            "SELECT audio_cache_path FROM media_cache \
-             WHERE last_used_at < NOW() - make_interval(days => $1::int)",
+        let result: Result<Vec<(Option<String>,)>, _> = sqlx::query_as(
+            "DELETE FROM media_cache WHERE last_used_at < NOW() - make_interval(days => $1::int) \
+             RETURNING audio_cache_path",
         )
         .bind(ttl_days)
         .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-
-        let result = sqlx::query(
-            "DELETE FROM media_cache WHERE last_used_at < NOW() - make_interval(days => $1::int)",
-        )
-        .bind(ttl_days)
-        .execute(pool)
         .await;
 
         match result {
-            Ok(r) => {
-                log::info!(
-                    "Cache cleanup: removed {} expired entries",
-                    r.rows_affected()
-                );
-                for path in expired_audio.into_iter().filter_map(|(p,)| p) {
+            Ok(rows) => {
+                log::info!("Cache cleanup: removed {} expired entries", rows.len());
+                for path in rows.into_iter().filter_map(|(p,)| p) {
+                    let referenced: Result<(bool,), _> = sqlx::query_as(
+                        "SELECT EXISTS (SELECT 1 FROM media_cache WHERE audio_cache_path = $1 \
+                         UNION ALL SELECT 1 FROM callback_contexts \
+                         WHERE audio_cache_path = $1 AND created_at >= NOW() - INTERVAL '24 hours')",
+                    )
+                    .bind(&path)
+                    .fetch_one(pool)
+                    .await;
+                    match referenced {
+                        Ok((true,)) => continue,
+                        Err(e) => {
+                            log::warn!("Cannot check audio references for {}: {}", path, e);
+                            continue;
+                        }
+                        Ok((false,)) => {}
+                    }
                     if let Err(e) = tokio::fs::remove_file(&path).await
                         && e.kind() != std::io::ErrorKind::NotFound
                     {
@@ -870,6 +874,106 @@ mod tests {
         PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_SECONDS,
     };
     use sqlx::PgPool;
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn cleanup_keeps_audio_when_row_is_refreshed_during_delete(pool: PgPool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audio.mp3");
+        tokio::fs::write(&path, b"audio").await.unwrap();
+        sqlx::query(
+            "INSERT INTO media_cache (source_url, caption, audio_cache_path, last_used_at) \
+             VALUES ('refreshed', '', $1, NOW() - INTERVAL '8 days')",
+        )
+        .bind(path.to_str().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM media_cache WHERE source_url = 'refreshed' FOR UPDATE")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let cleanup_pool = pool.clone();
+        let cleanup = tokio::spawn(async move {
+            PostgresStorage::cleanup_expired(&cleanup_pool, 7).await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                     WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                     AND query LIKE 'DELETE FROM media_cache WHERE last_used_at%')",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cleanup did not reach the locked row");
+        sqlx::query("UPDATE media_cache SET last_used_at = NOW() WHERE source_url = 'refreshed'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        cleanup.await.unwrap();
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM media_cache WHERE source_url = 'refreshed'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+        assert!(path.exists());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn cleanup_retains_callback_audio_and_releases_unreferenced_audio(pool: PgPool) {
+        let dir = tempfile::tempdir().unwrap();
+        let callback_path = dir.path().join("callback.mp3");
+        let unreferenced_path = dir.path().join("unreferenced.mp3");
+        tokio::fs::write(&callback_path, b"audio").await.unwrap();
+        tokio::fs::write(&unreferenced_path, b"audio")
+            .await
+            .unwrap();
+        for (source, path) in [
+            ("callback", &callback_path),
+            ("unreferenced", &unreferenced_path),
+        ] {
+            sqlx::query(
+                "INSERT INTO media_cache (source_url, caption, audio_cache_path, last_used_at) \
+                 VALUES ($1, '', $2, NOW() - INTERVAL '8 days')",
+            )
+            .bind(source)
+            .bind(path.to_str().unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO callback_contexts (source_url, chat_id, audio_cache_path) \
+             VALUES ('callback', 1, $1)",
+        )
+        .bind(callback_path.to_str().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        PostgresStorage::cleanup_expired(&pool, 7).await;
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media_cache")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        assert!(callback_path.exists());
+        assert!(!unreferenced_path.exists());
+    }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn duplicate_basic_charge_grants_once(pool: PgPool) {
