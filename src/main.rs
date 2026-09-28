@@ -82,6 +82,7 @@ async fn handle_command(
     _bot: Bot,
     api: Arc<dyn TelegramApi>,
     storage: Arc<dyn Storage>,
+    premium_limiter: Arc<ConcurrencyLimiter>,
     message: Message,
     command: Command,
     owner_chat_id: i64,
@@ -132,7 +133,7 @@ If you encounter any issues, please double-check the URL or try again later. Not
             handle_support(api, storage, message, text, owner_chat_id).await?;
         }
         Command::Refundme => {
-            handle_refundme(api, storage, message).await?;
+            handle_refundme(api, storage, premium_limiter, message).await?;
         }
     }
 

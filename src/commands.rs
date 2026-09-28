@@ -382,6 +382,7 @@ pub async fn handle_reply(
 pub async fn handle_refundme(
     api: Arc<dyn TelegramApi>,
     storage: Arc<dyn Storage>,
+    premium_limiter: Arc<ConcurrencyLimiter>,
     message: Message,
 ) -> ResponseResult<()> {
     let chat_id = message.chat.id;
@@ -390,6 +391,18 @@ pub async fn handle_refundme(
         .as_ref()
         .map(|u| u.id.0 as i64)
         .unwrap_or(chat_id.0);
+    let _guard = match premium_limiter.try_lock(ChatId(user_id)) {
+        Some(guard) => guard,
+        None => {
+            api.send_text_message(
+                chat_id,
+                message.id,
+                "I'm already processing a premium action or refund for you. Please wait and try /refundme again.",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
 
     let payment = match storage.get_latest_payment(user_id).await {
         Some(p) => p,
@@ -1663,6 +1676,7 @@ mod tests {
     async fn test_handle_refundme_uses_stored_charge() {
         let mut mock_api = MockTelegramApi::new();
         let mut mock_storage = MockStorage::new();
+        let limiter = Arc::new(ConcurrencyLimiter::new());
         mock_storage
             .expect_get_latest_payment()
             .times(1)
@@ -1681,12 +1695,24 @@ mod tests {
             .expect_refund_star_payment()
             .withf(|user_id, charge_id| *user_id == 200 && charge_id == "tg_charge_123")
             .times(1)
-            .returning(|_, _| Ok(()));
+            .returning({
+                let limiter = Arc::clone(&limiter);
+                move |_, _| {
+                    assert!(limiter.try_lock(ChatId(200)).is_none());
+                    Ok(())
+                }
+            });
         mock_storage
             .expect_refund_payment()
             .withf(|user_id, charge_id| *user_id == 200 && charge_id == "tg_charge_123")
             .times(1)
-            .returning(|_, _| Ok(true));
+            .returning({
+                let limiter = Arc::clone(&limiter);
+                move |_, _| {
+                    assert!(limiter.try_lock(ChatId(200)).is_none());
+                    Ok(true)
+                }
+            });
         mock_api
             .expect_send_text_message()
             .times(1)
@@ -1695,10 +1721,38 @@ mod tests {
         handle_refundme(
             Arc::new(mock_api),
             Arc::new(mock_storage),
+            Arc::clone(&limiter),
             make_message(base_message_json(100, 200)),
         )
         .await
         .unwrap();
+        assert!(limiter.try_lock(ChatId(200)).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_refundme_blocks_during_group_action_from_private_chat() {
+        let limiter = Arc::new(ConcurrencyLimiter::new());
+        // A group callback for user 200 holds the same user guard.
+        let group_action = limiter.try_lock(ChatId(200)).unwrap();
+        let mut api = MockTelegramApi::new();
+        api.expect_send_text_message()
+            .withf(|chat_id, _, text| {
+                *chat_id == ChatId(200) && text.contains("try /refundme again")
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        // The private refund must stop before reading eligibility or refunding Stars.
+        handle_refundme(
+            Arc::new(api),
+            Arc::new(MockStorage::new()),
+            Arc::clone(&limiter),
+            make_message(base_message_json(200, 200)),
+        )
+        .await
+        .unwrap();
+        drop(group_action);
+        assert!(limiter.try_lock(ChatId(200)).is_some());
     }
 
     // ---------------------------------------------------------------------------
