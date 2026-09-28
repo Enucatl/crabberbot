@@ -1254,8 +1254,13 @@ async fn prepare_ai_action(
         return Ok(None);
     };
 
-    api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
-        .await?;
+    log_telegram_failure(
+        api.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
+            .await,
+        chat_id,
+        "ai_typing",
+    )
+    .await;
 
     if let Some(cached) = &ctx.transcript
         && let Some(summary) = &ctx.summary
@@ -2046,6 +2051,92 @@ mod tests {
             detected_language: Some("en".to_string()),
             billed_duration_secs: 60.0,
             cost_usd: 60.0 * crate::premium::DEEPGRAM_COST_PER_SECOND,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_typing_failure_does_not_leak_quota_when_ai_output_fails() {
+        for action in ["transcription", "summarization"] {
+            let mut api = MockTelegramApi::new();
+            let mut storage = MockStorage::new();
+            let transcriber = MockTranscriber::new();
+            let summarizer = MockSummarizer::new();
+
+            storage
+                .expect_get_subscription()
+                .returning(|_| active_basic_with_quota());
+            storage
+                .expect_reserve_ai_seconds()
+                .withf(|user_id, seconds| *user_id == 200 && *seconds == 600)
+                .times(1)
+                .returning(|_, _| {
+                    Some(QuotaReservation {
+                        monthly_seconds: 300,
+                        topup_seconds: 300,
+                    })
+                });
+            storage
+                .expect_release_ai_seconds()
+                .withf(|user_id, reservation| {
+                    *user_id == 200
+                        && *reservation
+                            == QuotaReservation {
+                                monthly_seconds: 300,
+                                topup_seconds: 300,
+                            }
+                })
+                .times(1)
+                .returning(|_, _| ());
+            api.expect_send_chat_action().times(1).returning(|_, _| {
+                Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
+                    "typing failed".to_string(),
+                )))
+            });
+            api.expect_send_text_message()
+                .times(1)
+                .returning(|_, _, _| {
+                    Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
+                        "delivery failed".to_string(),
+                    )))
+                });
+
+            let ctx = CallbackContext {
+                media_duration_secs: Some(600),
+                transcript: Some("cached transcript".to_string()),
+                summary: Some("cached summary".to_string()),
+                ..callback_context(100, 200)
+            };
+            let result = match action {
+                "transcription" => {
+                    handle_transcription(
+                        42,
+                        &ctx,
+                        200,
+                        ChatId(100),
+                        MessageId(1),
+                        &api,
+                        &storage,
+                        &transcriber,
+                        &summarizer,
+                    )
+                    .await
+                }
+                _ => {
+                    handle_summarization(
+                        42,
+                        &ctx,
+                        200,
+                        ChatId(100),
+                        MessageId(1),
+                        &api,
+                        &storage,
+                        &transcriber,
+                        &summarizer,
+                    )
+                    .await
+                }
+            };
+            result.unwrap();
         }
     }
 
