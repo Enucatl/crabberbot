@@ -9,7 +9,7 @@ use tokio::task::AbortHandle;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Semaphore;
 use url::Url;
@@ -236,9 +236,13 @@ impl SocketDownloader {
         let frame = read_frame(&mut stream)
             .await
             .map_err(DownloadError::CommandFailed)?;
-        match serde_json::from_slice::<Response>(&frame)
-            .map_err(|error| DownloadError::ParsingFailed(error.to_string()))?
-        {
+        let response = serde_json::from_slice::<Response>(&frame)
+            .map_err(|error| DownloadError::ParsingFailed(error.to_string()))?;
+        stream
+            .write_u8(1)
+            .await
+            .map_err(|error| DownloadError::CommandFailed(error.to_string()))?;
+        match response {
             Response::Ok { result } => Ok(result),
             Response::Error { kind, message } if kind == "timeout" => Err(message
                 .parse()
@@ -434,7 +438,7 @@ impl YtDlpDownloader {
             })
     }
 
-    async fn cleanup_download_artifacts(download_dir: &Path, uuid: &str) {
+    pub async fn cleanup_download_artifacts(download_dir: &Path, uuid: &str) {
         let mut entries = match tokio::fs::read_dir(download_dir).await {
             Ok(entries) => entries,
             Err(e) => {
@@ -671,6 +675,7 @@ impl Downloader for YtDlpDownloader {
     ) -> Result<DownloadedMedia, DownloadError> {
         let uuid = uuid::Uuid::new_v4().to_string();
         let download_dir = self.download_dir.clone();
+        let mut cleanup = DownloadCleanup::new(download_dir.clone(), uuid.clone());
         let filename_template = format!("{}.%(id)s.%(ext)s", uuid);
         let thumbnail_template = format!("thumbnail:{}.%(id)s.%(ext)s", uuid);
         let is_single_with_thumbnail = info.entries.is_none() && info.thumbnail.is_some();
@@ -743,7 +748,7 @@ impl Downloader for YtDlpDownloader {
             ));
         }
 
-        if let Some(entries) = &info.entries {
+        let result = if let Some(entries) = &info.entries {
             let items: Vec<DownloadedItem> = entries
                 .iter()
                 .filter_map(|entry| {
@@ -831,6 +836,42 @@ impl Downloader for YtDlpDownloader {
                 media_type,
                 thumbnail_filepath,
             }))
+        };
+        if result.is_ok() {
+            cleanup.disarm();
+        }
+        result
+    }
+}
+
+struct DownloadCleanup {
+    directory: PathBuf,
+    uuid: String,
+    armed: bool,
+}
+
+impl DownloadCleanup {
+    fn new(directory: PathBuf, uuid: String) -> Self {
+        Self {
+            directory,
+            uuid,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DownloadCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let directory = self.directory.clone();
+            let uuid = self.uuid.clone();
+            tokio::spawn(async move {
+                YtDlpDownloader::cleanup_download_artifacts(&directory, &uuid).await;
+            });
         }
     }
 }

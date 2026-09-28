@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 
 use crate::worker_protocol::{Request, Response, ResultData, read_frame, write_frame};
@@ -72,9 +73,13 @@ impl AudioExtractor for SocketAudioExtractor {
         let frame = read_frame(&mut stream)
             .await
             .map_err(AudioExtractionError::FfmpegError)?;
-        match serde_json::from_slice::<Response>(&frame)
-            .map_err(|error| AudioExtractionError::ParseError(error.to_string()))?
-        {
+        let response = serde_json::from_slice::<Response>(&frame)
+            .map_err(|error| AudioExtractionError::ParseError(error.to_string()))?;
+        stream
+            .write_u8(1)
+            .await
+            .map_err(|error| AudioExtractionError::FfmpegError(error.to_string()))?;
+        match response {
             Response::Ok {
                 result:
                     ResultData::Audio {
@@ -164,6 +169,7 @@ impl AudioExtractor for FfmpegAudioExtractor {
         // Step 2: ffmpeg to extract audio
         let audio_filename = format!("{}.mp3", uuid::Uuid::new_v4());
         let audio_path = self.audio_cache_dir.join(&audio_filename);
+        let mut cleanup = AudioCleanup(Some(audio_path.clone()));
 
         const MAX_TAG_LEN: usize = 255;
         let mut cmd = tokio::process::Command::new("ffmpeg");
@@ -191,24 +197,34 @@ impl AudioExtractor for FfmpegAudioExtractor {
             match tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await {
                 Ok(Ok(output)) => output,
                 Ok(Err(e)) => {
-                    let _ = tokio::fs::remove_file(&audio_path).await;
                     return Err(AudioExtractionError::FfmpegError(e.to_string()));
                 }
                 Err(_) => {
-                    let _ = tokio::fs::remove_file(&audio_path).await;
                     return Err(AudioExtractionError::Timeout(300));
                 }
             };
 
         if !ffmpeg_output.status.success() {
-            let _ = tokio::fs::remove_file(&audio_path).await;
             let stderr = String::from_utf8_lossy(&ffmpeg_output.stderr).to_string();
             return Err(AudioExtractionError::FfmpegError(stderr));
         }
 
+        cleanup.0 = None;
         Ok(AudioExtractionResult {
             audio_path,
             duration_secs,
         })
+    }
+}
+
+struct AudioCleanup(Option<PathBuf>);
+
+impl Drop for AudioCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            tokio::spawn(async move {
+                let _ = tokio::fs::remove_file(path).await;
+            });
+        }
     }
 }
