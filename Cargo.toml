@@ -6,6 +6,9 @@ authors = ["enucatl <1423701+Enucatl@users.noreply.github.com>"]
 homepage = "https://github.com/Enucatl/crabberbot"
 repository = "https://github.com/Enucatl/crabberbot"
 
+[profile.dev]
+debug = "line-tables-only"
+
 [dependencies]
 async-trait = "0.1"
 bytes = "1"
