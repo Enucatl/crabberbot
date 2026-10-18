@@ -9,6 +9,7 @@ use teloxide::types::InlineKeyboardMarkup;
 
 use crate::downloader::{
     DownloadedItem, DownloadedMedia, Downloader, MediaInfo, MediaType, build_caption,
+    clean_cached_caption, clean_url,
 };
 use crate::premium::audio_extractor::AudioExtractor;
 use crate::storage::{CachedMedia, Storage};
@@ -477,10 +478,13 @@ pub async fn process_download_request(
     audio_extractor: &dyn AudioExtractor,
 ) -> Option<DownloadContext> {
     let start = Instant::now();
-    let cache_key = url.as_str();
+    let cache_url = clean_url(url);
+    let cache_key = cache_url.as_str();
 
     // Cache check
-    if let Some(cached) = storage.get_cached_media(cache_key).await {
+    if let Some(mut cached) = storage.get_cached_media(cache_key).await {
+        // Cached captions may predate sharing-identifier cleanup.
+        cached.caption = clean_cached_caption(&cached.caption);
         log::info!("Cache hit for {}", url);
         let is_single_video =
             cached.files.len() == 1 && cached.files[0].media_type == MediaType::Video;
@@ -925,12 +929,17 @@ mod tests {
 
         mock_storage
             .expect_get_cached_media()
-            .with(eq(test_url_str))
+            .with(eq(
+                "https://instagram.com/p/valid_post?expires=123&signature=secret",
+            ))
             .times(1)
             .returning(|_| None);
         mock_storage
             .expect_store_cached_media()
-            .withf(|url, _, _, _, _| url == "https://instagram.com/p/valid_post?expires=123&signature=secret&utm_source=chat#video")
+            .withf(|url, caption, _, _, _| {
+                url == "https://instagram.com/p/valid_post?expires=123&signature=secret"
+                    && !caption.contains("utm_source")
+            })
             .times(1)
             .returning(|_, _, _, _, _| ());
         mock_storage.expect_log_request().returning(|_, _, _, _| ());
@@ -1729,11 +1738,10 @@ mod tests {
         let mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
         let mut mock_storage = MockStorage::new();
-        let test_url = Url::parse("https://instagram.com/p/cached_photo").unwrap();
 
-        mock_storage.expect_get_cached_media().returning(|_| {
+        mock_storage.expect_get_cached_media().with(eq("https://instagram.com/p/cached_photo")).times(2).returning(|_| {
             Some(CachedMedia {
-                caption: "photo caption".to_string(),
+                caption: "photo caption <a href=\"https://instagram.com/p/cached_photo?psln=sharing-id\">Source</a>".to_string(),
                 files: vec![crate::storage::CachedFile {
                     telegram_file_id: "cached_photo_id".to_string(),
                     media_type: MediaType::Photo,
@@ -1749,23 +1757,29 @@ mod tests {
                 eq(ChatId(123)),
                 eq(MessageId(456)),
                 eq("cached_photo_id"),
-                eq("photo caption"),
+                eq("photo caption <a href=\"https://instagram.com/p/cached_photo\">Source</a>"),
             )
-            .times(1)
+            .times(2)
             .returning(|_, _, _, _| Ok(()));
 
         mock_storage.expect_log_request().returning(|_, _, _, _| ());
 
-        process_download_request(
-            &test_url,
-            ChatId(123),
-            MessageId(456),
-            &mock_downloader,
-            &mock_telegram_api,
-            &mock_storage,
-            &create_failing_audio_extractor(),
-        )
-        .await;
+        for sharing_id in ["first", "second"] {
+            let test_url = Url::parse(&format!(
+                "https://instagram.com/p/cached_photo?psln={sharing_id}"
+            ))
+            .unwrap();
+            process_download_request(
+                &test_url,
+                ChatId(123),
+                MessageId(456),
+                &mock_downloader,
+                &mock_telegram_api,
+                &mock_storage,
+                &create_failing_audio_extractor(),
+            )
+            .await;
+        }
     }
 
     #[tokio::test]

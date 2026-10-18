@@ -145,6 +145,48 @@ fn take_caption_text<'a>(text: &'a str, budget: &mut usize) -> &'a str {
     &text[..end]
 }
 
+/// Remove sharing identifiers while preserving media and signed URL parameters.
+pub fn clean_url(source_url: &Url) -> Url {
+    let mut clean = source_url.clone();
+    let query = source_url.query().map(|query| {
+        query
+            .split('&')
+            .filter(|pair| {
+                let Some((key, _)) = url::form_urlencoded::parse(pair.as_bytes()).next() else {
+                    return true;
+                };
+                !key.starts_with("utm_")
+                    && !matches!(
+                        key.as_ref(),
+                        "psln" | "igsh" | "igshid" | "fbclid" | "gclid" | "si"
+                    )
+            })
+            .collect::<Vec<_>>()
+            .join("&")
+    });
+    clean.set_query(query.as_deref().filter(|query| !query.is_empty()));
+    clean.set_fragment(None);
+    clean
+}
+
+pub fn source_link(source_url: &Url) -> String {
+    format!(
+        "<a href=\"{}\">Source</a>",
+        escape_html_text(clean_url(source_url).as_str())
+    )
+}
+
+/// Refresh the Source link in captions written before sharing-ID cleanup.
+pub fn clean_cached_caption(caption: &str) -> String {
+    if let Some((before, after)) = caption.split_once("\">Source</a>")
+        && let Some((prefix, href)) = before.rsplit_once("<a href=\"")
+        && let Ok(url) = Url::parse(&href.replace("&amp;", "&"))
+    {
+        return format!("{prefix}{}{after}", source_link(&url));
+    }
+    caption.to_owned()
+}
+
 /// Builds a caption string from pre-download metadata and the source URL.
 #[must_use]
 pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
@@ -156,8 +198,9 @@ pub fn build_caption(info: &MediaInfo, source_url: &Url) -> String {
 
     let via_link = "https://t.me/crabberbot?start=c";
     let header = format!(
-        "<a href=\"{}\">CrabberBot</a> 🦀 <a href=\"{}\">Source</a>",
-        via_link, source_url
+        "<a href=\"{}\">CrabberBot</a> 🦀 {}",
+        via_link,
+        source_link(source_url)
     );
 
     // Count visible UTF-16 units to stay within Telegram's parsed caption limit.
@@ -882,6 +925,47 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use url::Url;
+
+    #[test]
+    fn source_links_remove_sharing_ids_and_preserve_media_parameters() {
+        for (input, expected) in [
+            (
+                "https://www.instagram.com/reel/Deoo9kJiSuU/?psln=MWo0c2M1dXlmZ204cw==",
+                "https://www.instagram.com/reel/Deoo9kJiSuU/",
+            ),
+            (
+                "https://instagram.com/p/post/?igsh=secret&igshid=secret&utm_source=chat#fragment",
+                "https://instagram.com/p/post/",
+            ),
+            (
+                "https://www.youtube.com/watch?v=video&si=secret",
+                "https://www.youtube.com/watch?v=video",
+            ),
+            (
+                "https://www.facebook.com/watch/?v=video&fbclid=secret",
+                "https://www.facebook.com/watch/?v=video",
+            ),
+            (
+                "https://example.com/video?expires=123&signature=secret&utm_medium=chat",
+                "https://example.com/video?expires=123&amp;signature=secret",
+            ),
+            (
+                "https://example.com/video?token=a%20b&flag&utm_source=chat",
+                "https://example.com/video?token=a%20b&amp;flag",
+            ),
+        ] {
+            let url = Url::parse(input).unwrap();
+            let link = source_link(&url);
+            assert_eq!(link, format!("<a href=\"{expected}\">Source</a>"));
+            assert!(build_caption(&MediaInfo::default(), &url).contains(&link));
+            assert_eq!(clean_url(&url).as_str(), expected.replace("&amp;", "&"));
+            assert_eq!(
+                clean_cached_caption(&format!("prefix <a href=\"{input}\">Source</a> suffix")),
+                format!("prefix {link} suffix")
+            );
+            assert_eq!(url.as_str(), input);
+        }
+    }
 
     #[test]
     fn test_build_caption_normal_text() {
