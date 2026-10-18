@@ -929,16 +929,13 @@ mod tests {
 
         mock_storage
             .expect_get_cached_media()
-            .with(eq(
-                "https://instagram.com/p/valid_post?expires=123&signature=secret",
-            ))
+            .with(eq("https://instagram.com/p/valid_post"))
             .times(1)
             .returning(|_| None);
         mock_storage
             .expect_store_cached_media()
             .withf(|url, caption, _, _, _| {
-                url == "https://instagram.com/p/valid_post?expires=123&signature=secret"
-                    && !caption.contains("utm_source")
+                url == "https://instagram.com/p/valid_post" && !caption.contains("utm_source")
             })
             .times(1)
             .returning(|_, _, _, _, _| ());
@@ -994,13 +991,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_facebook_watch_urls_have_distinct_cache_keys() {
+    async fn test_youtube_watch_urls_have_distinct_cache_keys() {
         let mut downloader = MockDownloader::new();
         let mut api = MockTelegramApi::new();
         let mut storage = MockStorage::new();
 
         for video_id in ["first", "second"] {
-            let cache_key = format!("https://www.facebook.com/watch/?v={video_id}");
+            let cache_key = format!("https://www.youtube.com/watch?v={video_id}");
             storage
                 .expect_get_cached_media()
                 .with(eq(cache_key))
@@ -1017,7 +1014,7 @@ mod tests {
             .returning(|_, _, _| Ok(()));
 
         for video_id in ["first", "second"] {
-            let url = Url::parse(&format!("https://www.facebook.com/watch/?v={video_id}")).unwrap();
+            let url = Url::parse(&format!("https://www.youtube.com/watch?v={video_id}")).unwrap();
             process_download_request(
                 &url,
                 ChatId(123),

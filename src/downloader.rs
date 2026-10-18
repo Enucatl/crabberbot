@@ -145,27 +145,17 @@ fn take_caption_text<'a>(text: &'a str, budget: &mut usize) -> &'a str {
     &text[..end]
 }
 
-/// Remove sharing identifiers while preserving media and signed URL parameters.
+/// Allow only YouTube's video ID in public URLs and cache keys.
 pub fn clean_url(source_url: &Url) -> Url {
     let mut clean = source_url.clone();
-    let query = source_url.query().map(|query| {
-        query
-            .split('&')
-            .filter(|pair| {
-                let Some((key, _)) = url::form_urlencoded::parse(pair.as_bytes()).next() else {
-                    return true;
-                };
-                !key.starts_with("utm_")
-                    && !matches!(
-                        key.as_ref(),
-                        "psln" | "igsh" | "igshid" | "fbclid" | "gclid" | "si"
-                    )
-            })
-            .collect::<Vec<_>>()
-            .join("&")
-    });
-    clean.set_query(query.as_deref().filter(|query| !query.is_empty()));
+    clean.set_query(None);
     clean.set_fragment(None);
+    if source_url.host_str().is_some_and(|host| {
+        host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtu.be"
+    }) && let Some((_, video_id)) = source_url.query_pairs().find(|(key, _)| key == "v")
+    {
+        clean.query_pairs_mut().append_pair("v", &video_id);
+    }
     clean
 }
 
@@ -927,7 +917,7 @@ mod tests {
     use url::Url;
 
     #[test]
-    fn source_links_remove_sharing_ids_and_preserve_media_parameters() {
+    fn source_links_allow_only_youtube_video_ids() {
         for (input, expected) in [
             (
                 "https://www.instagram.com/reel/Deoo9kJiSuU/?psln=MWo0c2M1dXlmZ204cw==",
@@ -943,15 +933,35 @@ mod tests {
             ),
             (
                 "https://www.facebook.com/watch/?v=video&fbclid=secret",
-                "https://www.facebook.com/watch/?v=video",
+                "https://www.facebook.com/watch/",
             ),
             (
                 "https://example.com/video?expires=123&signature=secret&utm_medium=chat",
-                "https://example.com/video?expires=123&amp;signature=secret",
+                "https://example.com/video",
             ),
             (
                 "https://example.com/video?token=a%20b&flag&utm_source=chat",
-                "https://example.com/video?token=a%20b&amp;flag",
+                "https://example.com/video",
+            ),
+            (
+                "https://notyoutube.com/watch?v=secret",
+                "https://notyoutube.com/watch",
+            ),
+            (
+                "https://youtube.com.example.com/watch?v=secret",
+                "https://youtube.com.example.com/watch",
+            ),
+            (
+                "https://youtu.be/video?unknown=secret#fragment",
+                "https://youtu.be/video",
+            ),
+            (
+                "https://m.youtube.com/watch?unknown=secret&v=video&t=30#fragment",
+                "https://m.youtube.com/watch?v=video",
+            ),
+            (
+                "https://example.com/video?unknown_identifier=secret",
+                "https://example.com/video",
             ),
         ] {
             let url = Url::parse(input).unwrap();
