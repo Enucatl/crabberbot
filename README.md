@@ -42,6 +42,8 @@ Docker Compose runs the following services:
 
 The app and downloader communicate through `/downloader/downloader.sock`; the app image contains no `yt-dlp` or `ffmpeg` fallback. The worker passes all `yt-dlp` traffic through `egress-proxy`, so it cannot directly reach either the backend network or the Internet. The proxy is intentionally deployed as part of the stack, not as an optional application setting.
 
+Build and deploy the app and downloader worker from the same revision so their shared socket protocol stays compatible.
+
 The app exposes `GET /healthz`, returning `204` only when PostgreSQL accepts `SELECT 1`; Docker uses it as the application health check.
 
 ## Premium features

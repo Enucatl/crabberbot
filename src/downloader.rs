@@ -22,7 +22,7 @@ const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 5 * 1024 * 1024;
 
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DownloadError {
     #[error("media unavailable: {0}")]
     MediaUnavailable(String),
@@ -277,17 +277,8 @@ impl SocketDownloader {
             .map_err(|error| DownloadError::CommandFailed(error.to_string()))?;
         match response {
             Response::Ok { result } => Ok(result),
-            Response::Error { kind, message } if kind == "timeout" => Err(message
-                .parse()
-                .map(DownloadError::Timeout)
-                .unwrap_or(DownloadError::CommandFailed(message))),
-            Response::Error { kind, message } if kind == "parsing" => {
-                Err(DownloadError::ParsingFailed(message))
-            }
-            Response::Error { kind, message } if kind == "unavailable" => {
-                Err(DownloadError::MediaUnavailable(message))
-            }
-            Response::Error { message, .. } => Err(DownloadError::CommandFailed(message)),
+            Response::DownloadError { error } => Err(error),
+            Response::AudioError { error } => Err(DownloadError::CommandFailed(error.to_string())),
         }
     }
 }
@@ -330,8 +321,7 @@ impl Downloader for SocketDownloader {
             })
             .await?
         {
-            ResultData::Download { media } => DownloadedMedia::try_from(media)
-                .map_err(|error| DownloadError::ParsingFailed(error.to_string())),
+            ResultData::Download { media } => Ok(media.into()),
             _ => Err(DownloadError::ParsingFailed(
                 "unexpected downloader response".to_string(),
             )),
@@ -428,19 +418,23 @@ impl YtDlpDownloader {
         result
     }
 
-    fn validated_download_path(download_dir: &Path, uuid: &str, filepath: &str) -> Option<PathBuf> {
+    async fn validated_download_path(
+        download_dir: &Path,
+        uuid: &str,
+        filepath: &str,
+    ) -> Option<PathBuf> {
         let reported = Path::new(filepath);
         let path = if reported.is_absolute() {
             reported.to_path_buf()
         } else {
             download_dir.join(reported)
         };
-        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        let metadata = tokio::fs::symlink_metadata(&path).await.ok()?;
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
             return None;
         }
-        let canonical = path.canonicalize().ok()?;
-        let directory = download_dir.canonicalize().ok()?;
+        let canonical = tokio::fs::canonicalize(&path).await.ok()?;
+        let directory = tokio::fs::canonicalize(download_dir).await.ok()?;
         if canonical.parent()? != directory || !canonical.file_name()?.to_str()?.starts_with(uuid) {
             return None;
         }
@@ -448,27 +442,30 @@ impl YtDlpDownloader {
     }
 
     /// Finds a thumbnail file written by `--write-thumbnail`, excluding the video file itself.
-    fn find_thumbnail(
+    async fn find_thumbnail(
         download_dir: &Path,
         uuid: &str,
         id: &str,
         video_filepath: &Path,
     ) -> Option<PathBuf> {
         let prefix = format!("{uuid}.{id}.");
-        std::fs::read_dir(download_dir)
-            .ok()?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .find_map(|path| {
-                (path != video_filepath
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with(&prefix)))
-                .then(|| Self::validated_download_path(download_dir, uuid, path.to_str()?))
-                .flatten()
-                .filter(|path| path != video_filepath)
-            })
+        let mut entries = tokio::fs::read_dir(download_dir).await.ok()?;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path != video_filepath
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+                && let Some(filepath) = path.to_str()
+                && let Some(path) =
+                    Self::validated_download_path(download_dir, uuid, filepath).await
+                && path != video_filepath
+            {
+                return Some(path);
+            }
+        }
+        None
     }
 
     pub async fn cleanup_download_artifacts(download_dir: &Path, uuid: &str) {
@@ -523,7 +520,11 @@ impl YtDlpDownloader {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with(uuid))
-                && !accepted.contains(&path.canonicalize().unwrap_or(path.clone()))
+                && !accepted.contains(
+                    &tokio::fs::canonicalize(&path)
+                        .await
+                        .unwrap_or_else(|_| path.clone()),
+                )
             {
                 let _ = tokio::fs::remove_file(path).await;
             }
@@ -782,20 +783,28 @@ impl Downloader for YtDlpDownloader {
         }
 
         let result = if let Some(entries) = &info.entries {
-            let items: Vec<DownloadedItem> = entries
-                .iter()
-                .filter_map(|entry| {
-                    let dl = downloaded_files.get(&entry.id)?;
-                    let filepath = dl.filepath.as_ref()?;
-                    let ext = dl.ext.as_deref()?;
-                    let media_type = MediaType::from_extension(ext)?;
-                    Some(DownloadedItem {
-                        filepath: Self::validated_download_path(&download_dir, &uuid, filepath)?,
-                        media_type,
-                        thumbnail_filepath: None,
-                    })
-                })
-                .collect();
+            let mut items = Vec::new();
+            for entry in entries {
+                let Some(dl) = downloaded_files.get(&entry.id) else {
+                    continue;
+                };
+                let Some(filepath) = dl.filepath.as_deref() else {
+                    continue;
+                };
+                let Some(media_type) = dl.ext.as_deref().and_then(MediaType::from_extension) else {
+                    continue;
+                };
+                let Some(filepath) =
+                    Self::validated_download_path(&download_dir, &uuid, filepath).await
+                else {
+                    continue;
+                };
+                items.push(DownloadedItem {
+                    filepath,
+                    media_type,
+                    thumbnail_filepath: None,
+                });
+            }
 
             if items.is_empty() {
                 Self::cleanup_download_artifacts(&download_dir, &uuid).await;
@@ -829,15 +838,16 @@ impl Downloader for YtDlpDownloader {
                     ));
                 }
             };
-            let filepath = match Self::validated_download_path(&download_dir, &uuid, filepath_str) {
-                Some(path) => path,
-                None => {
-                    Self::cleanup_download_artifacts(&download_dir, &uuid).await;
-                    return Err(DownloadError::ParsingFailed(
-                        "Invalid download path".to_string(),
-                    ));
-                }
-            };
+            let filepath =
+                match Self::validated_download_path(&download_dir, &uuid, filepath_str).await {
+                    Some(path) => path,
+                    None => {
+                        Self::cleanup_download_artifacts(&download_dir, &uuid).await;
+                        return Err(DownloadError::ParsingFailed(
+                            "Invalid download path".to_string(),
+                        ));
+                    }
+                };
             let ext = match dl.ext.as_deref() {
                 Some(ext) => ext,
                 None => {
@@ -859,7 +869,7 @@ impl Downloader for YtDlpDownloader {
             };
 
             let thumbnail_filepath = if is_single_with_thumbnail {
-                Self::find_thumbnail(&download_dir, &uuid, &info.id, &filepath)
+                Self::find_thumbnail(&download_dir, &uuid, &info.id, &filepath).await
             } else {
                 None
             };
@@ -915,6 +925,35 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use url::Url;
+
+    #[tokio::test]
+    async fn socket_preserves_download_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("worker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let downloader = SocketDownloader::new(socket);
+        for error in [
+            DownloadError::CommandFailed("bad command".to_string()),
+            DownloadError::ParsingFailed("bad metadata".to_string()),
+            DownloadError::MediaUnavailable("gone".to_string()),
+            DownloadError::Timeout(30),
+        ] {
+            let expected_kind = std::mem::discriminant(&error);
+            let expected_message = error.to_string();
+            let url = Url::parse("https://example.com/video").unwrap();
+            let (actual, ()) = tokio::join!(downloader.get_media_metadata(&url), async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_frame(&mut stream).await.unwrap();
+                write_frame(&mut stream, &Response::DownloadError { error })
+                    .await
+                    .unwrap();
+                assert_eq!(stream.read_u8().await.unwrap(), 1);
+            });
+            let actual = actual.unwrap_err();
+            assert_eq!(std::mem::discriminant(&actual), expected_kind);
+            assert_eq!(actual.to_string(), expected_message);
+        }
+    }
 
     #[test]
     fn source_links_allow_only_youtube_video_ids() {
@@ -1127,8 +1166,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_download_path_requires_uuid_file_in_downloads_directory() {
+    #[tokio::test]
+    async fn test_download_path_requires_uuid_file_in_downloads_directory() {
         let temp_dir = tempfile::tempdir().unwrap();
         let uuid = Uuid::new_v4().to_string();
         let file = temp_dir.path().join(format!("{uuid}.video.mp4"));
@@ -1138,18 +1177,20 @@ mod tests {
                 temp_dir.path(),
                 &uuid,
                 file.to_str().unwrap()
-            ),
+            )
+            .await,
             Some(file.canonicalize().unwrap())
         );
         assert!(
             YtDlpDownloader::validated_download_path(temp_dir.path(), &uuid, "../outside.mp4")
+                .await
                 .is_none()
         );
     }
 
     #[cfg(unix)]
-    #[test]
-    fn test_download_path_rejects_symlink() {
+    #[tokio::test]
+    async fn test_download_path_rejects_symlink() {
         let temp_dir = tempfile::tempdir().unwrap();
         let outside = tempfile::NamedTempFile::new().unwrap();
         let uuid = Uuid::new_v4().to_string();
@@ -1161,12 +1202,13 @@ mod tests {
                 &uuid,
                 link.to_str().unwrap()
             )
+            .await
             .is_none()
         );
     }
 
-    #[test]
-    fn test_find_thumbnail_searches_downloads_dir() {
+    #[tokio::test]
+    async fn test_find_thumbnail_searches_downloads_dir() {
         let temp_dir = tempfile::tempdir().unwrap();
         let download_dir = temp_dir.path();
         let video_filepath = download_dir.join("test-id.media.mp4");
@@ -1175,7 +1217,8 @@ mod tests {
         std::fs::write(&thumbnail_filepath, b"thumbnail").unwrap();
 
         let found =
-            YtDlpDownloader::find_thumbnail(download_dir, "test-id", "media", &video_filepath);
+            YtDlpDownloader::find_thumbnail(download_dir, "test-id", "media", &video_filepath)
+                .await;
 
         assert_eq!(found, Some(thumbnail_filepath));
     }

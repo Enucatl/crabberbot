@@ -2,13 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 
 use crate::worker_protocol::{Request, Response, ResultData, read_frame, write_frame};
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Serialize, Deserialize)]
 pub enum AudioExtractionError {
     #[error("audio tool timed out after {0} seconds")]
     Timeout(u64),
@@ -90,14 +91,10 @@ impl AudioExtractor for SocketAudioExtractor {
                 audio_path: PathBuf::from(audio_path),
                 duration_secs,
             }),
-            Response::Error { kind, message } if kind == "timeout" => Err(message
-                .parse()
-                .map(AudioExtractionError::Timeout)
-                .unwrap_or(AudioExtractionError::FfmpegError(message))),
-            Response::Error { kind, message } if kind == "parse" => {
-                Err(AudioExtractionError::ParseError(message))
+            Response::AudioError { error } => Err(error),
+            Response::DownloadError { error } => {
+                Err(AudioExtractionError::FfmpegError(error.to_string()))
             }
-            Response::Error { message, .. } => Err(AudioExtractionError::FfmpegError(message)),
             _ => Err(AudioExtractionError::ParseError(
                 "unexpected downloader response".to_string(),
             )),
@@ -225,6 +222,44 @@ impl Drop for AudioCleanup {
             tokio::spawn(async move {
                 let _ = tokio::fs::remove_file(path).await;
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn socket_preserves_audio_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("worker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let extractor = SocketAudioExtractor::new(socket);
+        for error in [
+            AudioExtractionError::FfprobeError("bad probe".to_string()),
+            AudioExtractionError::FfmpegError("bad encoding".to_string()),
+            AudioExtractionError::ParseError("bad duration".to_string()),
+            AudioExtractionError::Timeout(300),
+        ] {
+            let expected_kind = std::mem::discriminant(&error);
+            let expected_message = error.to_string();
+            let (actual, ()) = tokio::join!(
+                extractor.extract_audio(Path::new("/downloads/video.mp4"), None, None),
+                async {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    read_frame(&mut stream).await.unwrap();
+                    write_frame(&mut stream, &Response::AudioError { error })
+                        .await
+                        .unwrap();
+                    assert_eq!(stream.read_u8().await.unwrap(), 1);
+                }
+            );
+            let actual = actual.err().expect("worker returned an error");
+            assert_eq!(std::mem::discriminant(&actual), expected_kind);
+            assert_eq!(actual.to_string(), expected_message);
         }
     }
 }

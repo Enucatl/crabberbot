@@ -33,7 +33,7 @@ pub fn validate_media_metadata(info: &MediaInfo) -> Result<(), ValidationError> 
             });
         }
 
-        validate_optional_metadata(info)?;
+        validate_single_item(info)?;
         for entry in entries {
             validate_single_item(entry)?;
         }
@@ -50,16 +50,6 @@ fn validate_single_item(info: &MediaInfo) -> Result<(), ValidationError> {
         None => {}
     }
 
-    validate_optional_duration(info.duration)
-}
-
-fn validate_optional_metadata(info: &MediaInfo) -> Result<(), ValidationError> {
-    if let Some(filesize) = info.filesize {
-        if filesize == 0 {
-            return Err(ValidationError::InvalidMetadata);
-        }
-        validate_filesize(filesize)?;
-    }
     validate_optional_duration(info.duration)
 }
 

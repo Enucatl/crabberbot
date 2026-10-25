@@ -64,14 +64,14 @@ pub trait Storage: Send + Sync {
     );
 
     // Subscription management
-    async fn get_subscription(&self, user_id: i64) -> SubscriptionInfo;
+    async fn get_subscription(&self, user_id: i64) -> Result<SubscriptionInfo, sqlx::Error>;
     async fn upsert_subscription(
         &self,
         user_id: i64,
         tier: SubscriptionTier,
         duration_days: i64,
         order: PaymentOrder,
-    );
+    ) -> Result<(), sqlx::Error>;
 
     /// Records a charge atomically; only newer purchases replace the current tier.
     /// Returns Ok(true) only when this charge was fulfilled for the first time.
@@ -86,10 +86,17 @@ pub trait Storage: Send + Sync {
     ) -> Result<bool, sqlx::Error>;
 
     // AI Seconds tracking
-    async fn consume_ai_seconds(&self, user_id: i64, seconds: i32);
-    async fn reserve_ai_seconds(&self, user_id: i64, seconds: i32) -> Option<QuotaReservation>;
-    async fn release_ai_seconds(&self, user_id: i64, reservation: QuotaReservation);
-    async fn add_topup_seconds(&self, user_id: i64, seconds: i32);
+    async fn reserve_ai_seconds(
+        &self,
+        user_id: i64,
+        seconds: i32,
+    ) -> Result<Option<QuotaReservation>, sqlx::Error>;
+    async fn release_ai_seconds(
+        &self,
+        user_id: i64,
+        reservation: QuotaReservation,
+    ) -> Result<(), sqlx::Error>;
+    async fn add_topup_seconds(&self, user_id: i64, seconds: i32) -> Result<(), sqlx::Error>;
     async fn record_premium_usage(
         &self,
         user_id: i64,
@@ -98,7 +105,7 @@ pub trait Storage: Send + Sync {
         duration_secs: i32,
         units: f64,
         cost_usd: f64,
-    );
+    ) -> Result<(), sqlx::Error>;
 
     // Callback context
     async fn store_callback_context(&self, ctx: &CallbackContext) -> i32;
@@ -127,11 +134,19 @@ pub trait Storage: Send + Sync {
         telegram_charge_id: &str,
     ) -> Result<bool, sqlx::Error>;
     /// Returns the most recent unrefunded payment for a user, if any.
-    async fn get_latest_payment(&self, user_id: i64) -> Option<PaymentRecord>;
+    async fn get_latest_payment(&self, user_id: i64) -> Result<Option<PaymentRecord>, sqlx::Error>;
     /// Returns the most recent `limit` unrefunded payments for a user (for owner tooling).
-    async fn get_recent_payments(&self, user_id: i64, limit: i64) -> Vec<PaymentRecord>;
+    async fn get_recent_payments(
+        &self,
+        user_id: i64,
+        limit: i64,
+    ) -> Result<Vec<PaymentRecord>, sqlx::Error>;
     /// Returns true if transcription or summarization was used after `since`.
-    async fn has_ai_usage_since(&self, user_id: i64, since: chrono::DateTime<chrono::Utc>) -> bool;
+    async fn has_ai_usage_since(
+        &self,
+        user_id: i64,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, sqlx::Error>;
 
     // Cleanup
     async fn cleanup_expired_callback_contexts(&self);
@@ -359,7 +374,7 @@ impl Storage for PostgresStorage {
         }
     }
 
-    async fn get_subscription(&self, user_id: i64) -> SubscriptionInfo {
+    async fn get_subscription(&self, user_id: i64) -> Result<SubscriptionInfo, sqlx::Error> {
         let row: Option<(
             String,
             i32,
@@ -373,15 +388,9 @@ impl Storage for PostgresStorage {
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| {
-            log::error!("Failed to get subscription for {}: {}", user_id, e);
-            e
-        })
-        .ok()
-        .flatten();
+        .await?;
 
-        match row {
+        Ok(match row {
             Some((tier_str, used, limit, topup, last_topup_at, expires_at)) => {
                 let tier = tier_str.parse().unwrap_or(SubscriptionTier::Free);
                 SubscriptionInfo {
@@ -394,7 +403,7 @@ impl Storage for PostgresStorage {
                 }
             }
             None => SubscriptionInfo::free_default(),
-        }
+        })
     }
 
     async fn upsert_subscription(
@@ -403,10 +412,10 @@ impl Storage for PostgresStorage {
         tier: SubscriptionTier,
         duration_days: i64,
         order: PaymentOrder,
-    ) {
+    ) -> Result<(), sqlx::Error> {
         let limit = tier.ai_seconds_limit();
         let tier_str = tier.to_string();
-        if let Err(e) = sqlx::query(
+        sqlx::query(
             "INSERT INTO subscriptions (user_id, tier, ai_seconds_used, ai_seconds_limit, expires_at, source_payment_id, entitlement_at, entitlement_update_id, updated_at) \
              VALUES ($1, $2, 0, $3, NOW() + make_interval(days => $4::int), NULL, $5, $6, NOW()) \
              ON CONFLICT (user_id) DO UPDATE SET \
@@ -422,10 +431,8 @@ impl Storage for PostgresStorage {
         .bind(order.paid_at)
         .bind(order.update_id)
         .execute(&self.pool)
-        .await
-        {
-            log::error!("Failed to upsert subscription for {}: {}", user_id, e);
-        }
+        .await?;
+        Ok(())
     }
 
     async fn fulfill_payment(
@@ -506,29 +513,13 @@ impl Storage for PostgresStorage {
         Ok(true)
     }
 
-    async fn consume_ai_seconds(&self, user_id: i64, seconds: i32) {
-        if let Err(e) = sqlx::query(
-            "UPDATE subscriptions SET \
-               ai_seconds_used = LEAST(ai_seconds_used + $2, ai_seconds_limit), \
-               topup_seconds_available = GREATEST( \
-                   topup_seconds_available - GREATEST($2 - (ai_seconds_limit - ai_seconds_used), 0), \
-                   0 \
-               ), \
-               updated_at = NOW() \
-             WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .bind(seconds)
-        .execute(&self.pool)
-        .await
-        {
-            log::error!("Failed to consume ai_seconds for {}: {}", user_id, e);
-        }
-    }
-
-    async fn reserve_ai_seconds(&self, user_id: i64, seconds: i32) -> Option<QuotaReservation> {
+    async fn reserve_ai_seconds(
+        &self,
+        user_id: i64,
+        seconds: i32,
+    ) -> Result<Option<QuotaReservation>, sqlx::Error> {
         if seconds <= 0 {
-            return None;
+            return Ok(None);
         }
         let row: Option<(i32, i32)> = sqlx::query_as(
             "WITH reservation AS ( \
@@ -550,20 +541,24 @@ impl Storage for PostgresStorage {
         .bind(user_id)
         .bind(seconds)
         .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten();
-        row.map(|(monthly_seconds, topup_seconds)| QuotaReservation {
-            monthly_seconds,
-            topup_seconds,
-        })
+        .await?;
+        Ok(
+            row.map(|(monthly_seconds, topup_seconds)| QuotaReservation {
+                monthly_seconds,
+                topup_seconds,
+            }),
+        )
     }
 
-    async fn release_ai_seconds(&self, user_id: i64, reservation: QuotaReservation) {
+    async fn release_ai_seconds(
+        &self,
+        user_id: i64,
+        reservation: QuotaReservation,
+    ) -> Result<(), sqlx::Error> {
         if reservation.monthly_seconds <= 0 && reservation.topup_seconds <= 0 {
-            return;
+            return Ok(());
         }
-        if let Err(e) = sqlx::query(
+        sqlx::query(
             "UPDATE subscriptions SET ai_seconds_used = GREATEST(ai_seconds_used - $2, 0), \
              topup_seconds_available = topup_seconds_available + $3, updated_at = NOW() WHERE user_id = $1",
         )
@@ -571,14 +566,12 @@ impl Storage for PostgresStorage {
         .bind(reservation.monthly_seconds)
         .bind(reservation.topup_seconds)
         .execute(&self.pool)
-        .await
-        {
-            log::error!("Failed to release AI reservation for {}: {}", user_id, e);
-        }
+        .await?;
+        Ok(())
     }
 
-    async fn add_topup_seconds(&self, user_id: i64, seconds: i32) {
-        if let Err(e) = sqlx::query(
+    async fn add_topup_seconds(&self, user_id: i64, seconds: i32) -> Result<(), sqlx::Error> {
+        sqlx::query(
             "INSERT INTO subscriptions (user_id, tier, topup_seconds_available, last_topup_at, updated_at) \
              VALUES ($1, 'free', $2, NOW(), NOW()) \
              ON CONFLICT (user_id) DO UPDATE SET \
@@ -588,10 +581,8 @@ impl Storage for PostgresStorage {
         .bind(user_id)
         .bind(seconds)
         .execute(&self.pool)
-        .await
-        {
-            log::error!("Failed to add topup_seconds for {}: {}", user_id, e);
-        }
+        .await?;
+        Ok(())
     }
 
     async fn record_premium_usage(
@@ -602,8 +593,8 @@ impl Storage for PostgresStorage {
         duration_secs: i32,
         units: f64,
         cost_usd: f64,
-    ) {
-        if let Err(e) = sqlx::query(
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
             "INSERT INTO premium_usage (user_id, feature, source_url, duration_secs, units, estimated_cost_usd) \
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
@@ -614,10 +605,8 @@ impl Storage for PostgresStorage {
         .bind(units as f32)
         .bind(cost_usd as f32) // DB column is REAL (f32); precision loss is acceptable for cost tracking
         .execute(&self.pool)
-        .await
-        {
-            log::error!("Failed to record premium usage for {}: {}", user_id, e);
-        }
+        .await?;
+        Ok(())
     }
 
     async fn store_callback_context(&self, ctx: &CallbackContext) -> i32 {
@@ -803,7 +792,7 @@ impl Storage for PostgresStorage {
         Ok(true)
     }
 
-    async fn get_latest_payment(&self, user_id: i64) -> Option<PaymentRecord> {
+    async fn get_latest_payment(&self, user_id: i64) -> Result<Option<PaymentRecord>, sqlx::Error> {
         let row: Option<(String, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT telegram_payment_charge_id, amount, created_at \
              FROM payments WHERE user_id = $1 AND refunded_at IS NULL \
@@ -811,23 +800,23 @@ impl Storage for PostgresStorage {
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| {
-            log::error!("Failed to get latest payment for {}: {}", user_id, e);
-            e
-        })
-        .ok()
-        .flatten();
+        .await?;
 
-        row.map(|(telegram_charge_id, amount, created_at)| PaymentRecord {
-            telegram_charge_id,
-            amount,
-            created_at,
-        })
+        Ok(
+            row.map(|(telegram_charge_id, amount, created_at)| PaymentRecord {
+                telegram_charge_id,
+                amount,
+                created_at,
+            }),
+        )
     }
 
-    async fn get_recent_payments(&self, user_id: i64, limit: i64) -> Vec<PaymentRecord> {
-        let rows: Result<Vec<(String, i32, chrono::DateTime<chrono::Utc>)>, _> = sqlx::query_as(
+    async fn get_recent_payments(
+        &self,
+        user_id: i64,
+        limit: i64,
+    ) -> Result<Vec<PaymentRecord>, sqlx::Error> {
+        let rows: Vec<(String, i32, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
             "SELECT telegram_payment_charge_id, amount, created_at \
                  FROM payments WHERE user_id = $1 AND refunded_at IS NULL \
                  ORDER BY created_at DESC, telegram_update_id DESC, id DESC LIMIT $2",
@@ -835,26 +824,23 @@ impl Storage for PostgresStorage {
         .bind(user_id)
         .bind(limit)
         .fetch_all(&self.pool)
-        .await;
-
-        match rows {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|(telegram_charge_id, amount, created_at)| PaymentRecord {
-                    telegram_charge_id,
-                    amount,
-                    created_at,
-                })
-                .collect(),
-            Err(e) => {
-                log::error!("Failed to get recent payments for {}: {}", user_id, e);
-                vec![]
-            }
-        }
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(telegram_charge_id, amount, created_at)| PaymentRecord {
+                telegram_charge_id,
+                amount,
+                created_at,
+            })
+            .collect())
     }
 
-    async fn has_ai_usage_since(&self, user_id: i64, since: chrono::DateTime<chrono::Utc>) -> bool {
-        let result: Result<(bool,), _> = sqlx::query_as(
+    async fn has_ai_usage_since(
+        &self,
+        user_id: i64,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let (exists,): (bool,) = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM premium_usage WHERE user_id = $1 AND created_at > $2 \
              AND feature IN ('transcribe', 'summarize', 'openrouter_transcript_summary_input', \
                              'openrouter_transcript_summary_output'))",
@@ -862,16 +848,8 @@ impl Storage for PostgresStorage {
         .bind(user_id)
         .bind(since)
         .fetch_one(&self.pool)
-        .await;
-
-        match result {
-            Ok((exists,)) => exists,
-            Err(e) => {
-                log::error!("Failed to check ai_usage_since for {}: {}", user_id, e);
-                // Fail safe: assume usage exists so we don't accidentally auto-refund
-                true
-            }
-        }
+        .await?;
+        Ok(exists)
     }
 
     async fn cleanup_expired_callback_contexts(&self) {
@@ -918,6 +896,54 @@ mod tests {
             paid_at: chrono::Utc::now(),
             update_id: 0,
         }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn database_failures_are_distinct_from_absent_balances_and_payments(pool: PgPool) {
+        let storage = PostgresStorage::new(pool.clone());
+        assert_eq!(
+            storage.get_subscription(1).await.unwrap().tier,
+            SubscriptionTier::Free
+        );
+        assert!(storage.reserve_ai_seconds(1, 60).await.unwrap().is_none());
+        assert!(storage.get_latest_payment(1).await.unwrap().is_none());
+        assert!(storage.get_recent_payments(1, 5).await.unwrap().is_empty());
+        pool.close().await;
+        assert!(storage.get_subscription(1).await.is_err());
+        assert!(
+            storage
+                .has_ai_usage_since(1, chrono::Utc::now())
+                .await
+                .is_err()
+        );
+        assert!(storage.reserve_ai_seconds(1, 60).await.is_err());
+        assert!(storage.get_latest_payment(1).await.is_err());
+        assert!(storage.get_recent_payments(1, 5).await.is_err());
+        assert!(storage.add_topup_seconds(1, 60).await.is_err());
+        assert!(
+            storage
+                .upsert_subscription(1, SubscriptionTier::Basic, 30, payment_order())
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .release_ai_seconds(
+                    1,
+                    QuotaReservation {
+                        monthly_seconds: 60,
+                        topup_seconds: 0
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .record_premium_usage(1, "transcribe", "video", 60, 0.0, 0.0)
+                .await
+                .is_err()
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1132,8 +1158,8 @@ mod tests {
         let first = storage.clone();
         let second = storage.clone();
         let (left, right) = tokio::join!(
-            async move { first.reserve_ai_seconds(1, 2_400).await },
-            async move { second.reserve_ai_seconds(1, 2_400).await },
+            async move { first.reserve_ai_seconds(1, 2_400).await.unwrap() },
+            async move { second.reserve_ai_seconds(1, 2_400).await.unwrap() },
         );
         assert_eq!(
             usize::from(left.is_some()) + usize::from(right.is_some()),
@@ -1146,7 +1172,7 @@ mod tests {
         let storage = PostgresStorage::new(pool.clone());
         sqlx::query("INSERT INTO subscriptions (user_id, tier, ai_seconds_limit, topup_seconds_available, expires_at) VALUES (1, 'basic', 100, 50, NOW() + INTERVAL '1 day')")
             .execute(&pool).await.unwrap();
-        let reservation = storage.reserve_ai_seconds(1, 120).await.unwrap();
+        let reservation = storage.reserve_ai_seconds(1, 120).await.unwrap().unwrap();
         assert_eq!(
             reservation,
             QuotaReservation {
@@ -1154,7 +1180,7 @@ mod tests {
                 topup_seconds: 20
             }
         );
-        storage.release_ai_seconds(1, reservation).await;
+        storage.release_ai_seconds(1, reservation).await.unwrap();
         let row: (i32, i32) = sqlx::query_as(
             "SELECT ai_seconds_used, topup_seconds_available FROM subscriptions WHERE user_id = 1",
         )
@@ -1264,7 +1290,8 @@ mod tests {
             .unwrap();
         storage
             .upsert_subscription(1, SubscriptionTier::Pro, 30, payment_order())
-            .await;
+            .await
+            .unwrap();
         assert!(storage.refund_payment(1, "basic-c").await.unwrap());
         let (tier, limit, source): (String, i32, Option<i32>) = sqlx::query_as(
             "SELECT tier, ai_seconds_limit, source_payment_id FROM subscriptions WHERE user_id = 1",
@@ -1385,10 +1412,11 @@ mod tests {
             storage
                 .get_latest_payment(1)
                 .await
+                .unwrap()
                 .map(|payment| payment.telegram_charge_id),
             Some("older".to_string())
         );
-        assert_eq!(storage.get_recent_payments(1, 5).await.len(), 1);
+        assert_eq!(storage.get_recent_payments(1, 5).await.unwrap().len(), 1);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1398,8 +1426,9 @@ mod tests {
 
         storage
             .record_premium_usage(1, "audio_extract", "video", 60, 0.0, 0.0)
-            .await;
-        assert!(!storage.has_ai_usage_since(1, since).await);
+            .await
+            .unwrap();
+        assert!(!storage.has_ai_usage_since(1, since).await.unwrap());
 
         for (user_id, feature) in [
             (2, "transcribe"),
@@ -1409,9 +1438,10 @@ mod tests {
         ] {
             storage
                 .record_premium_usage(user_id, feature, "video", 60, 0.0, 0.0)
-                .await;
+                .await
+                .unwrap();
             assert!(
-                storage.has_ai_usage_since(user_id, since).await,
+                storage.has_ai_usage_since(user_id, since).await.unwrap(),
                 "{feature}"
             );
         }

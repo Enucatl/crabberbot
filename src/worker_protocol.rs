@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::downloader::{DownloadedItem, DownloadedMedia, MediaInfo, MediaType};
+use crate::downloader::{DownloadError, DownloadedItem, DownloadedMedia, MediaInfo, MediaType};
+use crate::premium::audio_extractor::AudioExtractionError;
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
@@ -28,7 +29,8 @@ pub enum Request {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
     Ok { result: ResultData },
-    Error { kind: String, message: String },
+    DownloadError { error: DownloadError },
+    AudioError { error: AudioExtractionError },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,19 +85,17 @@ impl From<DownloadedItem> for WireItem {
     }
 }
 
-impl TryFrom<WireMedia> for DownloadedMedia {
-    type Error = &'static str;
-
-    fn try_from(media: WireMedia) -> Result<Self, Self::Error> {
+impl From<WireMedia> for DownloadedMedia {
+    fn from(media: WireMedia) -> Self {
         let item = |item: WireItem| DownloadedItem {
             filepath: PathBuf::from(item.filepath),
             media_type: item.media_type,
             thumbnail_filepath: item.thumbnail_filepath.map(PathBuf::from),
         };
-        Ok(match media {
+        match media {
             WireMedia::Single { item: wire } => Self::Single(item(wire)),
             WireMedia::Group { items } => Self::Group(items.into_iter().map(item).collect()),
-        })
+        }
     }
 }
 

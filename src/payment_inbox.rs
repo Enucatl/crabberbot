@@ -236,13 +236,14 @@ mod tests {
         replay_pending(&pool).await.unwrap();
         let storage = PostgresStorage::new(pool);
         assert_eq!(
-            storage.get_subscription(42).await.tier,
+            storage.get_subscription(42).await.unwrap().tier,
             SubscriptionTier::Pro
         );
         assert_eq!(
             storage
                 .get_latest_payment(42)
                 .await
+                .unwrap()
                 .unwrap()
                 .telegram_charge_id,
             "legacy-pro"
@@ -262,7 +263,7 @@ mod tests {
         record_update(&pool, &older).await.unwrap();
         replay_pending(&pool).await.unwrap();
         replay_pending(&pool).await.unwrap();
-        let sub = storage.get_subscription(42).await;
+        let sub = storage.get_subscription(42).await.unwrap();
         assert_eq!(
             sub.topup_seconds_available,
             2 * crate::subscription::TOPUP_SECONDS
@@ -275,7 +276,7 @@ mod tests {
         legacy["message"]["date"] = json!(0);
         record_update(&pool, &legacy).await.unwrap();
         replay_pending(&pool).await.unwrap();
-        let sub = storage.get_subscription(43).await;
+        let sub = storage.get_subscription(43).await.unwrap();
         assert_eq!(
             sub.topup_seconds_available,
             crate::subscription::TOPUP_SECONDS
@@ -313,24 +314,28 @@ mod tests {
                 .fulfill_payment(user_id, &new_charge, "provider", "sub_pro", 150, new_order)
                 .await
                 .unwrap();
-            storage.reserve_ai_seconds(user_id, 60).await.unwrap();
-            let expiry = storage.get_subscription(user_id).await.expires_at;
+            storage
+                .reserve_ai_seconds(user_id, 60)
+                .await
+                .unwrap()
+                .unwrap();
+            let expiry = storage.get_subscription(user_id).await.unwrap().expires_at;
             replay_pending(&pool).await.unwrap();
             replay_pending(&pool).await.unwrap();
-            let sub = storage.get_subscription(user_id).await;
+            let sub = storage.get_subscription(user_id).await.unwrap();
             assert_eq!(
                 (sub.tier, sub.ai_seconds_used, sub.expires_at),
                 (SubscriptionTier::Pro, 60, expiry)
             );
-            let latest = storage.get_latest_payment(user_id).await.unwrap();
+            let latest = storage.get_latest_payment(user_id).await.unwrap().unwrap();
             assert_eq!(latest.telegram_charge_id, new_charge);
             assert_eq!(latest.created_at, new_order.paid_at);
-            let recent = storage.get_recent_payments(user_id, 2).await;
+            let recent = storage.get_recent_payments(user_id, 2).await.unwrap();
             assert_eq!(recent[1].telegram_charge_id, old_charge);
             assert_eq!(recent[1].created_at.timestamp(), old_date);
             storage.refund_payment(user_id, &old_charge).await.unwrap();
             assert_eq!(
-                storage.get_subscription(user_id).await.tier,
+                storage.get_subscription(user_id).await.unwrap().tier,
                 SubscriptionTier::Pro
             );
 
@@ -341,7 +346,7 @@ mod tests {
             record_update(&pool, &old).await.unwrap();
             replay_pending(&pool).await.unwrap();
             assert_eq!(
-                storage.get_subscription(user_id).await.tier,
+                storage.get_subscription(user_id).await.unwrap().tier,
                 SubscriptionTier::Free
             );
 
@@ -351,13 +356,14 @@ mod tests {
             };
             storage
                 .upsert_subscription(user_id, SubscriptionTier::Pro, 30, grant_order)
-                .await;
+                .await
+                .unwrap();
             old["message"]["successful_payment"]["telegram_payment_charge_id"] =
                 json!(format!("stale-grant-{user_id}"));
             record_update(&pool, &old).await.unwrap();
             replay_pending(&pool).await.unwrap();
             assert_eq!(
-                storage.get_subscription(user_id).await.tier,
+                storage.get_subscription(user_id).await.unwrap().tier,
                 SubscriptionTier::Pro
             );
             // A genuinely later purchase in the same second still supersedes the grant.
@@ -376,7 +382,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                storage.get_subscription(user_id).await.tier,
+                storage.get_subscription(user_id).await.unwrap().tier,
                 SubscriptionTier::Basic
             );
         }

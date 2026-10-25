@@ -22,7 +22,7 @@ use url::Url;
 
 // Use our library crate
 use crabberbot::commands::{
-    handle_callback_query, handle_grant, handle_pre_checkout_query, handle_refund,
+    CommandResult, handle_callback_query, handle_grant, handle_pre_checkout_query, handle_refund,
     handle_refunded_payment, handle_refundme, handle_reply, handle_subscribe,
     handle_successful_payment, handle_support,
 };
@@ -86,7 +86,7 @@ async fn handle_command(
     command: Command,
     owner_chat_id: i64,
     execution_environment: String,
-) -> ResponseResult<()> {
+) -> CommandResult<()> {
     log_update_context("command", &message);
     let comprehensive_guide = indoc::formatdoc! { "
 Hello there! I am CrabberBot, your friendly media downloader.
@@ -146,7 +146,7 @@ async fn handle_owner_command(
     message: Message,
     command: OwnerCommand,
     owner_chat_id: i64,
-) -> ResponseResult<()> {
+) -> CommandResult<()> {
     log_update_context("owner_command", &message);
     match command {
         OwnerCommand::Grant(args) => {
@@ -170,7 +170,7 @@ async fn handle_url(
     audio_extractor: Arc<dyn AudioExtractor>,
     message: Message,
     url: Url,
-) -> ResponseResult<()> {
+) -> CommandResult<()> {
     let chat_id = message.chat.id;
     let user_id = message.from.as_ref().map(|user| user.id.0 as i64);
     log::info!(
@@ -266,7 +266,7 @@ async fn handle_unhandled_message(
     _downloader: Arc<dyn Downloader>,
     _api: Arc<dyn TelegramApi>,
     _message: Message,
-) -> ResponseResult<()> {
+) -> CommandResult<()> {
     Ok(())
 }
 
@@ -337,7 +337,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let version = env!("CARGO_PACKAGE_VERSION");
     log::info!("Starting CrabberBot version {}", version);
 
-    let config = AppConfig::from_env()?;
+    let config = AppConfig::from_env().await?;
     if config.telegram_token.is_empty()
         || config.deepgram_api_key.is_empty()
         || config.openrouter_api_key.is_empty()
@@ -391,7 +391,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let client = Client::new();
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(300))
+        .build()?;
     let api_url = std::env::var("TELOXIDE_API_URL")
         .unwrap_or_else(|_| "https://api.telegram.org".to_string());
     let api_url = api_url.trim_end_matches('/');

@@ -38,12 +38,12 @@ pub enum ConfigError {
 }
 
 impl AppConfig {
-    pub fn from_env() -> Result<Self, ConfigError> {
+    pub async fn from_env() -> Result<Self, ConfigError> {
         let execution_environment =
             std::env::var("EXECUTION_ENVIRONMENT").unwrap_or_else(|_| "local".to_string());
         let mut database_url = required("DATABASE_URL")?;
         if let Ok(path) = std::env::var("DATABASE_PASSWORD_FILE") {
-            let password = read_secret_file("DATABASE_PASSWORD", &path)?;
+            let password = read_secret_file("DATABASE_PASSWORD", &path).await?;
             let mut url = Url::parse(&database_url).map_err(|_| ConfigError::Invalid {
                 name: "DATABASE_URL",
                 value: "invalid URL".to_string(),
@@ -64,12 +64,12 @@ impl AppConfig {
             });
         }
         let postgres_acquire_timeout_secs = parse_env("POSTGRES_ACQUIRE_TIMEOUT_SECS", 5u64)?;
-        let telegram_token = secret_env("TELOXIDE_TOKEN")?;
-        let deepgram_api_key = secret_env("DEEPGRAM_API_KEY")?;
-        let openrouter_api_key = secret_env("OPENROUTER_API_KEY")?;
+        let telegram_token = secret_env("TELOXIDE_TOKEN").await?;
+        let deepgram_api_key = secret_env("DEEPGRAM_API_KEY").await?;
+        let openrouter_api_key = secret_env("OPENROUTER_API_KEY").await?;
         let openrouter_model =
             std::env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-6-luna".to_string());
-        let owner_chat_id = parse_secret_env("OWNER_CHAT_ID", 0i64)?;
+        let owner_chat_id = parse_secret_env("OWNER_CHAT_ID", 0i64).await?;
         let port = parse_env("PORT", 8080u16)?;
         let webhook_url = required("WEBHOOK_URL")?
             .parse()
@@ -106,16 +106,17 @@ fn required(name: &'static str) -> Result<String, ConfigError> {
     std::env::var(name).map_err(|_| ConfigError::Missing(name))
 }
 
-fn secret_env(name: &'static str) -> Result<String, ConfigError> {
+async fn secret_env(name: &'static str) -> Result<String, ConfigError> {
     let file_name = format!("{name}_FILE");
     match std::env::var(&file_name) {
-        Ok(path) => read_secret_file(name, &path),
+        Ok(path) => read_secret_file(name, &path).await,
         Err(_) => Ok(std::env::var(name).unwrap_or_default()),
     }
 }
 
-fn read_secret_file(name: &'static str, path: &str) -> Result<String, ConfigError> {
-    std::fs::read_to_string(path)
+async fn read_secret_file(name: &'static str, path: &str) -> Result<String, ConfigError> {
+    tokio::fs::read_to_string(path)
+        .await
         .map(|value| value.trim_end().to_string())
         .map_err(|source| ConfigError::SecretFile {
             name,
@@ -124,11 +125,11 @@ fn read_secret_file(name: &'static str, path: &str) -> Result<String, ConfigErro
         })
 }
 
-fn parse_secret_env<T>(name: &'static str, default: T) -> Result<T, ConfigError>
+async fn parse_secret_env<T>(name: &'static str, default: T) -> Result<T, ConfigError>
 where
     T: std::str::FromStr,
 {
-    let value = secret_env(name)?;
+    let value = secret_env(name).await?;
     if value.is_empty() {
         Ok(default)
     } else {

@@ -15,39 +15,16 @@ use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 use uuid::Uuid;
 
-fn response_error(kind: &str, message: impl ToString) -> Response {
-    Response::Error {
-        kind: kind.to_string(),
-        message: message.to_string(),
-    }
-}
-
-fn download_error(download_error: DownloadError) -> Response {
-    match download_error {
-        DownloadError::Timeout(seconds) => response_error("timeout", seconds),
-        DownloadError::MediaUnavailable(message) => response_error("unavailable", message),
-        DownloadError::ParsingFailed(message) => response_error("parsing", message),
-        DownloadError::CommandFailed(message) => response_error("command", message),
-    }
-}
-
-fn audio_error(audio_error: AudioExtractionError) -> Response {
-    match audio_error {
-        AudioExtractionError::Timeout(seconds) => response_error("timeout", seconds),
-        AudioExtractionError::ParseError(message) => response_error("parse", message),
-        AudioExtractionError::FfprobeError(message)
-        | AudioExtractionError::FfmpegError(message) => response_error("ffmpeg", message),
-    }
-}
-
 fn http_url(raw: &str) -> Result<Url, Response> {
-    let url = raw
-        .parse::<Url>()
-        .map_err(|_| response_error("command", "invalid URL"))?;
+    let url = raw.parse::<Url>().map_err(|_| Response::DownloadError {
+        error: DownloadError::CommandFailed("invalid URL".to_string()),
+    })?;
     if matches!(url.scheme(), "http" | "https") {
         Ok(url)
     } else {
-        Err(response_error("command", "only HTTP(S) URLs are supported"))
+        Err(Response::DownloadError {
+            error: DownloadError::CommandFailed("only HTTP(S) URLs are supported".to_string()),
+        })
     }
 }
 
@@ -90,7 +67,7 @@ async fn process_request(
                         info: Box::new(info),
                     },
                 })
-                .unwrap_or_else(download_error),
+                .unwrap_or_else(|error| Response::DownloadError { error }),
             Err(response) => response,
         },
         Ok(Request::Download { info, url }) => match http_url(&url) {
@@ -102,7 +79,7 @@ async fn process_request(
                         media: WireMedia::from(media),
                     },
                 })
-                .unwrap_or_else(download_error),
+                .unwrap_or_else(|error| Response::DownloadError { error }),
             Err(response) => response,
         },
         Ok(Request::ExtractAudio {
@@ -111,12 +88,15 @@ async fn process_request(
             author,
         }) => {
             let path = PathBuf::from(video_path);
-            let valid = path
-                .canonicalize()
+            let directory = tokio::fs::canonicalize(downloads_dir).await.ok();
+            let valid = tokio::fs::canonicalize(&path)
+                .await
                 .ok()
-                .is_some_and(|path| path.parent() == downloads_dir.canonicalize().ok().as_deref());
+                .is_some_and(|path| path.parent() == directory.as_deref());
             if !valid {
-                response_error("ffmpeg", "invalid video path")
+                Response::AudioError {
+                    error: AudioExtractionError::FfmpegError("invalid video path".to_string()),
+                }
             } else {
                 audio
                     .extract_audio(&path, title, author)
@@ -127,10 +107,12 @@ async fn process_request(
                             duration_secs: result.duration_secs,
                         },
                     })
-                    .unwrap_or_else(audio_error)
+                    .unwrap_or_else(|error| Response::AudioError { error })
             }
         }
-        Err(message) => response_error("command", format!("invalid downloader request: {message}")),
+        Err(message) => Response::DownloadError {
+            error: DownloadError::CommandFailed(format!("invalid downloader request: {message}")),
+        },
     }
 }
 
@@ -178,10 +160,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|value| value.parse().ok())
         .filter(|value: &usize| *value > 0)
         .unwrap_or(4);
-    std::fs::create_dir_all(socket.parent().ok_or("socket has no parent")?)?;
-    std::fs::create_dir_all(&downloads)?;
-    std::fs::create_dir_all(&audio_cache)?;
-    let _ = std::fs::remove_file(&socket);
+    tokio::fs::create_dir_all(socket.parent().ok_or("socket has no parent")?).await?;
+    tokio::fs::create_dir_all(&downloads).await?;
+    tokio::fs::create_dir_all(&audio_cache).await?;
+    let _ = tokio::fs::remove_file(&socket).await;
     let removed = cleanup_orphaned_downloads(&downloads).await;
     let downloader =
         Arc::new(YtDlpDownloader::new("yt-dlp".to_string(), downloads.clone(), sessions).await);

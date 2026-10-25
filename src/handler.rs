@@ -308,8 +308,10 @@ async fn send_media_group_step(
     let mut media_group: Vec<InputMedia> = Vec::new();
     let mut temp_resized: Vec<TempImage> = Vec::new();
 
-    for (i, item) in items.iter().enumerate() {
-        let item_caption = if i == 0 {
+    let mut last_item = None;
+    let mut last_path = None;
+    for item in items {
+        let item_caption = if media_group.is_empty() {
             caption.to_owned()
         } else {
             String::new()
@@ -317,6 +319,7 @@ async fn send_media_group_step(
 
         let media = match item.media_type {
             MediaType::Video => {
+                last_path = Some(item.filepath.clone());
                 let input_file = InputFile::file(&item.filepath);
                 InputMedia::Video(
                     InputMediaVideo::new(input_file)
@@ -347,6 +350,7 @@ async fn send_media_group_step(
                 if let Some(p) = resized {
                     temp_resized.push(p);
                 }
+                last_path = Some(path.clone());
                 InputMedia::Photo(
                     InputMediaPhoto::new(InputFile::file(path))
                         .parse_mode(ParseMode::Html)
@@ -354,6 +358,7 @@ async fn send_media_group_step(
                 )
             }
         };
+        last_item = Some(item);
         media_group.push(media);
     }
 
@@ -371,6 +376,32 @@ async fn send_media_group_step(
     }
 
     let result: Result<Vec<SentMedia>, teloxide::RequestError> = async {
+        if media_group.len() == 1
+            && let (Some(item), Some(path)) = (last_item, last_path.as_deref())
+        {
+            let (file_id, _) = match item.media_type {
+                MediaType::Video => {
+                    telegram_api
+                        .send_video(
+                            chat_id,
+                            message_id,
+                            path,
+                            caption,
+                            item.thumbnail_filepath.clone(),
+                        )
+                        .await?
+                }
+                MediaType::Photo => {
+                    telegram_api
+                        .send_photo(chat_id, message_id, path, caption)
+                        .await?
+                }
+            };
+            return Ok(vec![SentMedia {
+                file_id,
+                media_type: item.media_type,
+            }]);
+        }
         let mut sent = Vec::with_capacity(media_group.len());
         for chunk in telegram_album_chunks(&media_group) {
             sent.extend(
@@ -406,6 +437,26 @@ async fn send_media_group_step(
     }
 }
 
+#[derive(Debug)]
+struct CachedSendError {
+    error: teloxide::RequestError,
+    sent_any: bool,
+}
+
+impl CachedSendError {
+    fn can_redownload(&self) -> bool {
+        !self.sent_any
+            && matches!(
+                self.error,
+                teloxide::RequestError::Api(
+                    teloxide::ApiError::WrongFileId
+                        | teloxide::ApiError::WrongFileIdOrUrl
+                        | teloxide::ApiError::FileIdInvalid
+                )
+            )
+    }
+}
+
 /// Send cached media back to the user.
 /// Send cached media. For a single video returns `Ok(Some(sent_msg_id))` so the
 /// caller can attach premium buttons; all other cases return `Ok(None)`.
@@ -414,7 +465,7 @@ async fn send_cached_media(
     chat_id: ChatId,
     message_id: MessageId,
     telegram_api: &dyn TelegramApi,
-) -> Result<Option<MessageId>, ()> {
+) -> Result<Option<MessageId>, CachedSendError> {
     if cached.files.len() == 1 {
         let file = &cached.files[0];
         match file.media_type {
@@ -429,7 +480,10 @@ async fn send_cached_media(
                     }
                     Err(e) => {
                         log::error!("Failed to send cached video: {:?}", e);
-                        Err(())
+                        Err(CachedSendError {
+                            error: e,
+                            sent_any: false,
+                        })
                     }
                 }
             }
@@ -444,7 +498,10 @@ async fn send_cached_media(
                     }
                     Err(e) => {
                         log::error!("Failed to send cached photo: {:?}", e);
-                        Err(())
+                        Err(CachedSendError {
+                            error: e,
+                            sent_any: false,
+                        })
                     }
                 }
             }
@@ -457,7 +514,10 @@ async fn send_cached_media(
                 .await
             {
                 log::error!("Failed to send cached media group: {:?}", e);
-                return Err(());
+                return Err(CachedSendError {
+                    error: e,
+                    sent_any: i > 0,
+                });
             }
         }
         log::info!(
@@ -489,52 +549,67 @@ pub async fn process_download_request(
         let is_single_video =
             cached.files.len() == 1 && cached.files[0].media_type == MediaType::Video;
 
-        if is_single_video {
-            // If we stored an audio path but the file is gone, re-download from scratch.
-            let audio_file_missing = cached
-                .audio_cache_path
-                .as_deref()
-                .is_some_and(|p| !std::path::Path::new(p).exists());
-            if audio_file_missing {
-                log::warn!(
-                    "Cached audio file missing for {}, falling through to re-download",
-                    url
-                );
-            } else if let Ok(sent_message_id) =
-                send_cached_media(&cached, chat_id, message_id, telegram_api).await
-            {
-                storage
-                    .log_request(
-                        chat_id.0,
-                        cache_key,
-                        "cached",
-                        start.elapsed().as_millis() as i64,
-                    )
-                    .await;
-                return Some(DownloadContext {
-                    source_url: url.clone(),
-                    has_video: true,
-                    media_duration_secs: cached.media_duration_secs,
-                    audio_cache_path: cached.audio_cache_path.map(PathBuf::from),
-                    sent_message_id,
-                });
+        let audio_file_missing = if is_single_video {
+            if let Some(path) = cached.audio_cache_path.as_deref() {
+                match tokio::fs::try_exists(path).await {
+                    Ok(exists) => !exists,
+                    Err(error) => {
+                        log::error!("Cannot check cached audio {path}: {error}");
+                        return None;
+                    }
+                }
+            } else {
+                false
             }
-        } else if send_cached_media(&cached, chat_id, message_id, telegram_api)
-            .await
-            .is_ok()
-        {
-            storage
-                .log_request(
-                    chat_id.0,
-                    cache_key,
-                    "cached",
-                    start.elapsed().as_millis() as i64,
-                )
-                .await;
-            return None;
+        } else {
+            false
+        };
+        if audio_file_missing {
+            log::warn!(
+                "Cached audio file missing for {}, falling through to re-download",
+                url
+            );
+        } else {
+            match send_cached_media(&cached, chat_id, message_id, telegram_api).await {
+                Ok(sent_message_id) => {
+                    storage
+                        .log_request(
+                            chat_id.0,
+                            cache_key,
+                            "cached",
+                            start.elapsed().as_millis() as i64,
+                        )
+                        .await;
+                    return is_single_video.then(|| DownloadContext {
+                        source_url: url.clone(),
+                        has_video: true,
+                        media_duration_secs: cached.media_duration_secs,
+                        audio_cache_path: cached.audio_cache_path.map(PathBuf::from),
+                        sent_message_id,
+                    });
+                }
+                Err(error) if error.can_redownload() => {
+                    log::warn!(
+                        "Invalid cached file for {}, falling through to download: {:?}",
+                        url,
+                        error
+                    );
+                }
+                Err(error) => {
+                    // Delivery may already have happened; re-uploading could duplicate it.
+                    log::error!("Cached media send failed for {}: {:?}", url, error);
+                    storage
+                        .log_request(
+                            chat_id.0,
+                            cache_key,
+                            "error",
+                            start.elapsed().as_millis() as i64,
+                        )
+                        .await;
+                    return None;
+                }
+            }
         }
-        // Cache send failed — fall through to normal download
-        log::warn!("Cache send failed for {}, falling through to download", url);
     }
 
     let info =
@@ -823,6 +898,84 @@ mod tests {
             );
             assert_eq!(chunks.concat(), items);
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_first_photo_preserves_caption_and_sends_single_survivor() {
+        let dir = tempfile::tempdir().unwrap();
+        let rejected = dir.path().join("too-wide.png");
+        image::DynamicImage::new_rgb8(12_001, 1)
+            .save(&rejected)
+            .unwrap();
+        let items = vec![
+            DownloadedItem {
+                filepath: rejected,
+                media_type: MediaType::Photo,
+                thumbnail_filepath: None,
+            },
+            DownloadedItem {
+                filepath: PathBuf::from("/tmp/remaining.mp4"),
+                media_type: MediaType::Video,
+                thumbnail_filepath: None,
+            },
+        ];
+        let mut api = MockTelegramApi::new();
+        api.expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        api.expect_send_media_group().times(0);
+        api.expect_send_video()
+            .withf(|_, _, path, caption, _| {
+                path == std::path::Path::new("/tmp/remaining.mp4") && caption == "caption"
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(("video-id".into(), MessageId(7))));
+        let sent = send_media_group_step(&items, "caption", ChatId(1), MessageId(2), &api)
+            .await
+            .unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].file_id, "video-id");
+    }
+
+    #[tokio::test]
+    async fn rejected_first_photo_moves_album_caption_to_first_survivor() {
+        let dir = tempfile::tempdir().unwrap();
+        let rejected = dir.path().join("too-wide.png");
+        image::DynamicImage::new_rgb8(12_001, 1)
+            .save(&rejected)
+            .unwrap();
+        let items = vec![
+            DownloadedItem {
+                filepath: rejected,
+                media_type: MediaType::Photo,
+                thumbnail_filepath: None,
+            },
+            DownloadedItem {
+                filepath: PathBuf::from("/tmp/first.mp4"),
+                media_type: MediaType::Video,
+                thumbnail_filepath: None,
+            },
+            DownloadedItem {
+                filepath: PathBuf::from("/tmp/second.mp4"),
+                media_type: MediaType::Video,
+                thumbnail_filepath: None,
+            },
+        ];
+        let mut api = MockTelegramApi::new();
+        api.expect_send_text_message()
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        api.expect_send_media_group()
+            .withf(|_, _, media| media.len() == 2
+                && matches!(&media[0], InputMedia::Video(v) if v.caption.as_deref() == Some("caption"))
+                && matches!(&media[1], InputMedia::Video(v) if v.caption.as_deref() == Some("")))
+            .times(1)
+            .returning(|_, _, _| Ok(vec![]));
+        assert!(
+            send_media_group_step(&items, "caption", ChatId(1), MessageId(2), &api)
+                .await
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -1391,6 +1544,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ambiguous_cached_send_does_not_redownload() {
+        let downloader = MockDownloader::new();
+        let mut api = MockTelegramApi::new();
+        let mut storage = MockStorage::new();
+        storage.expect_get_cached_media().returning(|_| {
+            Some(CachedMedia {
+                caption: "caption".into(),
+                files: vec![crate::storage::CachedFile {
+                    telegram_file_id: "cached-id".into(),
+                    media_type: MediaType::Video,
+                }],
+                audio_cache_path: None,
+                media_duration_secs: None,
+            })
+        });
+        api.expect_send_cached_video()
+            .times(1)
+            .returning(|_, _, _, _| {
+                Err(teloxide::RequestError::InvalidJson {
+                    source: std::sync::Arc::new(
+                        serde_json::from_str::<serde_json::Value>("invalid").unwrap_err(),
+                    ),
+                    raw: "invalid".into(),
+                })
+            });
+        storage
+            .expect_log_request()
+            .withf(|_, _, status, _| status == "error")
+            .times(1)
+            .returning(|_, _, _, _| ());
+        let result = process_download_request(
+            &Url::parse("https://instagram.com/p/cached").unwrap(),
+            ChatId(1),
+            MessageId(2),
+            &downloader,
+            &api,
+            &storage,
+            &create_failing_audio_extractor(),
+        )
+        .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn partial_cached_album_does_not_redownload_after_invalid_file() {
+        let downloader = MockDownloader::new();
+        let mut api = MockTelegramApi::new();
+        let mut storage = MockStorage::new();
+        storage.expect_get_cached_media().returning(|_| {
+            Some(CachedMedia {
+                caption: "caption".into(),
+                files: (0..11)
+                    .map(|i| crate::storage::CachedFile {
+                        telegram_file_id: i.to_string(),
+                        media_type: MediaType::Video,
+                    })
+                    .collect(),
+                audio_cache_path: None,
+                media_duration_secs: None,
+            })
+        });
+        let mut sequence = mockall::Sequence::new();
+        api.expect_send_cached_media_group()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .returning(|_, _, _, _| Ok(()));
+        api.expect_send_cached_media_group()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .returning(|_, _, _, _| {
+                Err(teloxide::RequestError::Api(teloxide::ApiError::WrongFileId))
+            });
+        storage
+            .expect_log_request()
+            .withf(|_, _, status, _| status == "error")
+            .times(1)
+            .returning(|_, _, _, _| ());
+        let result = process_download_request(
+            &Url::parse("https://instagram.com/p/cached").unwrap(),
+            ChatId(1),
+            MessageId(2),
+            &downloader,
+            &api,
+            &storage,
+            &create_failing_audio_extractor(),
+        )
+        .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
     async fn test_cache_send_failure_falls_through_to_download() {
         let mut mock_downloader = MockDownloader::new();
         let mut mock_telegram_api = MockTelegramApi::new();
@@ -1414,9 +1658,7 @@ mod tests {
             .expect_send_cached_video()
             .times(1)
             .returning(|_, _, _, _| {
-                Err(teloxide::RequestError::Api(teloxide::ApiError::Unknown(
-                    "Bad Request: wrong file_id".to_string(),
-                )))
+                Err(teloxide::RequestError::Api(teloxide::ApiError::WrongFileId))
             });
 
         // Falls through to normal download pipeline
