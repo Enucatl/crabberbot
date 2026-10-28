@@ -72,7 +72,7 @@ impl OpenRouterSummarizer {
     ) -> reqwest::RequestBuilder {
         self.client
             .post(url)
-            .timeout(Duration::from_secs(45))
+            .timeout(Duration::from_secs(180))
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(body)
