@@ -112,6 +112,17 @@ uses an automatically assigned local port, and removes it on exit. SQLx creates
 an isolated database for each storage test. PostgreSQL is required to test the
 application's SQL and locking behavior; SQLite in memory is not interchangeable.
 
+The `Latest Dependencies` workflow runs daily at 00:40 UTC and can also be run
+manually. It uses the shared CI workflow to update dependencies within the
+constraints in `Cargo.toml`, then runs all test targets in disposable Rust and
+PostgreSQL 18 containers. The resolved `Cargo.lock` is uploaded as the
+`latest-deps-lockfile` artifact, including when tests fail. The checkout's
+lockfile and production deployment are unchanged. Run the same check locally:
+
+```bash
+bash scripts/test-latest-deps.sh /tmp/crabberbot-latest-deps
+```
+
 For a local Compose build, use the supplied override and test environment:
 
 ```bash
