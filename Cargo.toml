@@ -34,3 +34,7 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 mockall = "0.15"
 tempfile = "3"
+
+[patch.crates-io]
+# shortcut: Upstream is unmaintained, drop this pin when teloxide removes the dependency.
+proc-macro-error2 = { git = "https://github.com/GnomedDev/proc-macro-error-2", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }

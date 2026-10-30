@@ -19,3 +19,5 @@ cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-017
 `RUSTSEC-2023-0071` is ignored because it is reported through `rsa` via `sqlx-mysql`. This project only enables PostgreSQL support in `sqlx`, so the vulnerable MySQL code path is not built. Keep this exception narrow: remove the ignore if `sqlx` stops placing the optional MySQL dependency in `Cargo.lock`, or reassess it before enabling MySQL support.
 
 `RUSTSEC-2026-0173` is ignored because it is reported through `proc-macro-error2` via `aquamarine`, a documentation proc-macro pulled in by `teloxide`. It is an unmaintained warning, not a runtime vulnerability. Remove the ignore when `teloxide` stops depending on `aquamarine` or upgrades away from `proc-macro-error2`.
+
+The `Cargo.toml` patch pins [upstream's compiler compatibility fix](https://github.com/GnomedDev/proc-macro-error-2/pull/14) at commit `53ff94b61c678593158db1a3d50269c6f0de0db7`. It fixes `E0365` by making the re-exported `proc_macro` declaration public. This removes the future-compatibility warning but does not change the crate's unmaintained status, so the audit exception remains necessary.
