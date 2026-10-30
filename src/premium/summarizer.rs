@@ -4,10 +4,7 @@ use reqwest::StatusCode;
 use std::time::Duration;
 use thiserror::Error;
 
-use crate::retry::{
-    ProviderCooldown, RetryPolicy, retry_after_from_response, retry_async, retryable_status,
-    transient_reqwest_error,
-};
+use crate::retry::{self, ProviderCooldown, RetryPolicy};
 
 #[derive(Debug, Error)]
 pub enum SummarizationError {
@@ -81,7 +78,8 @@ impl OpenRouterSummarizer {
     async fn call_openrouter(
         &self,
         prompt: &str,
-    ) -> Result<(String, String, u64, u64, f64), SummarizationError> {
+        language: String,
+    ) -> Result<OpenRouterResult, SummarizationError> {
         self.cooldown
             .check()
             .await
@@ -124,15 +122,15 @@ impl OpenRouterSummarizer {
             self.model
         );
 
-        let response_result = retry_async(
+        let response_result = retry::retry_async(
             &self.retry_policy,
             || async {
                 let response = self.chat_completions_request(url, &body).send().await?;
                 let status = response.status();
-                if retryable_status(status) {
+                if retry::retryable_status(status) {
                     return Err(SummarizationError::RetryableApi {
                         status,
-                        retry_after: retry_after_from_response(&response),
+                        retry_after: retry::retry_after_from_response(&response),
                     });
                 }
                 Ok(response)
@@ -142,7 +140,7 @@ impl OpenRouterSummarizer {
                 _ => None,
             },
             |error| match error {
-                SummarizationError::HttpError(e) => transient_reqwest_error(e),
+                SummarizationError::HttpError(e) => retry::transient_reqwest_error(e),
                 SummarizationError::RetryableApi { .. } => true,
                 _ => false,
             },
@@ -208,13 +206,14 @@ impl OpenRouterSummarizer {
         let output_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
         let cost_usd = json["usage"]["cost"].as_f64().unwrap_or(0.0);
 
-        Ok((
-            result.transcript,
-            result.summary,
+        Ok(OpenRouterResult {
+            language,
+            transcript: result.transcript,
+            summary: result.summary,
             prompt_tokens,
             output_tokens,
             cost_usd,
-        ))
+        })
     }
 }
 
@@ -274,7 +273,10 @@ mod tests {
         );
         summarizer.retry_policy.max_attempts = 1;
 
-        let error = summarizer.call_openrouter("test").await.unwrap_err();
+        let error = summarizer
+            .call_openrouter("test", "en".to_string())
+            .await
+            .unwrap_err();
 
         assert!(!error.to_string().contains(SENTINEL_API_KEY));
     }
@@ -355,21 +357,15 @@ impl Summarizer for OpenRouterSummarizer {
             transcript.len(),
             language
         );
-        let (corrected_transcript, summary, prompt_tokens, output_tokens, cost_usd) =
-            self.call_openrouter(&prompt).await?;
+        let result = self
+            .call_openrouter(&prompt, language.unwrap_or_else(|| "und".to_string()))
+            .await?;
         log::info!(
             "OpenRouter transcript+summary: tokens in={} out={} cost=${:.6}",
-            prompt_tokens,
-            output_tokens,
-            cost_usd
+            result.prompt_tokens,
+            result.output_tokens,
+            result.cost_usd
         );
-        Ok(OpenRouterResult {
-            language: language.unwrap_or_else(|| "und".to_string()),
-            transcript: corrected_transcript,
-            summary,
-            prompt_tokens,
-            output_tokens,
-            cost_usd,
-        })
+        Ok(result)
     }
 }

@@ -5,12 +5,10 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, MessageKind};
 
 use crate::concurrency::ConcurrencyLimiter;
-use crate::handler::{CallbackContext, send_long_text};
+use crate::handler::{self, CallbackContext};
 use crate::premium::MAX_PREMIUM_FILE_DURATION_SECS;
 use crate::premium::summarizer::{OpenRouterResult, Summarizer};
-use crate::premium::transcriber::{
-    DeepgramUsage, Transcriber, speaker_count_from_diarized_transcript,
-};
+use crate::premium::transcriber::{self, DeepgramUsage, Transcriber};
 use crate::storage::{PaymentOrder, QuotaReservation, Storage};
 use crate::subscription::{
     PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_PRICE_STARS,
@@ -188,22 +186,20 @@ pub async fn handle_grant(
     // user_id and days are numeric; tier is not — so two-token ambiguity is unambiguous.
     let (target_user_id, tier_str, days) = match parts.as_slice() {
         [tier] => (self_uid(), *tier, 36500i64),
-        [a, b] if a.parse::<i64>().is_ok() => {
-            // user_id tier
-            (a.parse::<i64>().unwrap(), *b, 36500i64)
-        }
-        [tier, days_str] => {
-            // tier days
-            let d = match days_str.parse::<i64>() {
-                Ok(d) if d > 0 => d,
-                _ => {
-                    api.send_text_message(message.chat.id, message.id, USAGE)
-                        .await?;
-                    return Ok(());
-                }
-            };
-            (self_uid(), *tier, d)
-        }
+        [first, second] => match first.parse::<i64>() {
+            Ok(user_id) => (user_id, *second, 36500i64),
+            Err(_) => {
+                let days = match second.parse::<i64>() {
+                    Ok(days) if days > 0 => days,
+                    _ => {
+                        api.send_text_message(message.chat.id, message.id, USAGE)
+                            .await?;
+                        return Ok(());
+                    }
+                };
+                (self_uid(), *first, days)
+            }
+        },
         [user_id_str, tier, days_str] => {
             let uid = match user_id_str.parse::<i64>() {
                 Ok(id) => id,
@@ -862,7 +858,7 @@ pub async fn handle_callback_query(
         Err(_) => return Ok(()),
     };
 
-    let ctx = match storage.get_callback_context(context_id).await {
+    let ctx = match storage.get_callback_context(context_id).await? {
         Some(ctx) => ctx,
         None => {
             log_telegram_failure(
@@ -1167,7 +1163,7 @@ async fn handle_transcription(
     }
 
     // A failed send may have delivered a chunk; retain durable refund evidence.
-    if !send_long_text(chat_id, message_id, &result.transcript, api).await {
+    if !handler::send_long_text(chat_id, message_id, &result.transcript, api).await {
         storage.release_ai_seconds(user_id, reservation).await?;
         return Ok(());
     }
@@ -1228,7 +1224,7 @@ async fn handle_summarization(
     }
 
     // A failed send may have delivered a chunk; retain durable refund evidence.
-    if !send_long_text(chat_id, message_id, &result.summary, api).await {
+    if !handler::send_long_text(chat_id, message_id, &result.summary, api).await {
         storage.release_ai_seconds(user_id, reservation).await?;
         return Ok(());
     }
@@ -1332,7 +1328,7 @@ async fn prepare_ai_action(
                 ctx.transcript_language.clone(),
                 ctx.speaker_count
                     .map(|count| count as u32)
-                    .or_else(|| speaker_count_from_diarized_transcript(cached)),
+                    .or_else(|| transcriber::speaker_count_from_diarized_transcript(cached)),
                 None,
             )
         } else {
@@ -1545,6 +1541,52 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[tokio::test]
+    async fn callback_query_distinguishes_missing_context_from_database_failure() {
+        for database_failed in [false, true] {
+            let mut api = MockTelegramApi::new();
+            api.expect_answer_callback_query()
+                .times(1)
+                .returning(|_, _| Ok(()));
+            if !database_failed {
+                api.expect_send_text_message()
+                    .withf(|_, _, text| text.contains("expired"))
+                    .times(1)
+                    .returning(|_, _, _| Ok(()));
+            }
+            let mut storage = MockStorage::new();
+            storage
+                .expect_get_callback_context()
+                .times(1)
+                .returning(move |_| {
+                    if database_failed {
+                        Err(sqlx::Error::PoolClosed)
+                    } else {
+                        Ok(None)
+                    }
+                });
+
+            let result = handle_callback_query(
+                Bot::new("fake_token"),
+                Arc::new(api),
+                Arc::new(storage),
+                Arc::new(ConcurrencyLimiter::new()),
+                Arc::new(MockTranscriber::new()),
+                Arc::new(MockSummarizer::new()),
+                callback_query(100, 200),
+            )
+            .await;
+            if database_failed {
+                assert!(matches!(
+                    result,
+                    Err(CommandError::Storage(sqlx::Error::PoolClosed))
+                ));
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_callback_query_valid_context_continues() {
         let mut api = MockTelegramApi::new();
         let mut storage = MockStorage::new();
@@ -1558,7 +1600,7 @@ mod tests {
             .expect_get_callback_context()
             .withf(|id| *id == 42)
             .times(1)
-            .returning(|_| Some(callback_context(100, 200)));
+            .returning(|_| Ok(Some(callback_context(100, 200))));
 
         handle_callback_query(
             teloxide::Bot::new("fake_token"),
@@ -1583,7 +1625,7 @@ mod tests {
         storage
             .expect_get_callback_context()
             .times(1)
-            .returning(|_| Some(callback_context(101, 200)));
+            .returning(|_| Ok(Some(callback_context(101, 200))));
 
         handle_callback_query(
             teloxide::Bot::new("fake_token"),
@@ -1608,7 +1650,7 @@ mod tests {
         storage
             .expect_get_callback_context()
             .times(1)
-            .returning(|_| Some(callback_context(100, 201)));
+            .returning(|_| Ok(Some(callback_context(100, 201))));
 
         handle_callback_query(
             teloxide::Bot::new("fake_token"),
@@ -2114,6 +2156,48 @@ mod tests {
             detected_language: Some("en".to_string()),
             billed_duration_secs: 60.0,
             cost_usd: 60.0 * crate::premium::DEEPGRAM_COST_PER_SECOND,
+        }
+    }
+
+    #[tokio::test]
+    async fn grant_parses_two_token_forms_and_rejects_invalid_days() {
+        for (args, expected) in [
+            ("123 basic", Some((123, 36500))),
+            ("basic 7", Some((200, 7))),
+            ("basic 0", None),
+            ("basic invalid", None),
+        ] {
+            let mut storage = MockStorage::new();
+            let mut api = MockTelegramApi::new();
+            if let Some((user_id, days)) = expected {
+                storage
+                    .expect_upsert_subscription()
+                    .withf(move |user, tier, duration, _| {
+                        *user == user_id && *tier == SubscriptionTier::Basic && *duration == days
+                    })
+                    .times(1)
+                    .returning(|_, _, _, _| Ok(()));
+            }
+            api.expect_send_text_message()
+                .withf(move |_, _, text| {
+                    if expected.is_some() {
+                        text.starts_with("Granted")
+                    } else {
+                        text.starts_with("Usage:")
+                    }
+                })
+                .times(1)
+                .returning(|_, _, _| Ok(()));
+            handle_grant(
+                Arc::new(api),
+                make_message(base_message_json(200, 200)),
+                Arc::new(storage),
+                args.to_string(),
+                200,
+                teloxide::types::UpdateId(1),
+            )
+            .await
+            .unwrap();
         }
     }
 

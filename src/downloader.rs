@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::AbortHandle;
 
@@ -16,7 +15,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::validator::MAX_FILESIZE_BYTES;
-use crate::worker_protocol::{Request, Response, ResultData, read_frame, write_frame};
+use crate::worker_protocol::{self, Request, Response, ResultData};
 
 const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -146,6 +145,7 @@ fn take_caption_text<'a>(text: &'a str, budget: &mut usize) -> &'a str {
 }
 
 /// Allow only YouTube's video ID in public URLs and cache keys.
+#[must_use]
 pub fn clean_url(source_url: &Url) -> Url {
     let mut clean = source_url.clone();
     clean.set_query(None);
@@ -167,6 +167,7 @@ pub fn source_link(source_url: &Url) -> String {
 }
 
 /// Refresh the Source link in captions written before sharing-ID cleanup.
+#[must_use]
 pub fn clean_cached_caption(caption: &str) -> String {
     if let Some((before, after)) = caption.split_once("\">Source</a>")
         && let Some((prefix, href)) = before.rsplit_once("<a href=\"")
@@ -263,10 +264,10 @@ impl SocketDownloader {
             .map_err(|error| {
                 DownloadError::CommandFailed(format!("downloader worker unavailable: {error}"))
             })?;
-        write_frame(&mut stream, &request)
+        worker_protocol::write_frame(&mut stream, &request)
             .await
             .map_err(DownloadError::CommandFailed)?;
-        let frame = read_frame(&mut stream)
+        let frame = worker_protocol::read_frame(&mut stream)
             .await
             .map_err(DownloadError::CommandFailed)?;
         let response = serde_json::from_slice::<Response>(&frame)
@@ -332,7 +333,7 @@ impl Downloader for SocketDownloader {
 pub struct YtDlpDownloader {
     yt_dlp_path: String,
     download_dir: PathBuf,
-    session_limiter: Arc<Semaphore>,
+    session_limiter: Semaphore,
 }
 
 impl YtDlpDownloader {
@@ -351,7 +352,7 @@ impl YtDlpDownloader {
         Self {
             yt_dlp_path,
             download_dir,
-            session_limiter: Arc::new(Semaphore::new(max_sessions)),
+            session_limiter: Semaphore::new(max_sessions),
         }
     }
 
@@ -943,8 +944,8 @@ mod tests {
             let url = Url::parse("https://example.com/video").unwrap();
             let (actual, ()) = tokio::join!(downloader.get_media_metadata(&url), async {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                read_frame(&mut stream).await.unwrap();
-                write_frame(&mut stream, &Response::DownloadError { error })
+                worker_protocol::read_frame(&mut stream).await.unwrap();
+                worker_protocol::write_frame(&mut stream, &Response::DownloadError { error })
                     .await
                     .unwrap();
                 assert_eq!(stream.read_u8().await.unwrap(), 1);
@@ -1120,7 +1121,7 @@ mod tests {
         let downloader = YtDlpDownloader {
             yt_dlp_path: "/path/to/a/nonexistent/yt-dlp-binary".to_string(),
             download_dir: PathBuf::from("/downloads"),
-            session_limiter: Arc::new(Semaphore::new(4)),
+            session_limiter: Semaphore::new(4),
         };
 
         let url = Url::parse("https://example.com").unwrap();
@@ -1142,7 +1143,7 @@ mod tests {
         let downloader = YtDlpDownloader {
             yt_dlp_path: "yt-dlp".to_string(),
             download_dir: PathBuf::from("/downloads"),
-            session_limiter: Arc::new(Semaphore::new(2)),
+            session_limiter: Semaphore::new(2),
         };
 
         let first = downloader.session_limiter.try_acquire().unwrap();
@@ -1297,7 +1298,7 @@ mod tests {
         let downloader = YtDlpDownloader {
             yt_dlp_path: script.to_string_lossy().into_owned(),
             download_dir: temp_dir.path().to_path_buf(),
-            session_limiter: Arc::new(Semaphore::new(1)),
+            session_limiter: Semaphore::new(1),
         };
         let info = MediaInfo {
             id: "media".to_string(),

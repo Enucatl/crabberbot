@@ -46,7 +46,9 @@ pub struct QuotaReservation {
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait Storage: Send + Sync {
-    async fn get_cached_media(&self, source_url: &str) -> Option<CachedMedia>;
+    /// Returns `None` for a cache miss or an entry without usable files; database failures are errors.
+    async fn get_cached_media(&self, source_url: &str) -> Result<Option<CachedMedia>, sqlx::Error>;
+    /// Replaces a cache entry and its file list in one transaction.
     async fn store_cached_media(
         &self,
         source_url: &str,
@@ -54,7 +56,7 @@ pub trait Storage: Send + Sync {
         files: &[(String, MediaType)],
         audio_cache_path: Option<String>,
         media_duration_secs: Option<i32>,
-    );
+    ) -> Result<(), sqlx::Error>;
     async fn log_request(
         &self,
         chat_id: i64,
@@ -86,11 +88,14 @@ pub trait Storage: Send + Sync {
     ) -> Result<bool, sqlx::Error>;
 
     // AI Seconds tracking
+    /// Atomically removes credit, returning `None` for nonpositive seconds or insufficient balance.
+    /// Release the returned reservation once if the action fails before delivery.
     async fn reserve_ai_seconds(
         &self,
         user_id: i64,
         seconds: i32,
     ) -> Result<Option<QuotaReservation>, sqlx::Error>;
+    /// Restores the reservation's exact monthly/top-up split; call at most once per reservation.
     async fn release_ai_seconds(
         &self,
         user_id: i64,
@@ -108,8 +113,13 @@ pub trait Storage: Send + Sync {
     ) -> Result<(), sqlx::Error>;
 
     // Callback context
-    async fn store_callback_context(&self, ctx: &CallbackContext) -> i32;
-    async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext>;
+    /// Returns the persisted ID only after insertion succeeds.
+    async fn store_callback_context(&self, ctx: &CallbackContext) -> Result<i32, sqlx::Error>;
+    /// Returns `None` only when no context exists; database failures are errors.
+    async fn get_callback_context(
+        &self,
+        context_id: i32,
+    ) -> Result<Option<CallbackContext>, sqlx::Error>;
     async fn cache_transcript(
         &self,
         context_id: i32,
@@ -210,42 +220,34 @@ impl PostgresStorage {
 
 #[async_trait]
 impl Storage for PostgresStorage {
-    async fn get_cached_media(&self, source_url: &str) -> Option<CachedMedia> {
+    async fn get_cached_media(&self, source_url: &str) -> Result<Option<CachedMedia>, sqlx::Error> {
         let cache_row: Option<(i32, String, Option<String>, Option<i32>)> = sqlx::query_as(
             "SELECT id, caption, audio_cache_path, media_duration_secs \
                  FROM media_cache WHERE source_url = $1",
         )
         .bind(source_url)
         .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| {
-            log::error!("Cache lookup failed: {}", e);
-            e
-        })
-        .ok()?;
+        .await?;
 
-        let (cache_id, caption, audio_cache_path, media_duration_secs) = cache_row?;
+        let Some((cache_id, caption, audio_cache_path, media_duration_secs)) = cache_row else {
+            return Ok(None);
+        };
 
         // Update last_used_at
-        let _ = sqlx::query("UPDATE media_cache SET last_used_at = NOW() WHERE id = $1")
+        sqlx::query("UPDATE media_cache SET last_used_at = NOW() WHERE id = $1")
             .bind(cache_id)
             .execute(&self.pool)
-            .await;
+            .await?;
 
         let file_rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT telegram_file_id, media_type FROM cached_files WHERE cache_id = $1 ORDER BY position",
         )
         .bind(cache_id)
         .fetch_all(&self.pool)
-        .await
-        .map_err(|e| {
-            log::error!("Cache files lookup failed: {}", e);
-            e
-        })
-        .ok()?;
+        .await?;
 
         if file_rows.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         let files: Vec<CachedFile> = file_rows
@@ -260,15 +262,15 @@ impl Storage for PostgresStorage {
             .collect();
 
         if files.is_empty() {
-            return None;
+            return Ok(None);
         }
 
-        Some(CachedMedia {
+        Ok(Some(CachedMedia {
             caption,
             files,
             audio_cache_path,
             media_duration_secs,
-        })
+        }))
     }
 
     async fn store_cached_media(
@@ -278,16 +280,10 @@ impl Storage for PostgresStorage {
         files: &[(String, MediaType)],
         audio_cache_path: Option<String>,
         media_duration_secs: Option<i32>,
-    ) {
-        let mut tx = match self.pool.begin().await {
-            Ok(tx) => tx,
-            Err(e) => {
-                log::error!("Failed to begin transaction for {}: {}", source_url, e);
-                return;
-            }
-        };
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
 
-        let result: Result<(i32,), _> = sqlx::query_as(
+        let (cache_id,): (i32,) = sqlx::query_as(
             "INSERT INTO media_cache (source_url, caption, audio_cache_path, media_duration_secs) \
              VALUES ($1, $2, $3, $4) \
              ON CONFLICT (source_url) DO UPDATE \
@@ -299,32 +295,16 @@ impl Storage for PostgresStorage {
         .bind(audio_cache_path)
         .bind(media_duration_secs)
         .fetch_one(&mut *tx)
-        .await;
-
-        let cache_id = match result {
-            Ok((id,)) => id,
-            Err(e) => {
-                log::error!("Failed to store cache entry for {}: {}", source_url, e);
-                return;
-            }
-        };
+        .await?;
 
         // Delete old files for this cache entry (in case of ON CONFLICT update)
-        if let Err(e) = sqlx::query("DELETE FROM cached_files WHERE cache_id = $1")
+        sqlx::query("DELETE FROM cached_files WHERE cache_id = $1")
             .bind(cache_id)
             .execute(&mut *tx)
-            .await
-        {
-            log::error!(
-                "Failed to delete old cached files for {}: {}",
-                source_url,
-                e
-            );
-            return;
-        }
+            .await?;
 
         for (position, (file_id, media_type)) in files.iter().enumerate() {
-            if let Err(e) = sqlx::query(
+            sqlx::query(
                 "INSERT INTO cached_files (cache_id, telegram_file_id, media_type, position) \
                  VALUES ($1, $2, $3, $4)",
             )
@@ -333,23 +313,13 @@ impl Storage for PostgresStorage {
             .bind(media_type.to_string())
             .bind(position as i32)
             .execute(&mut *tx)
-            .await
-            {
-                log::error!("Failed to store cached file: {}", e);
-                return;
-            }
+            .await?;
         }
 
-        if let Err(e) = tx.commit().await {
-            log::error!(
-                "Failed to commit cache transaction for {}: {}",
-                source_url,
-                e
-            );
-            return;
-        }
+        tx.commit().await?;
 
         log::info!("Cached {} file(s) for {}", files.len(), source_url);
+        Ok(())
     }
 
     async fn log_request(
@@ -609,8 +579,8 @@ impl Storage for PostgresStorage {
         Ok(())
     }
 
-    async fn store_callback_context(&self, ctx: &CallbackContext) -> i32 {
-        let result: Result<(i32,), _> = sqlx::query_as(
+    async fn store_callback_context(&self, ctx: &CallbackContext) -> Result<i32, sqlx::Error> {
+        sqlx::query_scalar(
             "INSERT INTO callback_contexts (source_url, chat_id, user_id, has_video, media_duration_secs, audio_cache_path) \
              VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         )
@@ -621,31 +591,14 @@ impl Storage for PostgresStorage {
         .bind(ctx.media_duration_secs)
         .bind(&ctx.audio_cache_path)
         .fetch_one(&self.pool)
-        .await;
-
-        match result {
-            Ok((id,)) => id,
-            Err(e) => {
-                log::error!("Failed to store callback context: {}", e);
-                0
-            }
-        }
+        .await
     }
 
-    async fn get_callback_context(&self, context_id: i32) -> Option<CallbackContext> {
-        let row: Option<(
-            String,
-            i64,
-            i64,
-            bool,
-            Option<i32>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<i32>,
-            Option<String>,
-        )> = sqlx::query_as(
+    async fn get_callback_context(
+        &self,
+        context_id: i32,
+    ) -> Result<Option<CallbackContext>, sqlx::Error> {
+        sqlx::query_as(
             "SELECT source_url, chat_id, user_id, has_video, media_duration_secs, audio_cache_path, \
              transcript, transcript_language, summary, speaker_count, raw_transcript \
              FROM callback_contexts WHERE id = $1",
@@ -653,42 +606,6 @@ impl Storage for PostgresStorage {
         .bind(context_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| {
-            log::error!("Failed to get callback context {}: {}", context_id, e);
-            e
-        })
-        .ok()
-        .flatten();
-
-        row.map(
-            |(
-                source_url,
-                chat_id,
-                user_id,
-                has_video,
-                media_duration_secs,
-                audio_cache_path,
-                transcript,
-                transcript_language,
-                summary,
-                speaker_count,
-                raw_transcript,
-            )| {
-                CallbackContext {
-                    source_url,
-                    chat_id,
-                    user_id,
-                    has_video,
-                    media_duration_secs,
-                    audio_cache_path,
-                    transcript,
-                    transcript_language,
-                    summary,
-                    speaker_count,
-                    raw_transcript,
-                }
-            },
-        )
     }
 
     async fn cache_transcript(
@@ -886,6 +803,8 @@ impl Storage for PostgresStorage {
 #[cfg(test)]
 mod tests {
     use super::{PaymentOrder, PostgresStorage, QuotaReservation, Storage};
+    use crate::downloader::MediaType;
+    use crate::handler::CallbackContext;
     use crate::subscription::{
         PRODUCT_SUB_BASIC, PRODUCT_SUB_PRO, PRODUCT_TOPUP_60, SubscriptionTier, TOPUP_SECONDS,
     };
@@ -896,6 +815,97 @@ mod tests {
             paid_at: chrono::Utc::now(),
             update_id: 0,
         }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn cache_and_callback_storage_distinguish_missing_rows_from_database_failures(
+        pool: PgPool,
+    ) {
+        let storage = PostgresStorage::new(pool.clone());
+        let ctx = CallbackContext {
+            source_url: "https://example.com/video".to_string(),
+            chat_id: 7,
+            user_id: 42,
+            has_video: true,
+            media_duration_secs: Some(60),
+            audio_cache_path: Some("/downloads/audio_cache/video.mp3".to_string()),
+            transcript: None,
+            transcript_language: None,
+            raw_transcript: None,
+            summary: None,
+            speaker_count: None,
+        };
+        assert!(storage.get_callback_context(1).await.unwrap().is_none());
+        assert!(
+            storage
+                .get_cached_media(&ctx.source_url)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let id = storage.store_callback_context(&ctx).await.unwrap();
+        storage
+            .cache_transcript(id, "raw speech", Some("en".to_string()), Some(2))
+            .await;
+        storage
+            .cache_ai_result(id, "corrected speech", "it", "summary", 3)
+            .await;
+        let stored = storage.get_callback_context(id).await.unwrap().unwrap();
+        assert_eq!(stored.source_url, ctx.source_url);
+        assert_eq!(stored.chat_id, ctx.chat_id);
+        assert_eq!(stored.user_id, ctx.user_id);
+        assert_eq!(stored.has_video, ctx.has_video);
+        assert_eq!(stored.media_duration_secs, ctx.media_duration_secs);
+        assert_eq!(stored.audio_cache_path, ctx.audio_cache_path);
+        assert_eq!(stored.raw_transcript.as_deref(), Some("raw speech"));
+        assert_eq!(stored.transcript.as_deref(), Some("corrected speech"));
+        assert_eq!(stored.transcript_language.as_deref(), Some("it"));
+        assert_eq!(stored.summary.as_deref(), Some("summary"));
+        assert_eq!(stored.speaker_count, Some(3));
+
+        let files = vec![("telegram-video".to_string(), MediaType::Video)];
+        storage
+            .store_cached_media(
+                &ctx.source_url,
+                "caption",
+                &files,
+                ctx.audio_cache_path.clone(),
+                Some(60),
+            )
+            .await
+            .unwrap();
+        let cached = storage
+            .get_cached_media(&ctx.source_url)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached.caption, "caption");
+        assert_eq!(cached.files.len(), 1);
+        assert_eq!(cached.files[0].telegram_file_id, files[0].0);
+        assert_eq!(cached.files[0].media_type, files[0].1);
+        assert_eq!(cached.audio_cache_path, ctx.audio_cache_path);
+        assert_eq!(cached.media_duration_secs, Some(60));
+
+        pool.close().await;
+        assert!(matches!(
+            storage.get_callback_context(id).await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        assert!(matches!(
+            storage.store_callback_context(&ctx).await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        assert!(matches!(
+            storage.get_cached_media(&ctx.source_url).await,
+            Err(sqlx::Error::PoolClosed)
+        ));
+        assert!(matches!(
+            storage
+                .store_cached_media(&ctx.source_url, "caption", &files, None, None)
+                .await,
+            Err(sqlx::Error::PoolClosed)
+        ));
     }
 
     #[sqlx::test(migrations = "./migrations")]

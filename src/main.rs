@@ -1,11 +1,9 @@
-use axum::{
-    body::{Body, to_bytes},
-    extract::{Request, State},
-    http::StatusCode,
-    middleware::{Next, from_fn_with_state},
-    response::{IntoResponse, Response},
-    routing::get,
-};
+use axum::body::{self, Body};
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing;
 use log::LevelFilter;
 use std::collections::HashSet;
 use std::io::Write;
@@ -46,7 +44,7 @@ async fn persist_payment_update(
     next: Next,
 ) -> Response {
     let (parts, body) = request.into_parts();
-    let bytes = match to_bytes(body, 1024 * 1024).await {
+    let bytes = match body::to_bytes(body, 1024 * 1024).await {
         Ok(bytes) => bytes,
         Err(error) => {
             log::warn!("Cannot read webhook update: {}", error);
@@ -359,10 +357,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .acquire_timeout(config.postgres_acquire_timeout)
         .connect(&config.database_url)
         .await
-        .expect("Failed to connect to database");
+        .inspect_err(|error| log::error!("Failed to connect to database: {}", error))?;
     PostgresStorage::run_migrations(&pool)
         .await
-        .expect("Failed to run database migrations");
+        .inspect_err(|error| log::error!("Failed to run database migrations: {}", error))?;
     log::info!("Database connected and migrations applied.");
     let storage: Arc<dyn Storage> = Arc::new(PostgresStorage::new(pool.clone()));
 
@@ -398,8 +396,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_url = std::env::var("TELOXIDE_API_URL")
         .unwrap_or_else(|_| "https://api.telegram.org".to_string());
     let api_url = api_url.trim_end_matches('/');
-    let bot = Bot::with_client(config.telegram_token.clone(), client.clone())
-        .set_api_url(Url::parse(api_url).expect("Invalid TELOXIDE_API_URL"));
+    let api_url = Url::parse(api_url)
+        .inspect_err(|error| log::error!("Invalid TELOXIDE_API_URL: {}", error))?;
+    let bot = Bot::with_client(config.telegram_token.clone(), client.clone()).set_api_url(api_url);
 
     let downloader: Arc<dyn Downloader> =
         Arc::new(SocketDownloader::new(config.downloader_socket.clone()));
@@ -427,13 +426,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         teloxide::update_listeners::webhooks::Options::new(addr, url.clone()),
     )
     .await
-    .expect("Failed to set webhook");
+    .inspect_err(|error| log::error!("Failed to set webhook: {}", error))?;
     let stop_token = listener.stop_token();
     let app = app
-        .layer(from_fn_with_state(pool.clone(), persist_payment_update))
+        .layer(middleware::from_fn_with_state(
+            pool.clone(),
+            persist_payment_update,
+        ))
         .route(
             "/healthz",
-            get({
+            routing::get({
                 let pool = pool.clone();
                 move || {
                     let pool = pool.clone();
@@ -449,29 +451,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }),
         );
+    let tcp_listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .inspect_err(|error| log::error!("Couldn't bind to the address: {}", error))?;
     tokio::spawn(async move {
-        let tcp_listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .inspect_err(|_| stop_token.stop())
-            .expect("Couldn't bind to the address");
-        axum::serve(tcp_listener, app)
+        if let Err(error) = axum::serve(tcp_listener, app)
             .with_graceful_shutdown(stop_flag)
             .await
-            .inspect_err(|_| stop_token.stop())
-            .expect("Axum server error");
+        {
+            log::error!("Axum server error: {}", error);
+            stop_token.stop();
+        }
     });
     log::info!("Successfully set webhook {}", url);
 
     bot.set_my_commands(Command::bot_commands())
         .await
-        .expect("Failed to set bot commands.");
+        .inspect_err(|error| log::error!("Failed to set bot commands: {}", error))?;
     log::info!("Successfully set bot commands.");
 
     let bot_description = "Your friendly media downloader from various platforms like Instagram, TikTok, YouTube, and more!";
     bot.set_my_description()
         .description(bot_description)
         .await
-        .expect("Failed to set bot description.");
+        .inspect_err(|error| log::error!("Failed to set bot description: {}", error))?;
     log::info!("Successfully set bot description.");
 
     let bot_name = if config.webhook_url.as_str().contains("test") {
@@ -586,8 +589,17 @@ async fn cleanup_audio_cache(pool: &sqlx::PgPool, audio_cache_dir: &std::path::P
                     && let Ok(modified) = metadata.modified()
                     && modified.elapsed().unwrap_or_default() > Duration::from_secs(7200)
                 {
-                    let _ = tokio::fs::remove_file(&path).await;
-                    log::info!("Removed orphaned audio cache: {:?}", path);
+                    match tokio::fs::remove_file(&path).await {
+                        Ok(()) => log::info!("Removed orphaned audio cache: {:?}", path),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            log::warn!(
+                                "Failed to remove orphaned audio cache {:?}: {}",
+                                path,
+                                error
+                            );
+                        }
+                    }
                 }
             }
             Ok(None) => break,
@@ -700,7 +712,10 @@ mod payment_webhook_tests {
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                app.layer(from_fn_with_state(intake_pool, persist_payment_update)),
+                app.layer(middleware::from_fn_with_state(
+                    intake_pool,
+                    persist_payment_update,
+                )),
             )
             .await
             .unwrap();

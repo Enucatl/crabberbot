@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -7,7 +6,7 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 
-use crate::worker_protocol::{Request, Response, ResultData, read_frame, write_frame};
+use crate::worker_protocol::{self, Request, Response, ResultData};
 
 #[derive(Debug, Error, Serialize, Deserialize)]
 pub enum AudioExtractionError {
@@ -61,7 +60,7 @@ impl AudioExtractor for SocketAudioExtractor {
             .map_err(|error| {
                 AudioExtractionError::FfmpegError(format!("downloader worker unavailable: {error}"))
             })?;
-        write_frame(
+        worker_protocol::write_frame(
             &mut stream,
             &Request::ExtractAudio {
                 video_path: video_path.to_string_lossy().into_owned(),
@@ -71,7 +70,7 @@ impl AudioExtractor for SocketAudioExtractor {
         )
         .await
         .map_err(AudioExtractionError::FfmpegError)?;
-        let frame = read_frame(&mut stream)
+        let frame = worker_protocol::read_frame(&mut stream)
             .await
             .map_err(AudioExtractionError::FfmpegError)?;
         let response = serde_json::from_slice::<Response>(&frame)
@@ -103,14 +102,14 @@ impl AudioExtractor for SocketAudioExtractor {
 }
 
 pub struct FfmpegAudioExtractor {
-    semaphore: Arc<Semaphore>,
+    semaphore: Semaphore,
     audio_cache_dir: PathBuf,
 }
 
 impl FfmpegAudioExtractor {
     pub fn new(permits: usize, audio_cache_dir: PathBuf) -> Self {
         Self {
-            semaphore: Arc::new(Semaphore::new(permits)),
+            semaphore: Semaphore::new(permits),
             audio_cache_dir,
         }
     }
@@ -250,8 +249,8 @@ mod tests {
                 extractor.extract_audio(Path::new("/downloads/video.mp4"), None, None),
                 async {
                     let (mut stream, _) = listener.accept().await.unwrap();
-                    read_frame(&mut stream).await.unwrap();
-                    write_frame(&mut stream, &Response::AudioError { error })
+                    worker_protocol::read_frame(&mut stream).await.unwrap();
+                    worker_protocol::write_frame(&mut stream, &Response::AudioError { error })
                         .await
                         .unwrap();
                     assert_eq!(stream.read_u8().await.unwrap(), 1);

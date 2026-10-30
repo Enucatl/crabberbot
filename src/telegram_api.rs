@@ -5,18 +5,16 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use image::GenericImageView;
+use teloxide::prelude::*;
 use teloxide::sugar::request::RequestReplyExt;
-use teloxide::{
-    prelude::*,
-    types::{
-        ChatAction, ChatId, InlineKeyboardMarkup, InputFile, InputMedia, InputMediaPhoto,
-        InputMediaVideo, MessageId, ParseMode, ReactionType, TelegramTransactionId, UserId,
-    },
+use teloxide::types::{
+    ChatAction, ChatId, InlineKeyboardMarkup, InputFile, InputMedia, InputMediaPhoto,
+    InputMediaVideo, MessageId, ParseMode, ReactionType, TelegramTransactionId, UserId,
 };
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::downloader::MediaType;
-use crate::retry::{RetryPolicy, retry_async};
+use crate::retry::{self, RetryPolicy};
 use crate::storage::CachedFile;
 
 static IMAGE_JOBS: Semaphore = Semaphore::const_new(2);
@@ -367,7 +365,7 @@ impl TeloxideApi {
         Fut: std::future::Future<Output = Result<T, teloxide::RequestError>>,
     {
         let limiter = self.limiter.clone();
-        retry_async(
+        retry::retry_async(
             &self.retry_policy,
             || {
                 let limiter = limiter.clone();
