@@ -41,7 +41,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates libexpat1 \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir "setuptools>=78.1.1" "msgpack>=1.2.1" \
-        requests brotli \
+        "curl-cffi==0.17.0" requests brotli \
     && useradd --uid 1000 --create-home --shell /bin/bash appuser \
     && mkdir /downloads /downloader && chown appuser:appuser /downloads /downloader
 USER appuser
