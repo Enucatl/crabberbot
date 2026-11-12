@@ -152,9 +152,9 @@ impl Transcriber for DeepgramTranscriber {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
-            if body.len() + chunk.len() > 1024 * 1024 {
+            if body.len() + chunk.len() > 32 * 1024 * 1024 {
                 return Err(TranscriptionError::ApiError(
-                    "response exceeded 1 MiB".to_string(),
+                    "response exceeded 32 MiB".to_string(),
                 ));
             }
             body.extend_from_slice(&chunk);
